@@ -1,0 +1,390 @@
+"""データ取り込みと同期（詳細設計/01）。
+
+決定事項:
+- docs は git clone / pull。ファイル単位の content ハッシュを doc_files に保持し、
+  変化したファイルだけ再チャンク・再埋め込みする。削除されたファイルの索引も消す。
+- issue/PR は REST API の repo 横断エンドポイント＋ `since`（updated_at カーソル）で差分同期:
+    - GET /repos/{o}/{r}/issues            (PR を含む。本文)
+    - GET /repos/{o}/{r}/issues/comments    (issue/PR コメント)
+    - GET /repos/{o}/{r}/pulls/comments     (レビューコメント。path/line/diff_hunk 付き)
+- bot コメント（user.type == "Bot" または login が "[bot]" で終わる）は索引から除外する。
+  生データは issue_items に is_bot=true で保持する（read_issue では表示する）。
+- PR の diff 自体は索引しない。レビューコメントには diff_hunk を文脈として付与する。
+"""
+
+from __future__ import annotations
+
+import hashlib
+import logging
+import os
+import subprocess
+
+import httpx
+import psycopg
+
+from .chunking import detect_language, split_issue_text, split_markdown
+from .config import Settings
+from .db import delete_chunks_by_key, get_cursor, insert_chunk, set_cursor
+from .embedding import Embedder
+
+log = logging.getLogger(__name__)
+
+API = "https://api.github.com"
+
+
+def _is_bot(user: dict | None) -> bool:
+    if not user:
+        return False
+    login = (user.get("login") or "").lower()
+    return user.get("type") == "Bot" or login.endswith("[bot]")
+
+
+# ---------------------------------------------------------------------------
+# docs (git)
+# ---------------------------------------------------------------------------
+
+
+def _git(args: list[str], cwd: str | None = None) -> str:
+    out = subprocess.run(
+        ["git", *args], cwd=cwd, check=True, capture_output=True, text=True
+    )
+    return out.stdout.strip()
+
+
+def _clone_url(repo: str, token: str | None) -> str:
+    if token:
+        return f"https://x-access-token:{token}@github.com/{repo}.git"
+    return f"https://github.com/{repo}.git"
+
+
+def sync_docs(
+    settings: Settings, conn: psycopg.Connection, embedder: Embedder, repo: str
+) -> int:
+    """リポジトリの Markdown を同期し、変化分だけ索引する。返り値は更新ファイル数。"""
+    repo_dir = settings.repo_dir(repo)
+    if os.path.isdir(os.path.join(repo_dir, ".git")):
+        _git(["fetch", "--depth=1", "origin"], cwd=repo_dir)
+        _git(["reset", "--hard", "origin/HEAD"], cwd=repo_dir)
+    else:
+        os.makedirs(os.path.dirname(repo_dir), exist_ok=True)
+        _git(["clone", "--depth=1", _clone_url(repo, settings.github_token), repo_dir])
+    head = _git(["rev-parse", "HEAD"], cwd=repo_dir)
+
+    # 現在のファイル集合と既存索引を突き合わせる
+    current: dict[str, str] = {}
+    for root, dirs, files in os.walk(repo_dir):
+        dirs[:] = [d for d in dirs if d != ".git"]
+        for f in files:
+            if not f.lower().endswith((".md", ".mdx", ".markdown")):
+                continue
+            abspath = os.path.join(root, f)
+            rel = os.path.relpath(abspath, repo_dir)
+            with open(abspath, "rb") as fp:
+                current[rel] = hashlib.sha256(fp.read()).hexdigest()
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT path, content_sha FROM doc_files WHERE repo = %s", (repo,))
+        indexed = dict(cur.fetchall())
+
+    removed = set(indexed) - set(current)
+    changed = [p for p, sha in current.items() if indexed.get(p) != sha]
+
+    for path in removed:
+        delete_chunks_by_key(conn, f"doc:{repo}:{path}")
+        with conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM doc_files WHERE repo = %s AND path = %s", (repo, path)
+            )
+
+    default_branch = _git(
+        ["rev-parse", "--abbrev-ref", "origin/HEAD"], cwd=repo_dir
+    ).split("/")[-1]
+
+    for path in changed:
+        with open(os.path.join(repo_dir, path), encoding="utf-8", errors="replace") as fp:
+            text = fp.read()
+        language = detect_language(text)
+        chunks = split_markdown(text, settings.chunk_max_chars)
+        chunk_key = f"doc:{repo}:{path}"
+        delete_chunks_by_key(conn, chunk_key)
+        if chunks:
+            vectors = embedder.embed_passages([c.content for c in chunks])
+            for c, v in zip(chunks, vectors):
+                anchor = ""
+                if c.heading_path:
+                    last = c.heading_path.split(" > ")[-1]
+                    anchor = "#" + last.lower().replace(" ", "-")
+                insert_chunk(
+                    conn,
+                    chunk_key=chunk_key,
+                    chunk_index=c.chunk_index,
+                    source_type="doc",
+                    repo=repo,
+                    path=path,
+                    language=language,
+                    heading_path=c.heading_path,
+                    content=c.content,
+                    embedding=v,
+                    url=f"https://github.com/{repo}/blob/{default_branch}/{path}{anchor}",
+                )
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO doc_files (repo, path, content_sha, language)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (repo, path) DO UPDATE
+                SET content_sha = EXCLUDED.content_sha, language = EXCLUDED.language
+                """,
+                (repo, path, current[path], language),
+            )
+        conn.commit()
+        log.info("indexed doc %s (%d chunks)", path, len(chunks))
+
+    conn.commit()
+    set_cursor(conn, repo, "docs", head)
+    return len(changed) + len(removed)
+
+
+# ---------------------------------------------------------------------------
+# issues / PR (GitHub API)
+# ---------------------------------------------------------------------------
+
+
+def _api_pages(
+    client: httpx.Client, url: str, params: dict
+) -> "list[dict]":
+    """Link ヘッダに従って全ページを集める。"""
+    items: list[dict] = []
+    while url:
+        resp = client.get(url, params=params)
+        resp.raise_for_status()
+        items.extend(resp.json())
+        url = resp.links.get("next", {}).get("url")
+        params = {}  # next URL に含まれる
+    return items
+
+
+def _upsert_issue_item(conn: psycopg.Connection, row: dict) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO issue_items (
+                repo, issue_no, comment_id, kind, title, author, is_bot,
+                state, path, line, body, url, created_at, updated_at
+            ) VALUES (
+                %(repo)s, %(issue_no)s, %(comment_id)s, %(kind)s, %(title)s,
+                %(author)s, %(is_bot)s, %(state)s, %(path)s, %(line)s,
+                %(body)s, %(url)s, %(created_at)s, %(updated_at)s
+            )
+            ON CONFLICT (repo, issue_no, comment_id) DO UPDATE SET
+                kind = EXCLUDED.kind, title = EXCLUDED.title,
+                author = EXCLUDED.author, is_bot = EXCLUDED.is_bot,
+                state = EXCLUDED.state, path = EXCLUDED.path,
+                line = EXCLUDED.line, body = EXCLUDED.body,
+                url = EXCLUDED.url, created_at = EXCLUDED.created_at,
+                updated_at = EXCLUDED.updated_at
+            """,
+            row,
+        )
+
+
+def _issue_title_state(
+    conn: psycopg.Connection, repo: str, issue_no: int
+) -> tuple[str | None, str | None]:
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT title, state FROM issue_items "
+            "WHERE repo = %s AND issue_no = %s AND comment_id = 0",
+            (repo, issue_no),
+        )
+        row = cur.fetchone()
+    return (row[0], row[1]) if row else (None, None)
+
+
+def _index_item(
+    settings: Settings,
+    conn: psycopg.Connection,
+    embedder: Embedder,
+    *,
+    chunk_key: str,
+    source_type: str,
+    repo: str,
+    issue_no: int,
+    comment_id: int | None,
+    title: str | None,
+    body: str,
+    state: str | None,
+    author: str | None,
+    path: str | None,
+    line: int | None,
+    created_at,
+    updated_at,
+    url: str | None,
+) -> None:
+    chunks = split_issue_text(title, body, settings.chunk_max_chars)
+    delete_chunks_by_key(conn, chunk_key)
+    if not chunks:
+        return
+    language = detect_language((title or "") + "\n" + (body or ""))
+    vectors = embedder.embed_passages([c.content for c in chunks])
+    for c, v in zip(chunks, vectors):
+        insert_chunk(
+            conn,
+            chunk_key=chunk_key,
+            chunk_index=c.chunk_index,
+            source_type=source_type,
+            repo=repo,
+            path=path,
+            issue_no=issue_no,
+            comment_id=comment_id,
+            language=language,
+            content=c.content,
+            embedding=v,
+            state=state,
+            author=author,
+            line=line,
+            created_at=created_at,
+            updated_at=updated_at,
+            url=url,
+        )
+
+
+def sync_issues(
+    settings: Settings, conn: psycopg.Connection, embedder: Embedder, repo: str
+) -> int:
+    """issue / PR / コメント / レビューコメントを差分同期し索引する。"""
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    if settings.github_token:
+        headers["Authorization"] = f"Bearer {settings.github_token}"
+    n_indexed = 0
+
+    with httpx.Client(headers=headers, timeout=30.0) as client:
+        # --- 本文 (issues endpoint は PR も含む) ---
+        since = get_cursor(conn, repo, "issues")
+        params = {
+            "state": "all",
+            "sort": "updated",
+            "direction": "asc",
+            "per_page": 100,
+        }
+        if since:
+            params["since"] = since
+        items = _api_pages(client, f"{API}/repos/{repo}/issues", params)
+        for it in items:
+            no = it["number"]
+            kind = "pr" if "pull_request" in it else "issue"
+            author = (it.get("user") or {}).get("login")
+            row = {
+                "repo": repo,
+                "issue_no": no,
+                "comment_id": 0,
+                "kind": kind,
+                "title": it.get("title"),
+                "author": author,
+                "is_bot": _is_bot(it.get("user")),
+                "state": it.get("state"),
+                "path": None,
+                "line": None,
+                "body": it.get("body") or "",
+                "url": it.get("html_url"),
+                "created_at": it.get("created_at"),
+                "updated_at": it.get("updated_at"),
+            }
+            _upsert_issue_item(conn, row)
+            if not row["is_bot"]:
+                _index_item(
+                    settings, conn, embedder,
+                    chunk_key=f"issue:{repo}:{no}:body",
+                    source_type="issue",
+                    repo=repo, issue_no=no, comment_id=None,
+                    title=it.get("title"), body=it.get("body") or "",
+                    state=it.get("state"), author=author,
+                    path=None, line=None,
+                    created_at=it.get("created_at"),
+                    updated_at=it.get("updated_at"),
+                    url=it.get("html_url"),
+                )
+                n_indexed += 1
+            conn.commit()
+        if items:
+            set_cursor(conn, repo, "issues", items[-1]["updated_at"])
+
+        # --- issue/PR コメント ---
+        since = get_cursor(conn, repo, "issue_comments")
+        params = {"sort": "updated", "direction": "asc", "per_page": 100}
+        if since:
+            params["since"] = since
+        comments = _api_pages(client, f"{API}/repos/{repo}/issues/comments", params)
+        for c in comments:
+            no = int(c["issue_url"].rstrip("/").rsplit("/", 1)[-1])
+            title, state = _issue_title_state(conn, repo, no)
+            author = (c.get("user") or {}).get("login")
+            is_bot = _is_bot(c.get("user"))
+            _upsert_issue_item(conn, {
+                "repo": repo, "issue_no": no, "comment_id": c["id"],
+                "kind": "comment", "title": None, "author": author,
+                "is_bot": is_bot, "state": state, "path": None, "line": None,
+                "body": c.get("body") or "", "url": c.get("html_url"),
+                "created_at": c.get("created_at"), "updated_at": c.get("updated_at"),
+            })
+            if not is_bot:
+                _index_item(
+                    settings, conn, embedder,
+                    chunk_key=f"issue:{repo}:{no}:c{c['id']}",
+                    source_type="issue",
+                    repo=repo, issue_no=no, comment_id=c["id"],
+                    title=title, body=c.get("body") or "",
+                    state=state, author=author, path=None, line=None,
+                    created_at=c.get("created_at"), updated_at=c.get("updated_at"),
+                    url=c.get("html_url"),
+                )
+                n_indexed += 1
+            conn.commit()
+        if comments:
+            set_cursor(conn, repo, "issue_comments", comments[-1]["updated_at"])
+
+        # --- PR レビューコメント (path/line/diff_hunk 付き) ---
+        since = get_cursor(conn, repo, "pr_review_comments")
+        params = {"sort": "updated", "direction": "asc", "per_page": 100}
+        if since:
+            params["since"] = since
+        reviews = _api_pages(client, f"{API}/repos/{repo}/pulls/comments", params)
+        for c in reviews:
+            no = int(c["pull_request_url"].rstrip("/").rsplit("/", 1)[-1])
+            title, state = _issue_title_state(conn, repo, no)
+            author = (c.get("user") or {}).get("login")
+            is_bot = _is_bot(c.get("user"))
+            line = c.get("line") or c.get("original_line")
+            # diff_hunk を文脈として本文に付与する（diff 自体は索引しない決定の範囲内）
+            body = c.get("body") or ""
+            if c.get("diff_hunk"):
+                body = f"{body}\n\n```diff\n{c['diff_hunk']}\n```"
+            _upsert_issue_item(conn, {
+                "repo": repo, "issue_no": no, "comment_id": c["id"],
+                "kind": "pr_review_comment", "title": None, "author": author,
+                "is_bot": is_bot, "state": state,
+                "path": c.get("path"), "line": line,
+                "body": body, "url": c.get("html_url"),
+                "created_at": c.get("created_at"), "updated_at": c.get("updated_at"),
+            })
+            if not is_bot:
+                _index_item(
+                    settings, conn, embedder,
+                    chunk_key=f"pr_review:{repo}:{no}:rc{c['id']}",
+                    source_type="pr_review",
+                    repo=repo, issue_no=no, comment_id=c["id"],
+                    title=title, body=body,
+                    state=state, author=author,
+                    path=c.get("path"), line=line,
+                    created_at=c.get("created_at"), updated_at=c.get("updated_at"),
+                    url=c.get("html_url"),
+                )
+                n_indexed += 1
+            conn.commit()
+        if reviews:
+            set_cursor(conn, repo, "pr_review_comments", reviews[-1]["updated_at"])
+
+    return n_indexed
