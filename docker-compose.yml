@@ -1,0 +1,39 @@
+# 詳細設計/07: db / app の 2 サービス分離。データとモデルは named volume に永続化。
+services:
+  db:
+    build: docker/db
+    environment:
+      POSTGRES_USER: shiori
+      POSTGRES_PASSWORD: shiori
+      POSTGRES_DB: shiori
+    volumes:
+      - dbdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U shiori -d shiori"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  app:
+    build:
+      context: .
+      dockerfile: docker/app/Dockerfile
+    environment:
+      DATABASE_URL: postgresql://shiori:shiori@db:5432/shiori
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      SHIORI_REPOS: ${SHIORI_REPOS:-}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-intfloat/multilingual-e5-small}
+      EMBEDDING_DIM: ${EMBEDDING_DIM:-384}
+    volumes:
+      - models:/models   # 埋め込みモデルの重みキャッシュ
+      - repos:/data      # git クローン先
+    ports:
+      - "8765:8765"
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  dbdata:
+  models:
+  repos:
