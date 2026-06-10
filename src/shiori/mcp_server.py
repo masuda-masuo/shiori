@@ -6,8 +6,16 @@
 - list_tree(path?)                  : 索引済みドキュメントのツリー閲覧。
 - read_file(path, start?, end?)     : ローカルクローンからファイル（の一部）を取得。
 - read_issue(number)                : issue/PR スレッド全体を取得。
+- ingest(rebuild?, repo?)           : docs / issue / PR の差分同期（索引更新）。
 
 検索結果は常にポインタ＋スニペット＋ GitHub URL。全文は read 系で取得する。
+
+索引更新は 2 経路（issue #2 の決定）:
+- ingest ツール: エージェント／ユーザーによるオンデマンド更新。
+- SHIORI_SYNC_INTERVAL_SECONDS: serve プロセス内のバックグラウンド自動同期。
+  間隔が「索引の古さの上限」を保証する。mcp-launcher 等が GITHUB_TOKEN を
+  注入・更新する構成では、serve プロセス内で同期することで短命トークンを
+  そのまま使える（長期トークンを別途用意する必要がない）。
 """
 
 from __future__ import annotations
@@ -15,6 +23,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
+import time
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
@@ -22,12 +31,14 @@ from mcp.server.fastmcp import FastMCP
 from . import db, search
 from .config import Settings, load_settings
 from .embedding import Embedder
+from .github_sync import sync_docs, sync_issues
 
 log = logging.getLogger(__name__)
 
 settings: Settings = load_settings()
 _embedder: Embedder | None = None
 _embedder_lock = threading.Lock()
+_sync_lock = threading.Lock()
 
 
 def _get_embedder() -> Embedder:
@@ -70,6 +81,50 @@ def _make_filters(
     }
 
 
+def _do_sync(repos: list[str] | None = None, rebuild: bool = False) -> dict[str, Any]:
+    """差分同期の実体。ingest ツールと自動同期ループの両方から呼ばれる。
+    実行中の同期があれば skip する（ロックで排他）。"""
+    if not _sync_lock.acquire(blocking=False):
+        return {"status": "skipped", "reason": "同期が既に実行中です"}
+    try:
+        targets = repos or settings.repos
+        if not targets:
+            return {"status": "error", "reason": "SHIORI_REPOS が未設定です"}
+        embedder = _get_embedder()
+        result: dict[str, Any] = {"status": "ok", "repos": {}}
+        with _conn() as conn:
+            db.migrate(conn, settings)
+            if rebuild:
+                log.warning("rebuild: 既存の索引と同期カーソルを破棄します")
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "TRUNCATE chunks, doc_files, issue_items, sync_state"
+                    )
+                conn.commit()
+            for repo in targets:
+                n_docs = sync_docs(settings, conn, embedder, repo)
+                n_items = sync_issues(settings, conn, embedder, repo)
+                result["repos"][repo] = {
+                    "docs_updated": n_docs,
+                    "issues_indexed": n_items,
+                }
+                log.info(
+                    "synced %s: docs=%d issues=%d", repo, n_docs, n_items
+                )
+        return result
+    finally:
+        _sync_lock.release()
+
+
+def _auto_sync_loop(interval: int) -> None:
+    while True:
+        time.sleep(interval)
+        try:
+            log.info("auto sync: %s", _do_sync())
+        except Exception:
+            log.exception("auto sync failed")
+
+
 mcp = FastMCP(
     "shiori",
     host=settings.mcp_host,
@@ -79,6 +134,8 @@ mcp = FastMCP(
         "ハイブリッド検索。まず semantic_search で検索し、ポインタ＋スニペットを得て、"
         "必要な箇所だけ read_file / read_issue で取得すること。固有名詞・API 名・"
         "エラーコード等の厳密一致には keyword_search を使う。"
+        "索引が古い・未索引と思われる場合（直近の変更がヒットしない等）は"
+        "ingest を呼んで差分同期する。"
     ),
 )
 
@@ -220,8 +277,24 @@ def read_issue(number: int, repo: str | None = None) -> dict[str, Any]:
     }
 
 
+@mcp.tool()
+def ingest(rebuild: bool = False, repo: str | None = None) -> dict[str, Any]:
+    """docs と issue/PR を GitHub から同期し索引を更新する（差分同期なので通常は数秒）。
+    検索結果が古い・未索引と思われる場合（直近の変更がヒットしない、ユーザーが
+    最近の変更に言及している等）に呼ぶ。rebuild=True で索引を破棄して全件作り直す
+    （埋め込みモデル変更時のみ）。repo 省略時は設定済みの全リポジトリを同期する。"""
+    return _do_sync(repos=[repo] if repo else None, rebuild=rebuild)
+
+
 def run(transport: str = "streamable-http") -> None:
     with _conn() as conn:
         db.migrate(conn, settings)
+    if settings.sync_interval_seconds > 0:
+        threading.Thread(
+            target=_auto_sync_loop,
+            args=(settings.sync_interval_seconds,),
+            daemon=True,
+        ).start()
+        log.info("auto sync enabled: every %ds", settings.sync_interval_seconds)
     log.info("shiori MCP server starting (%s)", transport)
     mcp.run(transport=transport)

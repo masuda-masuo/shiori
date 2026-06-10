@@ -6,6 +6,10 @@ services:
       POSTGRES_USER: shiori
       POSTGRES_PASSWORD: shiori
       POSTGRES_DB: shiori
+    ports:
+      # ホスト上の stdio serve / ingest（セットアップ.md 参照）から接続するため
+      # localhost に限定して公開する
+      - "127.0.0.1:5432:5432"
     volumes:
       - dbdata:/var/lib/postgresql/data
     healthcheck:
@@ -24,6 +28,7 @@ services:
       SHIORI_REPOS: ${SHIORI_REPOS:-}
       EMBEDDING_MODEL: ${EMBEDDING_MODEL:-intfloat/multilingual-e5-small}
       EMBEDDING_DIM: ${EMBEDDING_DIM:-384}
+      SHIORI_SYNC_INTERVAL_SECONDS: ${SHIORI_SYNC_INTERVAL_SECONDS:-0}
     volumes:
       - models:/models   # 埋め込みモデルの重みキャッシュ
       - repos:/data      # git クローン先

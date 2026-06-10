@@ -52,6 +52,13 @@ class Settings:
     snippet_chars: int = field(
         default_factory=lambda: int(os.environ.get("SHIORI_SNIPPET_CHARS", "400"))
     )
+    # serve プロセス内のバックグラウンド自動同期間隔（秒）。0 で無効（既定）。
+    # 差分同期は数秒で終わるため、この値が「索引の古さの上限」になる。
+    sync_interval_seconds: int = field(
+        default_factory=lambda: int(
+            os.environ.get("SHIORI_SYNC_INTERVAL_SECONDS", "0")
+        )
+    )
     # MCP サーバー (streamable HTTP)
     mcp_host: str = field(
         default_factory=lambda: os.environ.get("SHIORI_MCP_HOST", "0.0.0.0")
