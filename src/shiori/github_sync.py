@@ -17,6 +17,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+import re
 import subprocess
 
 import httpx
@@ -44,10 +45,28 @@ def _is_bot(user: dict | None) -> bool:
 # ---------------------------------------------------------------------------
 
 
+def _redact(text: str) -> str:
+    """URL に埋め込まれた認証情報（x-access-token:...@ 等）をマスクする。"""
+    return re.sub(r"https://[^@\s/]+@", "https://", text)
+
+
 def _git(args: list[str], cwd: str | None = None) -> str:
     out = subprocess.run(
-        ["git", *args], cwd=cwd, check=True, capture_output=True, text=True
+        ["git", *args],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
     )
+    if out.returncode != 0:
+        err = _redact(out.stderr.strip())
+        hint = ""
+        if "Authentication failed" in err or "could not read Username" in err:
+            hint = ("（private リポジトリには GITHUB_TOKEN が必要です。"
+                    "公開リポジトリの場合はリポジトリ名を確認してください）")
+        raise RuntimeError(
+            f"git {args[0]} failed (exit {out.returncode}): {err}{hint}"
+        )
     return out.stdout.strip()
 
 
