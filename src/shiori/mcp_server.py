@@ -10,11 +10,12 @@
 
 検索結果は常にポインタ＋スニペット＋ GitHub URL。全文は read 系で取得する。
 
-索引更新は 2 経路（issue #2 の決定）:
+索引更新は 3 経路（issue #2, #6 の決定）:
 - ingest ツール: エージェント／ユーザーによるオンデマンド更新。
-- SHIORI_SYNC_INTERVAL_SECONDS: serve プロセス内のバックグラウンド自動同期。
-  間隔が「索引の古さの上限」を保証する。同期ジョブは provider を都度構築するので、
-  GitHub App / PAT / 匿名のいずれでも同じ経路で動く（詳細設計/09）。
+- SHIORI_SYNC_INTERVAL_SECONDS: serve プロセス内のバックグラウンド自動同期（保険）。
+  イベント駆動が主になったため推奨値は 3600 秒。
+- self-hosted runner: push / issue / PR イベントで即時差分同期（issue #6）。
+  同期の実体は _do_sync()。PostgreSQL advisory lock でプロセス横断の排他を保証。
 """
 
 from __future__ import annotations
@@ -39,6 +40,10 @@ settings: Settings = load_settings()
 _embedder: Embedder | None = None
 _embedder_lock = threading.Lock()
 _sync_lock = threading.Lock()
+
+# PostgreSQL advisory lock キー（プロセス横断排他。ingest.py と共有）
+# 'SHIO' の ASCII コード列を 32bit に詰めた値
+SYNC_LOCK_KEY = 0x5348494F
 
 
 def _get_embedder() -> Embedder:
@@ -83,7 +88,12 @@ def _make_filters(
 
 def _do_sync(repos: list[str] | None = None, rebuild: bool = False) -> dict[str, Any]:
     """差分同期の実体。ingest ツールと自動同期ループの両方から呼ばれる。
-    実行中の同期があれば skip する（ロックで排他）。"""
+
+    プロセス内排他: _sync_lock（threading.Lock）で早期 skip。
+    プロセス横断排他: PostgreSQL advisory lock (pg_try_advisory_lock) で、
+    runner ジョブ（別プロセス）との同時実行を防ぐ。
+    どちらも非ブロッキング（取得失敗 = skip）。
+    """
     if not _sync_lock.acquire(blocking=False):
         return {"status": "skipped", "reason": "同期が既に実行中です"}
     try:
@@ -95,23 +105,33 @@ def _do_sync(repos: list[str] | None = None, rebuild: bool = False) -> dict[str,
         result: dict[str, Any] = {"status": "ok", "repos": {}}
         with _conn() as conn:
             db.migrate(conn, settings)
-            if rebuild:
-                log.warning("rebuild: 既存の索引と同期カーソルを破棄します")
-                with conn.cursor() as cur:
-                    cur.execute(
-                        "TRUNCATE chunks, doc_files, issue_items, sync_state"
+            # --- プロセス横断排他: advisory lock ---
+            with conn.cursor() as cur:
+                cur.execute("SELECT pg_try_advisory_lock(%s)", (SYNC_LOCK_KEY,))
+                acquired = cur.fetchone()[0]
+            if not acquired:
+                return {"status": "skipped", "reason": "別プロセスで同期が実行中です"}
+            try:
+                if rebuild:
+                    log.warning("rebuild: 既存の索引と同期カーソルを破棄します")
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            "TRUNCATE chunks, doc_files, issue_items, sync_state"
+                        )
+                    conn.commit()
+                for repo in targets:
+                    n_docs = sync_docs(settings, conn, embedder, repo, provider)
+                    n_items = sync_issues(settings, conn, embedder, repo, provider)
+                    result["repos"][repo] = {
+                        "docs_updated": n_docs,
+                        "issues_indexed": n_items,
+                    }
+                    log.info(
+                        "synced %s: docs=%d issues=%d", repo, n_docs, n_items
                     )
-                conn.commit()
-            for repo in targets:
-                n_docs = sync_docs(settings, conn, embedder, repo, provider)
-                n_items = sync_issues(settings, conn, embedder, repo, provider)
-                result["repos"][repo] = {
-                    "docs_updated": n_docs,
-                    "issues_indexed": n_items,
-                }
-                log.info(
-                    "synced %s: docs=%d issues=%d", repo, n_docs, n_items
-                )
+            finally:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT pg_advisory_unlock(%s)", (SYNC_LOCK_KEY,))
         return result
     finally:
         _sync_lock.release()
