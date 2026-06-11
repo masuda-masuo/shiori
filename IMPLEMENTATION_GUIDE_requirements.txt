@@ -1,3 +1,0 @@
-# requirements.txt への追加
-
-pyjwt[crypto]>=2.8.0
