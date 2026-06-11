@@ -1,6 +1,7 @@
 # 詳細設計/07: db / app の 2 サービス分離。データとモデルは named volume に永続化。
 # ingest は使い捨てのワンショット（profiles: ["ingest"]）。GitHub App 秘密鍵は
-# ingest にだけ渡し、常駐 app には渡さない（詳細設計/09）。
+# ingest / runner にだけ渡し、常駐 app には渡さない（詳細設計/09）。
+# runner は self-hosted Actions runner（issue #6）。push / issue / PR で即時差分同期。
 services:
   db:
     build: docker/db
@@ -20,6 +21,7 @@ services:
       timeout: 3s
       retries: 20
     restart: unless-stopped
+
   app:
     build:
       context: .
@@ -39,6 +41,7 @@ services:
     depends_on:
       db:
         condition: service_healthy
+    restart: unless-stopped
 
   # オンデマンドの同期ジョブ。`docker compose run --rm ingest` で実行する。
   # `docker compose up` では起動しない（profiles 指定）。cron からも同コマンド。
@@ -67,6 +70,36 @@ services:
       db:
         condition: service_healthy
 
+  # self-hosted Actions runner（issue #6）。
+  # push / issue / PR イベントを GitHub からアウトバウンドのロングポーリングで受け取り、
+  # `python -m shiori ingest` を実行する。inbound ポート開放・トンネル・Webhook 不要。
+  # 初回起動前に `docker compose run --rm runner ./config.sh ...` で登録が必要。
+  # セキュリティ注意: private リポジトリ専用。public 化する場合は runner を廃止すること
+  # （fork PR からの任意コード実行リスク。代替は Webhook + Cloudflare Tunnel + HMAC）。
+  runner:
+    build:
+      context: .
+      dockerfile: docker/runner/Dockerfile
+    environment:
+      DATABASE_URL: postgresql://shiori:shiori@db:5432/shiori
+      SHIORI_REPOS: ${SHIORI_REPOS:-}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-intfloat/multilingual-e5-small}
+      EMBEDDING_DIM: ${EMBEDDING_DIM:-384}
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      GITHUB_APP_ID: ${GITHUB_APP_ID:-}
+      GITHUB_APP_INSTALLATION_ID: ${GITHUB_APP_INSTALLATION_ID:-}
+      GITHUB_APP_PRIVATE_KEY_PATH: ${GITHUB_APP_PRIVATE_KEY_PATH:-/run/secrets/github_app_key}
+    secrets:
+      - github_app_key
+    volumes:
+      - models:/models
+      - repos:/data
+      - runner-state:/actions-runner
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
 secrets:
   github_app_key:
     # GitHub App の秘密鍵 PEM。リポジトリにはコミットしない（.gitignore 済み）。
@@ -77,3 +110,4 @@ volumes:
   dbdata:
   models:
   repos:
+  runner-state:   # runner の登録状態（.runner / .credentials）を永続化する
