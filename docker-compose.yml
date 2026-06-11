@@ -17,7 +17,7 @@ services:
       interval: 5s
       timeout: 3s
       retries: 20
-
+    restart: unless-stopped
   app:
     build:
       context: .
