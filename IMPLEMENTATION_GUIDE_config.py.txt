@@ -1,0 +1,31 @@
+# config.py への追加（既存ファイルに以下を追加）
+
+"""
+Settings クラスに以下のプロパティ・メソッドを追加する:
+"""
+
+@property
+def github_app_id(self) -> str | None:
+    """GitHub App ID。環境変数 GITHUB_APP_ID から取得。"""
+    return os.environ.get("GITHUB_APP_ID")
+
+@property
+def github_app_installation_id(self) -> str | None:
+    """GitHub App Installation ID。環境変数 GITHUB_APP_INSTALLATION_ID から取得。"""
+    return os.environ.get("GITHUB_APP_INSTALLATION_ID")
+
+def github_app_private_key(self) -> str | None:
+    """GitHub App の秘密鍵 PEM を取得。
+    
+    優先順序: GITHUB_APP_PRIVATE_KEY_PATH > GITHUB_APP_PRIVATE_KEY > None
+    """
+    path = os.environ.get("GITHUB_APP_PRIVATE_KEY_PATH")
+    if path:
+        try:
+            with open(path, "r") as f:
+                return f.read()
+        except OSError as e:
+            raise ValueError(f"failed to read private key: {path}") from e
+    
+    pem = os.environ.get("GITHUB_APP_PRIVATE_KEY")
+    return pem or None
