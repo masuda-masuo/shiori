@@ -26,6 +26,21 @@ class Settings:
     github_token: str | None = field(
         default_factory=lambda: os.environ.get("GITHUB_TOKEN") or None
     )
+    # GitHub App 認証（短期トークン。詳細設計/09）。
+    # 3 つ揃えば App を優先、無ければ github_token、どちらも無ければ匿名。
+    github_app_id: str | None = field(
+        default_factory=lambda: os.environ.get("GITHUB_APP_ID") or None
+    )
+    github_app_installation_id: str | None = field(
+        default_factory=lambda: os.environ.get("GITHUB_APP_INSTALLATION_ID") or None
+    )
+    # 秘密鍵は PATH 優先、無ければ本文（PEM）を直接。読み込みは github_app_private_key()。
+    github_app_private_key_path: str | None = field(
+        default_factory=lambda: os.environ.get("GITHUB_APP_PRIVATE_KEY_PATH") or None
+    )
+    github_app_private_key_pem: str | None = field(
+        default_factory=lambda: os.environ.get("GITHUB_APP_PRIVATE_KEY") or None
+    )
     # 対象リポジトリ。"owner/name" をカンマ区切りで複数指定可
     repos: list[str] = field(default_factory=_repos_from_env)
     # 埋め込みモデル。変更したら再索引（ingest --rebuild）が必要
@@ -70,6 +85,13 @@ class Settings:
     def repo_dir(self, repo: str) -> str:
         owner, name = repo.split("/", 1)
         return os.path.join(self.data_dir, "repos", f"{owner}__{name}")
+
+    def github_app_private_key(self) -> str | None:
+        """GitHub App の秘密鍵 PEM を返す。PATH 優先、無ければ本文、どちらも無ければ None。"""
+        if self.github_app_private_key_path:
+            with open(self.github_app_private_key_path, encoding="utf-8") as fp:
+                return fp.read()
+        return self.github_app_private_key_pem
 
 
 def load_settings() -> Settings:
