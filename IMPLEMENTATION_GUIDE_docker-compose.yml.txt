@@ -1,0 +1,99 @@
+# docker-compose.yml への変更（実装ガイド）
+
+## 1. secrets セクションの追加
+
+```yaml
+secrets:
+  github_app_key:
+    file: ./secrets/github-app.private-key.pem
+```
+
+## 2. ingest サービスの追加
+
+```yaml
+services:
+  # ... (既存の db, app)
+  
+  ingest:
+    build: .
+    image: shiori-app  # app と同イメージ
+    command: python -m shiori ingest
+    environment:
+      # DB 接続（app と同じ）
+      POSTGRES_HOST: db
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: shiori
+      POSTGRES_USER: shiori
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      
+      # GitHub App 認証（重要）
+      GITHUB_APP_ID: ${GITHUB_APP_ID}
+      GITHUB_APP_INSTALLATION_ID: ${GITHUB_APP_INSTALLATION_ID}
+      GITHUB_APP_PRIVATE_KEY_PATH: /run/secrets/github_app_key
+      
+      # または従来の PAT（App 未設定時のフォールバック）
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+    secrets:
+      - github_app_key
+    depends_on:
+      - db
+    profiles:
+      - ingest  # `up` では起動しない。`run --rm ingest` で明示的に実行
+```
+
+## 3. app サービスへの追加（MCP サーバー）
+
+既存の app サービスにも環境変数を追加可能（optional）：
+
+```yaml
+app:
+  # ... 既存設定
+  environment:
+    # ... 既存
+    
+    # MCP 経由での ingest 実行時に使用
+    GITHUB_TOKEN: ${GITHUB_TOKEN:-}  # PAT のみの場合
+    # または App 認証（app は秘密鍵を持たない。ingest のみ）
+```
+
+## 使用方法
+
+### GitHub App 認証での ingest 実行
+
+```bash
+# secrets ファイルの準備
+mkdir -p secrets
+cp /path/to/github-app.private-key.pem secrets/
+
+# 環境変数の設定
+export GITHUB_APP_ID="123456"
+export GITHUB_APP_INSTALLATION_ID="987654"
+export POSTGRES_PASSWORD="your_password"
+
+# ingest 実行
+docker compose run --rm ingest
+```
+
+### 従来の PAT での実行（互換性）
+
+```bash
+export GITHUB_TOKEN="ghp_xxxxxxxxxxxx"
+export POSTGRES_PASSWORD="your_password"
+
+docker compose run --rm ingest
+```
+
+## .gitignore への追加
+
+```
+# GitHub App 秘密鍵（コミットしない）
+secrets/
+secrets/github-app.private-key.pem
+```
+
+## 注意点
+
+- `ingest` サービスは `profiles: ["ingest"]` により、`docker compose up` では起動しない
+- `docker compose run --rm ingest` で明示的に実行する（使い捨て）
+- `app` サービス（常駐 MCP サーバー）には秘密鍵を渡さない
+- cron から実行する場合も同じコマンド: `docker compose run --rm ingest`
