@@ -13,9 +13,8 @@
 索引更新は 2 経路（issue #2 の決定）:
 - ingest ツール: エージェント／ユーザーによるオンデマンド更新。
 - SHIORI_SYNC_INTERVAL_SECONDS: serve プロセス内のバックグラウンド自動同期。
-  間隔が「索引の古さの上限」を保証する。mcp-launcher 等が GITHUB_TOKEN を
-  注入・更新する構成では、serve プロセス内で同期することで短命トークンを
-  そのまま使える（長期トークンを別途用意する必要がない）。
+  間隔が「索引の古さの上限」を保証する。同期ジョブは provider を都度構築するので、
+  GitHub App / PAT / 匿名のいずれでも同じ経路で動く（詳細設計/09）。
 """
 
 from __future__ import annotations
@@ -31,6 +30,7 @@ from mcp.server.fastmcp import FastMCP
 from . import db, search
 from .config import Settings, load_settings
 from .embedding import Embedder
+from .github_auth import build_token_provider
 from .github_sync import sync_docs, sync_issues
 
 log = logging.getLogger(__name__)
@@ -90,6 +90,7 @@ def _do_sync(repos: list[str] | None = None, rebuild: bool = False) -> dict[str,
         targets = repos or settings.repos
         if not targets:
             return {"status": "error", "reason": "SHIORI_REPOS が未設定です"}
+        provider = build_token_provider(settings)
         embedder = _get_embedder()
         result: dict[str, Any] = {"status": "ok", "repos": {}}
         with _conn() as conn:
@@ -102,8 +103,8 @@ def _do_sync(repos: list[str] | None = None, rebuild: bool = False) -> dict[str,
                     )
                 conn.commit()
             for repo in targets:
-                n_docs = sync_docs(settings, conn, embedder, repo)
-                n_items = sync_issues(settings, conn, embedder, repo)
+                n_docs = sync_docs(settings, conn, embedder, repo, provider)
+                n_items = sync_issues(settings, conn, embedder, repo, provider)
                 result["repos"][repo] = {
                     "docs_updated": n_docs,
                     "issues_indexed": n_items,
@@ -132,7 +133,7 @@ mcp = FastMCP(
     instructions=(
         "GitHub リポジトリの知識（Markdown ドキュメントと issue/PR の議論）への"
         "ハイブリッド検索。まず semantic_search で検索し、ポインタ＋スニペットを得て、"
-        "必要な箇所だけ read_file / read_issue で取得すること。固有名詞・API 名・"
+        "必要な範囲だけ read_file / read_issue で取得すること。固有名詞・API 名・"
         "エラーコード等の厳密一致には keyword_search を使う。"
         "索引が古い・未索引と思われる場合（直近の変更がヒットしない等）は"
         "ingest を呼んで差分同期する。"
@@ -211,7 +212,7 @@ def read_file(
     repo: str | None = None,
 ) -> dict[str, Any]:
     """指定ファイルの全文（または start_line〜end_line の範囲）を取得する。
-    検索結果のポインタから本当に必要な箇所だけ読むこと。"""
+    検索結果のポインタから本当に必要な範囲だけ読むこと。"""
     target = _resolve_repo(repo)
     base = os.path.realpath(settings.repo_dir(target))
     full = os.path.realpath(os.path.join(base, path))
