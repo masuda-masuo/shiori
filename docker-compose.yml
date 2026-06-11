@@ -1,4 +1,6 @@
 # 詳細設計/07: db / app の 2 サービス分離。データとモデルは named volume に永続化。
+# ingest は使い捨てのワンショット（profiles: ["ingest"]）。GitHub App 秘密鍵は
+# ingest にだけ渡し、常駐 app には渡さない（詳細設計/09）。
 services:
   db:
     build: docker/db
@@ -37,6 +39,39 @@ services:
     depends_on:
       db:
         condition: service_healthy
+
+  # オンデマンドの同期ジョブ。`docker compose run --rm ingest` で実行する。
+  # `docker compose up` では起動しない（profiles 指定）。cron からも同コマンド。
+  ingest:
+    build:
+      context: .
+      dockerfile: docker/app/Dockerfile
+    profiles: ["ingest"]
+    command: ["python", "-m", "shiori", "ingest"]
+    environment:
+      DATABASE_URL: postgresql://shiori:shiori@db:5432/shiori
+      SHIORI_REPOS: ${SHIORI_REPOS:-}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-intfloat/multilingual-e5-small}
+      EMBEDDING_DIM: ${EMBEDDING_DIM:-384}
+      # GitHub App 認証（PAT を使う場合は GITHUB_TOKEN を渡す）
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      GITHUB_APP_ID: ${GITHUB_APP_ID:-}
+      GITHUB_APP_INSTALLATION_ID: ${GITHUB_APP_INSTALLATION_ID:-}
+      GITHUB_APP_PRIVATE_KEY_PATH: ${GITHUB_APP_PRIVATE_KEY_PATH:-/run/secrets/github_app_key}
+    secrets:
+      - github_app_key
+    volumes:
+      - models:/models
+      - repos:/data
+    depends_on:
+      db:
+        condition: service_healthy
+
+secrets:
+  github_app_key:
+    # GitHub App の秘密鍵 PEM。リポジトリにはコミットしない（.gitignore 済み）。
+    # App 認証を使わない場合は空ファイルでよい（PAT/匿名にフォールバックする）。
+    file: ./secrets/github-app.private-key.pem
 
 volumes:
   dbdata:

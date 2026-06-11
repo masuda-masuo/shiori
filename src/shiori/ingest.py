@@ -3,6 +3,7 @@
 決定: 同期はオンデマンド実行。
     docker compose run --rm app python -m shiori ingest
 スケジュール実行が必要な場合はホスト側 cron 等から同コマンドを叩く。
+認証は build_token_provider で構築し、全リポジトリの同期で共有する（詳細設計/09）。
 """
 
 from __future__ import annotations
@@ -12,6 +13,7 @@ import logging
 from . import db
 from .config import Settings, load_settings
 from .embedding import Embedder
+from .github_auth import build_token_provider
 from .github_sync import sync_docs, sync_issues
 
 log = logging.getLogger(__name__)
@@ -27,6 +29,8 @@ def run_ingest(
     if not targets:
         raise SystemExit("SHIORI_REPOS が未設定です（例: SHIORI_REPOS=owner/name）")
 
+    provider = build_token_provider(settings)
+
     conn = db.connect(settings)
     db.migrate(conn, settings)
 
@@ -40,9 +44,9 @@ def run_ingest(
 
     for repo in targets:
         log.info("=== %s ===", repo)
-        n_docs = sync_docs(settings, conn, embedder, repo)
+        n_docs = sync_docs(settings, conn, embedder, repo, provider)
         log.info("docs: %d files updated", n_docs)
-        n_items = sync_issues(settings, conn, embedder, repo)
+        n_items = sync_issues(settings, conn, embedder, repo, provider)
         log.info("issues/PR: %d items indexed", n_items)
 
     with conn.cursor() as cur:
