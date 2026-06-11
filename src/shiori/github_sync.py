@@ -10,10 +10,13 @@
 - bot コメント（user.type == "Bot" または login が "[bot]" で終わる）は索引から除外する。
   生データは issue_items に is_bot=true で保持する（read_issue では表示する）。
 - PR の diff 自体は索引しない。レビューコメントには diff_hunk を文脈として付与する。
+認証は TokenProvider 抽象経由（詳細設計/09）。git は http.extraHeader でトークンを注入し、
+API は httpx の Auth フックでリクエスト毎に注入する。
 """
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import logging
 import os
@@ -27,6 +30,7 @@ from .chunking import detect_language, split_issue_text, split_markdown
 from .config import Settings
 from .db import delete_chunks_by_key, get_cursor, insert_chunk, set_cursor
 from .embedding import Embedder
+from .github_auth import TokenProvider
 
 log = logging.getLogger(__name__)
 
@@ -70,23 +74,55 @@ def _git(args: list[str], cwd: str | None = None) -> str:
     return out.stdout.strip()
 
 
-def _clone_url(repo: str, token: str | None) -> str:
-    if token:
-        return f"https://x-access-token:{token}@github.com/{repo}.git"
-    return f"https://github.com/{repo}.git"
+def _auth_args(provider: TokenProvider) -> list[str]:
+    """git の認証ヘッダを `-c http.extraHeader=...` 引数として返す。
+
+    トークンを clone URL に埋め込むと `.git/config` に平文で永続化され、短期トークンでは
+    次回 fetch 時に失効済みトークンが残る。毎回ヘッダで注入することでこれを避ける。
+    認証不要（匿名）なら空リストを返す。
+    """
+    token = provider.get_token()
+    if not token:
+        return []
+    b64 = base64.b64encode(f"x-access-token:{token}".encode()).decode()
+    return ["-c", f"http.extraHeader=Authorization: Basic {b64}"]
+
+
+class _GitHubAuth(httpx.Auth):
+    """httpx の Auth フック。リクエストごとに provider からトークンを得て注入する。
+
+    長時間の ingest でも、ページネーション途中で provider が自動再発行するため失効しない。
+    """
+
+    def __init__(self, provider: TokenProvider) -> None:
+        self._provider = provider
+
+    def auth_flow(self, request):
+        token = self._provider.get_token()
+        if token:
+            request.headers["Authorization"] = f"Bearer {token}"
+        yield request
 
 
 def sync_docs(
-    settings: Settings, conn: psycopg.Connection, embedder: Embedder, repo: str
+    settings: Settings,
+    conn: psycopg.Connection,
+    embedder: Embedder,
+    repo: str,
+    provider: TokenProvider,
 ) -> int:
     """リポジトリの Markdown を同期し、変化分だけ索引する。返り値は更新ファイル数。"""
     repo_dir = settings.repo_dir(repo)
+    remote = f"https://github.com/{repo}.git"
+    auth = _auth_args(provider)
     if os.path.isdir(os.path.join(repo_dir, ".git")):
-        _git(["fetch", "--depth=1", "origin"], cwd=repo_dir)
+        # 旧方式でトークン入り URL が .git/config に残っていても上書きする（冪等）。
+        _git(["remote", "set-url", "origin", remote], cwd=repo_dir)
+        _git(auth + ["fetch", "--depth=1", "origin"], cwd=repo_dir)
         _git(["reset", "--hard", "origin/HEAD"], cwd=repo_dir)
     else:
         os.makedirs(os.path.dirname(repo_dir), exist_ok=True)
-        _git(["clone", "--depth=1", _clone_url(repo, settings.github_token), repo_dir])
+        _git(auth + ["clone", "--depth=1", remote, repo_dir])
     head = _git(["rev-parse", "HEAD"], cwd=repo_dir)
 
     # 現在のファイル集合と既存索引を突き合わせる
@@ -269,18 +305,22 @@ def _index_item(
 
 
 def sync_issues(
-    settings: Settings, conn: psycopg.Connection, embedder: Embedder, repo: str
+    settings: Settings,
+    conn: psycopg.Connection,
+    embedder: Embedder,
+    repo: str,
+    provider: TokenProvider,
 ) -> int:
     """issue / PR / コメント / レビューコメントを差分同期し索引する。"""
     headers = {
         "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
     }
-    if settings.github_token:
-        headers["Authorization"] = f"Bearer {settings.github_token}"
     n_indexed = 0
 
-    with httpx.Client(headers=headers, timeout=30.0) as client:
+    with httpx.Client(
+        headers=headers, auth=_GitHubAuth(provider), timeout=30.0
+    ) as client:
         # --- 本文 (issues endpoint は PR も含む) ---
         since = get_cursor(conn, repo, "issues")
         params = {
