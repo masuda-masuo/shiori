@@ -1,10 +1,16 @@
 #!/usr/bin/env bash
 # self-hosted runner エントリーポイント（issue #6）。
-# 初回は .runner ファイルが存在しないため、登録手順を案内して終了する。
+# 引数が渡された場合はそれを実行する（初回登録の ./config.sh ... など）。
+# 引数なしで .runner ファイルが存在しない場合は、登録手順を案内して終了する。
 # 登録後は docker compose up -d runner で永続起動する。
 set -eu
 
 cd /actions-runner
+
+# 引数パススルー: docker compose run --rm runner ./config.sh ... を可能にする（issue #20）
+if [ "$#" -gt 0 ]; then
+  exec "$@"
+fi
 
 if [ ! -f .runner ]; then
   echo "[shiori-runner] runner が未登録です。初回のみ以下を実行してください:" >&2

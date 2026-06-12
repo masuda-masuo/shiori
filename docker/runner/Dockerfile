@@ -28,6 +28,12 @@ RUN curl -fsSL -o runner.tar.gz \
     && ./bin/installdependencies.sh \
     && chown -R runner:runner /actions-runner
 
+# installdependencies.sh がベースイメージの Debian リリースで libicu を解決できないため
+# .NET ランタイムの依存を明示的にインストールする（issue #20）
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libicu-dev liblttng-ust1 libkrb5-3 zlib1g \
+    && rm -rf /var/lib/apt/lists/*
+
 # Python（base イメージのグローバル環境）を runner ユーザーでも使えるようにする
 RUN chown -R runner:runner /usr/local/lib/python3.12 /usr/local/bin || true
 
