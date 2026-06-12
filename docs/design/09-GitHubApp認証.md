@@ -6,11 +6,15 @@
 （有効期限 1 時間）で ingest を実行できるようにする。外部ランチャー（stdio 限定）への
 依存をなくし、streamable HTTP 構成のまま短期トークン運用を成立させる。
 
-## 前提（shiori が有利な点）
+## 前提
 
-shiori がトークンを使うのは **ingest（一回限りのジョブ）だけ**で、常駐の MCP サーバーは
-GitHub に触れない。よってランチャーが持つ「常駐プロセスの透過再起動」は不要。
-ジョブ内でトークンを取得し、長時間ジョブに備えてリクエスト単位で再発行できれば十分。
+設計当初は「shiori がトークンを使うのは ingest（一回限りのジョブ）だけで、常駐の
+MCP サーバーは GitHub に触れない」という前提だったが、issue #6 で serve プロセス内の
+自動同期（`SHIORI_SYNC_INTERVAL_SECONDS`）と `shiori_ingest` ツールを追加したため、
+現在は常駐 `app` も `GITHUB_TOKEN`（PAT）で GitHub に触れる。本設計では、
+**App 秘密鍵だけ**を ingest / runner に限定する形に整理する（PAT は app にも渡す）。
+ジョブ内でトークンを取得し、長時間ジョブに備えてリクエスト単位で再発行できれば十分、
+という基本方針自体は変わらない。
 
 ## 決定事項
 
@@ -23,9 +27,11 @@ GitHub に触れない。よってランチャーが持つ「常駐プロセス�
 4. **git の認証は clone URL 埋め込みをやめ、`http.extraHeader` で毎回注入する。**
    理由: 現行方式は `.git/config` にトークンが平文で永続化され（named volume 上に残る）、
    短期トークンでは次回 pull 時に失効済みトークンが残って失敗する。
-5. **秘密鍵は ingest 用ワンショットコンテナにだけ渡す。** 常駐 `app` サービスには
-   鍵もトークンも渡さない（compose をサービス分割。「鍵が MCP サーバーに届かない」
-   性質をコンテナ境界で実現する）。
+5. **GitHub App の秘密鍵は ingest / runner にだけ渡す。** 常駐 `app` サービスには
+   App 秘密鍵を渡さない（`github_app_key` secret と `GITHUB_APP_*` を持たせない。
+   compose をサービス分割し、「App 秘密鍵が MCP サーバーに届かない」性質を
+   コンテナ境界で実現する）。PAT 運用時の `GITHUB_TOKEN` は自動同期・`shiori_ingest`
+   ツールのため `app` にも渡す。
 6. **依存追加: `pyjwt[crypto]`**（RS256 署名に cryptography が必要）。
 
 ## 設定（環境変数）
@@ -50,6 +56,7 @@ App 利用の判定: `GITHUB_APP_ID` と `GITHUB_APP_INSTALLATION_ID` が両方�
 """GitHub 認証。PAT と GitHub App installation token を TokenProvider に抽象化する。"""
 from __future__ import annotations
 
+import calendar
 import logging
 import time
 from dataclasses import dataclass
@@ -102,19 +109,30 @@ class AppTokenProvider(TokenProvider):
 
     def _refresh(self) -> None:
         url = f"{API}/app/installations/{self._installation_id}/access_tokens"
-        resp = httpx.post(
-            url,
-            headers={
-                "Authorization": f"Bearer {self._app_jwt()}",
-                "Accept": "application/vnd.github+json",
-                "X-GitHub-Api-Version": "2022-11-28",
-            },
-            timeout=30.0,
-        )
+        try:
+            resp = httpx.post(
+                url,
+                headers={
+                    "Authorization": f"Bearer {self._app_jwt()}",
+                    "Accept": "application/vnd.github+json",
+                    "X-GitHub-Api-Version": "2022-11-28",
+                },
+                timeout=30.0,
+            )
+        except httpx.HTTPError:
+            if self._token and time.time() < self._expires_at:
+                log.warning("token refresh failed (network); keeping cached token")
+                return
+            raise
         if resp.status_code == 401:
             raise RuntimeError(
                 "GitHub App の JWT が拒否されました。GITHUB_APP_ID と秘密鍵の対応、"
                 "サーバー時刻を確認してください。"
+            )
+        if resp.status_code == 403:
+            raise RuntimeError(
+                "GitHub App に必要な権限がありません。App の権限（Contents/Issues/"
+                "PR: Read）とインストール対象リポジトリを確認してください。"
             )
         if resp.status_code == 404:
             raise RuntimeError(
@@ -124,10 +142,10 @@ class AppTokenProvider(TokenProvider):
         resp.raise_for_status()  # 201 が正常
         data = resp.json()
         self._token = data["token"]
-        # expires_at: "2026-06-11T12:34:56Z"
-        self._expires_at = time.mktime(
+        # expires_at: "2026-06-11T12:34:56Z" -> UTC の epoch 秒へ直接変換（DST 非依存）
+        self._expires_at = calendar.timegm(
             time.strptime(data["expires_at"], "%Y-%m-%dT%H:%M:%SZ")
-        ) - time.timezone  # UTC 補正
+        )
         log.info("issued installation token (expires_at=%s)", data["expires_at"])
 
 
@@ -149,6 +167,9 @@ def build_token_provider(settings: "Settings") -> TokenProvider:
         return StaticTokenProvider(settings.github_token)
     return AnonymousProvider()
 ```
+
+> `_refresh()` の UTC 変換・ネットワークエラー時のキャッシュフォールバック・403 専用の
+> エラーメッセージは、上記コード例どおりに実装済み（issue #14）。
 
 `Settings` への追加: `github_app_id` / `github_app_installation_id`（環境変数の単純読み）、
 `github_app_private_key()`（`GITHUB_APP_PRIVATE_KEY_PATH` のファイルを読む。
@@ -212,7 +233,7 @@ class _GitHubAuth(httpx.Auth):
 全リポジトリの `sync_docs` / `sync_issues` に渡す（provider はプロセス内でトークンを
 キャッシュ・再発行する）。
 
-### 4. Docker Compose（鍵をワンショットコンテナに限定）
+### 4. Docker Compose（App 秘密鍵をワンショットコンテナに限定）
 
 ```yaml
 secrets:
@@ -220,7 +241,7 @@ secrets:
     file: ./secrets/github-app.private-key.pem
 
 services:
-  app:            # 常駐 MCP サーバー。鍵もトークンも持たない
+  app:            # 常駐 MCP サーバー。GITHUB_TOKEN(PAT) は持つが App 秘密鍵は持たない
     ...
   ingest:
     profiles: ["ingest"]   # `up` では起動しない
@@ -238,6 +259,10 @@ services:
 実行: `docker compose run --rm ingest`（cron からも同コマンド）。
 `./secrets/` は `.gitignore` に追加する。
 
+上記は App 秘密鍵の限定方針を示す抜粋であり、`app` + `ingest` のみを示している。
+issue #6 で追加された `runner`（self-hosted runner、App 秘密鍵を保持）を含む
+最新の全サービス構成は `docker-compose.yml` を参照すること。
+
 ### 5. App の権限（README に記載）
 
 最小権限: **Contents: Read-only**（clone 用）、**Issues: Read-only**、
@@ -251,8 +276,8 @@ services:
   warning を出して継続、失効済みなら例外で ingest を中断する。
   実装: `_refresh` を try で包み、`self._token and time.time() < self._expires_at`
   なら握りつぶし、そうでなければ re-raise。
-- **権限不足（403）:** httpx の `raise_for_status` で落ちる。メッセージに
-  「App の権限（Contents/Issues/PR: Read）とインストール対象リポジトリを確認」を含める。
+- **権限不足（403）:** 403 専用のエラーメッセージで
+  「App の権限（Contents/Issues/PR: Read）とインストール対象リポジトリを確認」を案内する。
 - **匿名 + private リポジトリ:** 現行どおり git のエラーヒントで案内（変更なし）。
 
 ## テスト項目
@@ -260,7 +285,8 @@ services:
 1. `build_token_provider`: App 完備 → App / 一部欠け → ValueError /
    PAT のみ → Static / なし → Anonymous / 両方 → App 優先。
 2. `AppTokenProvider`: 初回 `_refresh` 呼び出し、キャッシュ有効中は再発行しない、
-   `expires_at - 300s` 経過で再発行、401/404 のエラーメッセージ。
+   `expires_at - 300s` 経過で再発行、401/403/404 のエラーメッセージ、
+   ネットワークエラー時のキャッシュフォールバック。
    （httpx はモック。`respx` 等を使用）
 3. `_app_jwt`: `iat = now-60`, `exp = now+540`, `iss = app_id`, alg=RS256 を
    デコードして検証。
@@ -279,5 +305,6 @@ services:
 ## 基本設計.md への反映
 
 - §5 決定ログに「GitHub 認証は TokenProvider 抽象。GitHub App（installation token、
-  extraHeader 注入）を推奨、PAT はフォールバック。秘密鍵は ingest コンテナ限定」を追記。
+  extraHeader 注入）を推奨、PAT はフォールバック。App 秘密鍵は ingest / runner 限定、
+  PAT は app にも渡す」を追記。
 - §6 未決事項に「MCP サーバー自体の認可（OAuth 2.1）— リモート公開時」を追加。
