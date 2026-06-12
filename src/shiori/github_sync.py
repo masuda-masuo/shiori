@@ -8,6 +8,7 @@
     - GET /repos/{o}/{r}/issues/comments    (issue/PR コメント)
     - GET /repos/{o}/{r}/pulls/comments     (レビューコメント。path/line/diff_hunk 付き)
 - bot コメント（user.type == "Bot" または login が "[bot]" で終わる）は索引から除外する。
+  ただし SHIORI_INDEX_BOT_LOGINS に列挙された login は allowlist として索引対象にする（issue #25）。
   生データは issue_items に is_bot=true で保持する（read_issue では表示する）。
 - PR の diff 自体は索引しない。レビューコメントには diff_hunk を文脈として付与する。
 認証は TokenProvider 抽象経由（詳細設計/09）。git は http.extraHeader でトークンを注入し、
@@ -42,6 +43,15 @@ def _is_bot(user: dict | None) -> bool:
         return False
     login = (user.get("login") or "").lower()
     return user.get("type") == "Bot" or login.endswith("[bot]")
+
+
+def _should_index(is_bot: bool, author: str | None, settings: Settings) -> bool:
+    """bot でも allowlist に含まれていれば索引対象とする（issue #25）。"""
+    if not is_bot:
+        return True
+    if author and author.lower() in settings.index_bot_logins:
+        return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -353,7 +363,7 @@ def sync_issues(
                 "updated_at": it.get("updated_at"),
             }
             _upsert_issue_item(conn, row)
-            if not row["is_bot"]:
+            if _should_index(row["is_bot"], author, settings):
                 _index_item(
                     settings, conn, embedder,
                     chunk_key=f"issue:{repo}:{no}:body",
@@ -389,7 +399,7 @@ def sync_issues(
                 "body": c.get("body") or "", "url": c.get("html_url"),
                 "created_at": c.get("created_at"), "updated_at": c.get("updated_at"),
             })
-            if not is_bot:
+            if _should_index(is_bot, author, settings):
                 _index_item(
                     settings, conn, embedder,
                     chunk_key=f"issue:{repo}:{no}:c{c['id']}",
@@ -429,7 +439,7 @@ def sync_issues(
                 "body": body, "url": c.get("html_url"),
                 "created_at": c.get("created_at"), "updated_at": c.get("updated_at"),
             })
-            if not is_bot:
+            if _should_index(is_bot, author, settings):
                 _index_item(
                     settings, conn, embedder,
                     chunk_key=f"pr_review:{repo}:{no}:rc{c['id']}",

@@ -12,7 +12,7 @@
 - `shiori_read_file(path, range?)` / `shiori_read_issue(number)`: 指定ファイル／スレッドを必要なら一部だけ取得。
 - `shiori_ingest(rebuild?)`: docs と issue/PR を GitHub から同期し索引を更新する（オンデマンド。`rebuild=true` で全件再構築。issue #6）。
 
-検索系には `source_type`（doc / issue / pr_review）, `language`, `state` 等のフィルタを持たせる。
+検索系には `source_type`（doc / issue / pr_review）, `language`, `state` 等のフィルタを持たせる。bot 投稿は原則索引から除外されるが、`SHIORI_INDEX_BOT_LOGINS` 環境変数で allowlist 指定が可能（issue #25）。
 
 ## 設計方針
 
