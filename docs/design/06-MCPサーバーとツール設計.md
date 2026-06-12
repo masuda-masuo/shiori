@@ -4,12 +4,13 @@
 
 検索・取得の機能を MCP ツールとして公開し、エージェントが「検索 → 必要分だけ取得」を行えるようにする。
 
-## ツール（予定）
+## ツール
 
 - `shiori_semantic_search(query, filters?)`: 意味検索。チャンクのポインタ＋スニペットを返す。
 - `shiori_keyword_search(query, filters?)`: キーワード／完全一致検索（日本語対応トークナイズ）。
 - `shiori_list_tree(path?)`: リポジトリ構造の閲覧。
 - `shiori_read_file(path, range?)` / `shiori_read_issue(number)`: 指定ファイル／スレッドを必要なら一部だけ取得。
+- `shiori_ingest(rebuild?)`: docs と issue/PR を GitHub から同期し索引を更新する（オンデマンド。`rebuild=true` で全件再構築。issue #6）。
 
 検索系には `source_type`（doc / issue / pr_review）, `language`, `state` 等のフィルタを持たせる。
 
