@@ -8,10 +8,13 @@
 - read_issue(number)                : issue/PR スレッド全体を取得。
 - ingest(rebuild?, repo?)           : docs / issue / PR の差分同期（索引更新）。
 
+実際に MCP クライアントに公開されるツール名は shiori_ 接頭辞付き（issue #8）。
+filesystem 等の他 MCP サーバーとの名前衰突を避けるため。関数名は据え置き。
+
 検索結果は常にポインタ＋スニペット＋ GitHub URL。全文は read 系で取得する。
 
 索引更新は 3 経路（issue #2, #6 の決定）:
-- ingest ツール: エージェント／ユーザーによるオンデマンド更新。
+- shiori_ingest ツール: エージェント／ユーザーによるオンデマンド更新。
 - SHIORI_SYNC_INTERVAL_SECONDS: serve プロセス内のバックグラウンド自動同期（保険）。
   イベント駆動が主になったため推奨値は 3600 秒。
 - self-hosted runner: push / issue / PR イベントで即時差分同期（issue #6）。
@@ -152,16 +155,16 @@ mcp = FastMCP(
     port=settings.mcp_port,
     instructions=(
         "GitHub リポジトリの知識（Markdown ドキュメントと issue/PR の議論）への"
-        "ハイブリッド検索。まず semantic_search で検索し、ポインタ＋スニペットを得て、"
-        "必要な範囲だけ read_file / read_issue で取得すること。固有名詞・API 名・"
-        "エラーコード等の厳密一致には keyword_search を使う。"
+        "ハイブリッド検索。まず shiori_semantic_search で検索し、ポインタ＋スニペットを得て、"
+        "必要な範囲だけ shiori_read_file / shiori_read_issue で取得すること。固有名詞・API 名・"
+        "エラーコード等の厳密一致には shiori_keyword_search を使う。"
         "索引が古い・未索引と思われる場合（直近の変更がヒットしない等）は"
-        "ingest を呼んで差分同期する。"
+        "shiori_ingest を呼んで差分同期する。"
     ),
 )
 
 
-@mcp.tool()
+@mcp.tool(name="shiori_semantic_search")
 def semantic_search(
     query: str,
     source_type: str | None = None,
@@ -185,7 +188,7 @@ def semantic_search(
         )
 
 
-@mcp.tool()
+@mcp.tool(name="shiori_keyword_search")
 def keyword_search(
     query: str,
     source_type: str | None = None,
@@ -206,7 +209,7 @@ def keyword_search(
         )
 
 
-@mcp.tool()
+@mcp.tool(name="shiori_list_tree")
 def list_tree(path: str | None = None, repo: str | None = None) -> list[str]:
     """索引済みドキュメント（Markdown）のパス一覧。path を渡すとその配下に絞る。
     リポジトリの構造を把握し、当たりをつけるのに使う。"""
@@ -224,7 +227,7 @@ def list_tree(path: str | None = None, repo: str | None = None) -> list[str]:
         return [r[0] for r in cur.fetchall()]
 
 
-@mcp.tool()
+@mcp.tool(name="shiori_read_file")
 def read_file(
     path: str,
     start_line: int | None = None,
@@ -256,7 +259,7 @@ def read_file(
     }
 
 
-@mcp.tool()
+@mcp.tool(name="shiori_read_issue")
 def read_issue(number: int, repo: str | None = None) -> dict[str, Any]:
     """issue / PR のスレッド全体（本文＋コメント＋レビューコメント）を時系列で取得する。
     bot コメントも含まれる（is_bot で識別可能）。"""
@@ -298,7 +301,7 @@ def read_issue(number: int, repo: str | None = None) -> dict[str, Any]:
     }
 
 
-@mcp.tool()
+@mcp.tool(name="shiori_ingest")
 def ingest(rebuild: bool = False, repo: str | None = None) -> dict[str, Any]:
     """docs と issue/PR を GitHub から同期し索引を更新する（差分同期なので通常は数秒）。
     検索結果が古い・未索引と思われる場合（直近の変更がヒットしない、ユーザーが
