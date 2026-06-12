@@ -33,6 +33,7 @@ services:
       EMBEDDING_MODEL: ${EMBEDDING_MODEL:-intfloat/multilingual-e5-small}
       EMBEDDING_DIM: ${EMBEDDING_DIM:-384}
       SHIORI_SYNC_INTERVAL_SECONDS: ${SHIORI_SYNC_INTERVAL_SECONDS:-0}
+      SHIORI_INDEX_BOT_LOGINS: ${SHIORI_INDEX_BOT_LOGINS:-}
     volumes:
       - models:/models   # 埋め込みモデルの重みキャッシュ
       - repos:/data      # git クローン先
@@ -56,6 +57,7 @@ services:
       SHIORI_REPOS: ${SHIORI_REPOS:-}
       EMBEDDING_MODEL: ${EMBEDDING_MODEL:-intfloat/multilingual-e5-small}
       EMBEDDING_DIM: ${EMBEDDING_DIM:-384}
+      SHIORI_INDEX_BOT_LOGINS: ${SHIORI_INDEX_BOT_LOGINS:-}
       # GitHub App 認証（PAT を使う場合は GITHUB_TOKEN を渡す）
       GITHUB_TOKEN: ${GITHUB_TOKEN:-}
       GITHUB_APP_ID: ${GITHUB_APP_ID:-}
