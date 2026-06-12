@@ -3,7 +3,7 @@
 ツール構成（決定: semantic / keyword は分離を維持。semantic が入口で内部ハイブリッド）:
 - semantic_search(query, filters?)  : 意味検索（内部で RRF ハイブリッド）。入口。
 - keyword_search(query, filters?)   : 完全一致寄りのキーワード検索（日本語対応）。
-- list_tree(path?)                  : 索引済みドキュメントのツリー閲覧。
+- list_tree(path?)                  : 索引済みドキュメント＋コードファイルのツリー閲覧。
 - read_file(path, start?, end?)     : ローカルクローンからファイル（の一部）を取得。
 - read_issue(number)                : issue/PR スレッド全体を取得。
 - ingest(rebuild?, repo?)           : docs / issue / PR の差分同期（索引更新）。
@@ -163,17 +163,58 @@ def _auto_sync_loop(interval: int) -> None:
             log.exception("auto sync failed")
 
 
+# コードファイルとみなさない拡張子（ドキュメントとして索引済み）
+_DOC_EXTENSIONS = {".md", ".mdx", ".markdown"}
+
+# 常に除外するディレクトリ名
+_EXCLUDE_DIRS = {".git"}
+
+
+def _walk_code_files(base: str, prefix: str) -> set[str]:
+    """クローンを walk し、コードファイル（非ドキュメント）の相対パス集合を返す。
+
+    .git ディレクトリはスキップ。.md / .mdx / .markdown は doc_files が担当するため除外。
+    prefix が指定された場合はその配下のみを対象とする。
+    """
+    paths: set[str] = set()
+    if not os.path.isdir(base):
+        return paths
+    for dirpath, dirnames, filenames in os.walk(base):
+        # 除外ディレクトリをスキップ
+        dirnames[:] = [d for d in dirnames if d not in _EXCLUDE_DIRS]
+        rel_dir = os.path.relpath(dirpath, base)
+        if rel_dir == ".":
+            rel_dir = ""
+        # prefix フィルタ（ディレクトリ単位の枝刈り）
+        if prefix:
+            if rel_dir and not rel_dir.startswith(prefix) and not prefix.startswith(rel_dir + "/"):
+                # 現在のディレクトリが prefix の範囲外かつ prefix の祖先でもなければスキップ
+                if not (rel_dir + "/").startswith(prefix + "/") and rel_dir != prefix:
+                    continue
+        for fn in filenames:
+            if any(fn.endswith(ext) for ext in _DOC_EXTENSIONS):
+                continue
+            rel_path = os.path.join(rel_dir, fn) if rel_dir else fn
+            if prefix and not rel_path.startswith(prefix):
+                continue
+            paths.add(rel_path)
+    return paths
+
+
 mcp = FastMCP(
     "shiori",
     host=settings.mcp_host,
     port=settings.mcp_port,
     instructions=(
-        "GitHub リポジトリの知識（Markdown ドキュメントと issue/PR の議論）への"
-        "ハイブリッド検索。まず shiori_semantic_search で検索し、ポインタ＋スニペットを得て、"
+        "GitHub リポジトリの知識（Markdown ドキュメント、issue/PR の議論、"
+        "ソースコード）へのハイブリッド検索。"
+        "まず shiori_semantic_search で検索し、ポインタ＋スニペットを得て、"
         "必要な範囲だけ shiori_read_file / shiori_read_issue で取得すること。固有名詞・API 名・"
         "エラーコード等の厳密一致には shiori_keyword_search を使う。"
         "索引が古い・未索引と思われる場合（直近の変更がヒットしない等）は"
         "shiori_ingest を呼んで差分同期する。索引が最新かどうかの確認は shiori_status。"
+        "コードファイルの発見には shiori_list_tree を使い、"
+        "shiori_read_file で中身を読める（path, start_line, end_line 指定可）。"
     ),
 )
 
@@ -226,8 +267,14 @@ def keyword_search(
 @mcp.tool(name="shiori_list_tree")
 def list_tree(path: str | None = None, repo: str | None = None) -> list[str]:
     """索引済みドキュメント（Markdown）のパス一覧。path を渡すとその配下に絞る。
-    リポジトリの構造を把握し、当たりをつけるのに使う。"""
+    リポジトリの構造を把握し、当たりをつけるのに使う。
+
+    コードファイル（.py, .ts, .go 等）もクローンファイルシステムから返す。
+    コードは索引前でも発見可能。"""
     target = _resolve_repo(repo)
+    paths: set[str] = set()
+
+    # 1. 索引済みドキュメント（doc_files テーブル）
     with _conn() as conn, conn.cursor() as cur:
         if path:
             cur.execute(
@@ -238,7 +285,16 @@ def list_tree(path: str | None = None, repo: str | None = None) -> list[str]:
             cur.execute(
                 "SELECT path FROM doc_files WHERE repo = %s ORDER BY path", (target,)
             )
-        return [r[0] for r in cur.fetchall()]
+        for r in cur.fetchall():
+            paths.add(r[0])
+
+    # 2. コードファイル（クローンファイルシステム）
+    base = os.path.realpath(settings.repo_dir(target))
+    prefix = path.rstrip("/") if path else ""
+    code_paths = _walk_code_files(base, prefix)
+    paths.update(code_paths)
+
+    return sorted(paths)
 
 
 @mcp.tool(name="shiori_read_file")
@@ -249,7 +305,8 @@ def read_file(
     repo: str | None = None,
 ) -> dict[str, Any]:
     """指定ファイルの全文（または start_line〜end_line の範囲）を取得する。
-    検索結果のポインタから本当に必要な範囲だけ読むこと。"""
+    検索結果のポインタから本当に必要な範囲だけ読むこと。
+    ドキュメントだけでなくコードファイルも読める。"""
     target = _resolve_repo(repo)
     base = os.path.realpath(settings.repo_dir(target))
     full = os.path.realpath(os.path.join(base, path))
