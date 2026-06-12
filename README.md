@@ -38,6 +38,7 @@ shiori はこれを逆転させる。リポジトリをローカルに索引し�
 - `shiori_keyword_search` — 完全一致／識別子検索（日本語対応トークナイズ）
 - `shiori_list_tree` — リポジトリ構造の閲覧
 - `shiori_read_file` / `shiori_read_issue` — 指定ファイル／スレッドを必要なら一部だけ取得
+- `shiori_ingest` — 索引の差分更新（オンデマンド。`rebuild=true` で全件再構築）
 
 検索系ツールは全文ではなくポインタ（パス／見出しパス／issue 番号＋スニペット＋GitHub URL）を返す。
 
@@ -46,14 +47,16 @@ shiori はこれを逆転させる。リポジトリをローカルに索引し�
 ```bash
 cp .env.example .env   # SHIORI_REPOS / GITHUB_TOKEN を設定
 docker compose up -d --build
-docker compose run --rm app python -m shiori ingest
+
+# 初回の索引作成（private リポジトリには事前に .env の GITHUB_TOKEN または GitHub App の設定が必要）
+docker compose run --rm ingest
 ```
 
 MCP クライアントからは `http://localhost:8765/mcp`（streamable HTTP）に接続する。詳細は `docs/guides/セットアップ.md`。
 
 ## ステータス
 
-✅ **v1 実装済み。** 取り込み（差分同期）・ハイブリッド検索・MCP ツール 5 種・Docker Compose 構成まで動作する。設計時の未決事項の解消は各設計書の「決定」節に記録している。残課題は `docs/design/基本設計.md` の未決事項サマリを参照。
+✅ **v1 実装済み。** 取り込み（差分同期）・ハイブリッド検索・MCP ツール 6 種・Docker Compose 構成まで動作する。設計時の未決事項の解消は各設計書の「決定」節に記録している。残課題は `docs/design/基本設計.md` の未決事項サマリを参照。
 
 ## ドキュメント構成
 
