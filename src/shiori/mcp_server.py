@@ -7,7 +7,7 @@
 - read_file(path, start?, end?)     : ローカルクローンからファイル（の一部）を取得。
 - read_issue(number)                : issue/PR スレッド全体を取得。
 - ingest(rebuild?, repo?)           : docs / issue / PR の差分同期（索引更新）。
-- status()                          : 索引の鮮度（最終同期時刻・経路 等）の照会（issue #22）。
+- status()                          : 索引の鮮度と健全性（最終同期時刻・件数内訳・警告）。
 
 実際に MCP クライアントに公開されるツール名は shiori_ 接頭辞付き（issue #8）。
 filesystem 等の他 MCP サーバーとの名前衰突を避けるため。関数名は据え置き。
@@ -324,18 +324,56 @@ def ingest(rebuild: bool = False, repo: str | None = None) -> dict[str, Any]:
     return _do_sync(repos=[repo] if repo else None, rebuild=rebuild, route="mcp")
 
 
+_STALE_SECONDS = 86400  # 24 時間
+
+
+def _build_warnings(
+    info: dict,
+    chunk_counts: dict[str, int],
+    items_in_db: int,
+    cursors: dict[str, str | None],
+) -> list[str]:
+    """索引の異常を検出して警告リストを返す（issue #31）。"""
+    warnings: list[str] = []
+
+    # 鮮度: 最終同期から長時間経過
+    age = info.get("age_seconds")
+    if age is not None and age > _STALE_SECONDS:
+        hours = age // 3600
+        warnings.append(
+            f"最終同期から {hours} 時間経過。索引が古い可能性があります"
+        )
+
+    # 構造的欠落: issue_items はあるが chunks が極端に少ない
+    issue_chunks = chunk_counts.get("issue", 0)
+    if items_in_db > 0 and issue_chunks < items_in_db // 2:
+        warnings.append(
+            f"issue_items は {items_in_db} 件あるが chunks[issue] は {issue_chunks} 件。"
+            "bot 除外（SHIORI_INDEX_BOT_LOGINS）または索引欠落の可能性があります"
+        )
+
+    # 未同期カテゴリ: sync_state にカーソルがない種類
+    all_kinds = {"docs", "issues", "issue_comments", "pr_review_comments"}
+    missing = [k for k in all_kinds if k not in cursors]
+    if missing:
+        warnings.append(
+            f"未同期の種類があります: {', '.join(missing)}。"
+            "shiori_ingest で差分同期してください"
+        )
+
+    return warnings
+
+
 @mcp.tool(name="shiori_status")
 def status() -> dict[str, Any]:
-    """索引の鮮度を返す。リポジトリごとに最終同期の完了時刻（last_synced_at）・
+    """索引の鮮度と健全性を返す。リポジトリごとに最終同期の完了時刻（last_synced_at）・
     経過秒数（age_seconds）・実行経路（cli / runner / mcp / auto）・直近の更新件数・
-    差分同期カーソル・チャンク数を返す。「索引は最新か?」の判断に使う:
+    チャンク数内訳（doc / issue / pr_review）・issue_items 全件数・差分同期カーソル・
+    警告（warnings）を返す。「索引は最新か?」の判断に使う:
     age_seconds が小さければ同期済み、大きい／last_synced_at が null なら
-    shiori_ingest で差分同期すること。"""
+    shiori_ingest で差分同期すること。warnings があれば索引に異常がある可能性。"""
     with _conn() as conn:
         runs = db.get_sync_runs(conn)
-        with conn.cursor() as cur:
-            cur.execute("SELECT repo, count(*) FROM chunks GROUP BY repo")
-            counts = dict(cur.fetchall())
         repos: dict[str, Any] = {}
         for repo in settings.repos:
             info = runs.get(repo) or {
@@ -345,8 +383,15 @@ def status() -> dict[str, Any]:
                 "docs_updated": None,
                 "issues_indexed": None,
             }
-            info["chunks"] = counts.get(repo, 0)
-            info["cursors"] = db.get_cursors(conn, repo)
+            chunk_counts = db.get_chunk_counts(conn, repo)
+            items_in_db = db.get_issue_item_count(conn, repo)
+            cursors = db.get_cursors(conn, repo)
+            info["chunks"] = chunk_counts
+            info["items_in_db"] = items_in_db
+            info["cursors"] = cursors
+            warnings = _build_warnings(info, chunk_counts, items_in_db, cursors)
+            if warnings:
+                info["warnings"] = warnings
             repos[repo] = info
     return {
         "repos": repos,

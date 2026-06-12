@@ -214,6 +214,26 @@ def get_sync_runs(conn: psycopg.Connection) -> dict[str, dict]:
     }
 
 
+def get_chunk_counts(conn: psycopg.Connection, repo: str) -> dict[str, int]:
+    """source_type ごとのチャンク数（issue #31）。"""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT source_type, count(*) FROM chunks WHERE repo = %s GROUP BY source_type",
+            (repo,),
+        )
+        return dict(cur.fetchall())
+
+
+def get_issue_item_count(conn: psycopg.Connection, repo: str) -> int:
+    """issue_items の総行数（bot 含む全件。issue #31）。"""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) FROM issue_items WHERE repo = %s", (repo,)
+        )
+        row = cur.fetchone()
+        return row[0] if row else 0
+
+
 def vec_literal(vec) -> str:
     return "[" + ",".join(f"{float(x):.6f}" for x in vec) + "]"
 
