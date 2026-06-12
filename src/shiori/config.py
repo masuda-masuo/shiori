@@ -14,6 +14,16 @@ def _repos_from_env() -> list[str]:
     return [r.strip() for r in raw.split(",") if r.strip()]
 
 
+def _index_bot_logins_from_env() -> set[str]:
+    """SHIORI_INDEX_BOT_LOGINS を小文字の set で返す。
+
+    カンマ区切り。例: ``mcp-launcher-masuda[bot]``
+    ここに列挙された bot login は is_bot=true でも索引対象にする（allowlist）。
+    """
+    raw = os.environ.get("SHIORI_INDEX_BOT_LOGINS", "")
+    return {s.strip().lower() for s in raw.split(",") if s.strip()}
+
+
 @dataclass
 class Settings:
     # Postgres (pgvector + pgroonga)
@@ -81,6 +91,10 @@ class Settings:
     mcp_port: int = field(
         default_factory=lambda: int(os.environ.get("SHIORI_MCP_PORT", "8765"))
     )
+    # bot でも索引する login の allowlist（カンマ区切り。issue #25）
+    # GitHub App 経由の投稿は [bot] 扱いになるが、ユーザーの代理として
+    # 価値のある投稿を行う bot をここに列挙することで索引対象にできる。
+    index_bot_logins: set[str] = field(default_factory=_index_bot_logins_from_env)
 
     def repo_dir(self, repo: str) -> str:
         owner, name = repo.split("/", 1)
