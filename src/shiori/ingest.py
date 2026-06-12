@@ -9,11 +9,17 @@
     PostgreSQL advisory lock (pg_try_advisory_lock) を使い、serve プロセスの
     自動同期や MCP ツール ingest との同時実行を防ぐ。
     SYNC_LOCK_KEY は mcp_server.py と同じ値（0x5348494F = 'SHIO'）。
+
+鮮度の記録（issue #22）:
+    リポジトリごとの同期完了時に sync_runs へ完了時刻と経路を記録する。
+    経路は環境変数 SHIORI_INGEST_ROUTE（既定 'cli'）。reindex.yml（self-hosted
+    runner）は 'runner' を設定して実行経路を識別できるようにする。
 """
 
 from __future__ import annotations
 
 import logging
+import os
 
 from . import db
 from .config import Settings, load_settings
@@ -38,6 +44,7 @@ def run_ingest(
         raise SystemExit("SHIORI_REPOS が未設定です（例: SHIORI_REPOS=owner/name）")
 
     provider = build_token_provider(settings)
+    route = os.environ.get("SHIORI_INGEST_ROUTE", "cli")
 
     conn = db.connect(settings)
     db.migrate(conn, settings)
@@ -68,6 +75,8 @@ def run_ingest(
             log.info("docs: %d files updated", n_docs)
             n_items = sync_issues(settings, conn, embedder, repo, provider)
             log.info("issues/PR: %d items indexed", n_items)
+            finished_at = db.record_sync_run(conn, repo, route, n_docs, n_items)
+            log.info("synced at %s (route=%s)", finished_at.isoformat(), route)
 
         with conn.cursor() as cur:
             cur.execute("SELECT source_type, count(*) FROM chunks GROUP BY 1 ORDER BY 1")

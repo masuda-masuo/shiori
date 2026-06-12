@@ -33,6 +33,17 @@ CREATE TABLE IF NOT EXISTS sync_state (
     PRIMARY KEY (repo, kind)
 );
 
+-- 同期実行の記録（索引の鮮度確認用。issue #22）
+-- sync_state のカーソルは「最後に取り込んだアイテムの updated_at」であり実行時刻ではない。
+-- こちらは変更が 0 件でも同期が成功するたびに更新されるため、鮮度の指標になる。
+CREATE TABLE IF NOT EXISTS sync_runs (
+    repo TEXT PRIMARY KEY,
+    route TEXT,                   -- 'cli' | 'runner' | 'mcp' | 'auto'
+    finished_at TIMESTAMPTZ NOT NULL,
+    docs_updated INTEGER,
+    issues_indexed INTEGER
+);
+
 CREATE TABLE IF NOT EXISTS doc_files (
     repo TEXT NOT NULL,
     path TEXT NOT NULL,
@@ -140,6 +151,67 @@ def set_cursor(conn: psycopg.Connection, repo: str, kind: str, cursor: str) -> N
             (repo, kind, cursor),
         )
     conn.commit()
+
+
+def get_cursors(conn: psycopg.Connection, repo: str) -> dict[str, str | None]:
+    with conn.cursor() as cur:
+        cur.execute("SELECT kind, cursor FROM sync_state WHERE repo = %s", (repo,))
+        return dict(cur.fetchall())
+
+
+def record_sync_run(
+    conn: psycopg.Connection,
+    repo: str,
+    route: str,
+    docs_updated: int,
+    issues_indexed: int,
+):
+    """同期の成功をリポジトリ単位で記録し、完了時刻（DB の now()）を返す（issue #22）。
+
+    advisory lock で skip された実行は呼び出し側で記録しないこと（成功した同期のみ）。
+    時刻は DB の now() を使う: 複数経路・複数プロセスでも単一 DB の時計で一貫する。
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO sync_runs (repo, route, finished_at, docs_updated, issues_indexed)
+            VALUES (%s, %s, now(), %s, %s)
+            ON CONFLICT (repo) DO UPDATE SET
+                route = EXCLUDED.route,
+                finished_at = EXCLUDED.finished_at,
+                docs_updated = EXCLUDED.docs_updated,
+                issues_indexed = EXCLUDED.issues_indexed
+            RETURNING finished_at
+            """,
+            (repo, route, docs_updated, issues_indexed),
+        )
+        finished_at = cur.fetchone()[0]
+    conn.commit()
+    return finished_at
+
+
+def get_sync_runs(conn: psycopg.Connection) -> dict[str, dict]:
+    """リポジトリごとの最終同期記録。age_seconds は DB 時計基準の経過秒数。"""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT repo, route, finished_at,
+                   EXTRACT(EPOCH FROM (now() - finished_at))::bigint,
+                   docs_updated, issues_indexed
+            FROM sync_runs
+            """
+        )
+        rows = cur.fetchall()
+    return {
+        r[0]: {
+            "last_synced_at": r[2].isoformat(),
+            "age_seconds": int(r[3]),
+            "route": r[1],
+            "docs_updated": r[4],
+            "issues_indexed": r[5],
+        }
+        for r in rows
+    }
 
 
 def vec_literal(vec) -> str:

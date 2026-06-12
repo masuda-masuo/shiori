@@ -33,4 +33,7 @@ jobs:
     steps:
       - name: 差分同期
         run: python -m shiori ingest
+        env:
+          # sync_runs の経路記録（issue #22）。既定は 'cli' のため runner を明示する。
+          SHIORI_INGEST_ROUTE: runner
         # actions/checkout は不要（ingest が自前で clone/fetch する）
