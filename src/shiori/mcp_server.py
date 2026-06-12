@@ -7,6 +7,7 @@
 - read_file(path, start?, end?)     : ローカルクローンからファイル（の一部）を取得。
 - read_issue(number)                : issue/PR スレッド全体を取得。
 - ingest(rebuild?, repo?)           : docs / issue / PR の差分同期（索引更新）。
+- status()                          : 索引の鮮度（最終同期時刻・経路 等）の照会（issue #22）。
 
 実際に MCP クライアントに公開されるツール名は shiori_ 接頭辞付き（issue #8）。
 filesystem 等の他 MCP サーバーとの名前衰突を避けるため。関数名は据え置き。
@@ -19,6 +20,9 @@ filesystem 等の他 MCP サーバーとの名前衰突を避けるため。関�
   イベント駆動が主になったため推奨値は 3600 秒。
 - self-hosted runner: push / issue / PR イベントで即時差分同期（issue #6）。
   同期の実体は _do_sync()。PostgreSQL advisory lock でプロセス横断の排他を保証。
+
+同期が成功するたびに sync_runs へ完了時刻と経路（mcp / auto。runner / cli は
+ingest.py 側で記録）を残し、shiori_status で照会できる（issue #22）。
 """
 
 from __future__ import annotations
@@ -89,13 +93,18 @@ def _make_filters(
     }
 
 
-def _do_sync(repos: list[str] | None = None, rebuild: bool = False) -> dict[str, Any]:
+def _do_sync(
+    repos: list[str] | None = None,
+    rebuild: bool = False,
+    route: str = "mcp",
+) -> dict[str, Any]:
     """差分同期の実体。ingest ツールと自動同期ループの両方から呼ばれる。
 
     プロセス内排他: _sync_lock（threading.Lock）で早期 skip。
     プロセス横断排他: PostgreSQL advisory lock (pg_try_advisory_lock) で、
     runner ジョブ（別プロセス）との同時実行を防ぐ。
     どちらも非ブロッキング（取得失敗 = skip）。
+    リポジトリごとの完了時に sync_runs へ完了時刻と経路を記録する（issue #22）。
     """
     if not _sync_lock.acquire(blocking=False):
         return {"status": "skipped", "reason": "同期が既に実行中です"}
@@ -125,12 +134,17 @@ def _do_sync(repos: list[str] | None = None, rebuild: bool = False) -> dict[str,
                 for repo in targets:
                     n_docs = sync_docs(settings, conn, embedder, repo, provider)
                     n_items = sync_issues(settings, conn, embedder, repo, provider)
+                    finished_at = db.record_sync_run(
+                        conn, repo, route, n_docs, n_items
+                    )
                     result["repos"][repo] = {
                         "docs_updated": n_docs,
                         "issues_indexed": n_items,
+                        "synced_at": finished_at.isoformat(),
                     }
                     log.info(
-                        "synced %s: docs=%d issues=%d", repo, n_docs, n_items
+                        "synced %s: docs=%d issues=%d (route=%s)",
+                        repo, n_docs, n_items, route,
                     )
             finally:
                 with conn.cursor() as cur:
@@ -144,7 +158,7 @@ def _auto_sync_loop(interval: int) -> None:
     while True:
         time.sleep(interval)
         try:
-            log.info("auto sync: %s", _do_sync())
+            log.info("auto sync: %s", _do_sync(route="auto"))
         except Exception:
             log.exception("auto sync failed")
 
@@ -159,7 +173,7 @@ mcp = FastMCP(
         "必要な範囲だけ shiori_read_file / shiori_read_issue で取得すること。固有名詞・API 名・"
         "エラーコード等の厳密一致には shiori_keyword_search を使う。"
         "索引が古い・未索引と思われる場合（直近の変更がヒットしない等）は"
-        "shiori_ingest を呼んで差分同期する。"
+        "shiori_ingest を呼んで差分同期する。索引が最新かどうかの確認は shiori_status。"
     ),
 )
 
@@ -307,7 +321,37 @@ def ingest(rebuild: bool = False, repo: str | None = None) -> dict[str, Any]:
     検索結果が古い・未索引と思われる場合（直近の変更がヒットしない、ユーザーが
     最近の変更に言及している等）に呼ぶ。rebuild=True で索引を破棄して全件作り直す
     （埋め込みモデル変更時のみ）。repo 省略時は設定済みの全リポジトリを同期する。"""
-    return _do_sync(repos=[repo] if repo else None, rebuild=rebuild)
+    return _do_sync(repos=[repo] if repo else None, rebuild=rebuild, route="mcp")
+
+
+@mcp.tool(name="shiori_status")
+def status() -> dict[str, Any]:
+    """索引の鮮度を返す。リポジトリごとに最終同期の完了時刻（last_synced_at）・
+    経過秒数（age_seconds）・実行経路（cli / runner / mcp / auto）・直近の更新件数・
+    差分同期カーソル・チャンク数を返す。「索引は最新か?」の判断に使う:
+    age_seconds が小さければ同期済み、大きい／last_synced_at が null なら
+    shiori_ingest で差分同期すること。"""
+    with _conn() as conn:
+        runs = db.get_sync_runs(conn)
+        with conn.cursor() as cur:
+            cur.execute("SELECT repo, count(*) FROM chunks GROUP BY repo")
+            counts = dict(cur.fetchall())
+        repos: dict[str, Any] = {}
+        for repo in settings.repos:
+            info = runs.get(repo) or {
+                "last_synced_at": None,
+                "age_seconds": None,
+                "route": None,
+                "docs_updated": None,
+                "issues_indexed": None,
+            }
+            info["chunks"] = counts.get(repo, 0)
+            info["cursors"] = db.get_cursors(conn, repo)
+            repos[repo] = info
+    return {
+        "repos": repos,
+        "sync_interval_seconds": settings.sync_interval_seconds,
+    }
 
 
 def run(transport: str = "streamable-http") -> None:
