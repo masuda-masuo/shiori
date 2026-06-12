@@ -166,31 +166,24 @@ def _auto_sync_loop(interval: int) -> None:
 # コードファイルとみなさない拡張子（ドキュメントとして索引済み）
 _DOC_EXTENSIONS = {".md", ".mdx", ".markdown"}
 
-# 常に除外するディレクトリ名
+# os.walk で常にスキップするディレクトリ名
 _EXCLUDE_DIRS = {".git"}
 
 
 def _walk_code_files(base: str, prefix: str) -> set[str]:
     """クローンを walk し、コードファイル（非ドキュメント）の相対パス集合を返す。
 
-    .git ディレクトリはスキップ。.md / .mdx / .markdown は doc_files が担当するため除外。
-    prefix が指定された場合はその配下のみを対象とする。
+    .git はスキップ。.md / .mdx / .markdown は doc_files が担当するため除外。
+    prefix が指定された場合はその配下のファイルのみを返す。
     """
     paths: set[str] = set()
     if not os.path.isdir(base):
         return paths
     for dirpath, dirnames, filenames in os.walk(base):
-        # 除外ディレクトリをスキップ
         dirnames[:] = [d for d in dirnames if d not in _EXCLUDE_DIRS]
         rel_dir = os.path.relpath(dirpath, base)
         if rel_dir == ".":
             rel_dir = ""
-        # prefix フィルタ（ディレクトリ単位の枝刈り）
-        if prefix:
-            if rel_dir and not rel_dir.startswith(prefix) and not prefix.startswith(rel_dir + "/"):
-                # 現在のディレクトリが prefix の範囲外かつ prefix の祖先でもなければスキップ
-                if not (rel_dir + "/").startswith(prefix + "/") and rel_dir != prefix:
-                    continue
         for fn in filenames:
             if any(fn.endswith(ext) for ext in _DOC_EXTENSIONS):
                 continue
