@@ -74,9 +74,13 @@ services:
   # push / issue / PR イベントを GitHub からアウトバウンドのロングポーリングで受け取り、
   # `python -m shiori ingest` を実行する。inbound ポート開放・トンネル・Webhook 不要。
   # 初回起動前に `docker compose run --rm runner ./config.sh ...` で登録が必要。
-  # セキュリティ注意: private リポジトリ専用。public 化する場合は runner を廃止すること
+  # profiles: ["runner"] により、`docker compose up -d` だけでは起動しない。
+  # COMPOSE_PROFILES=runner（または --profile runner）で有効化（issue #15）。
+  # セキュリティ注意: private リポジトリ専用。public 化する場合はプロファイルを無効化し、
+  # config.sh remove で runner 登録を解除すること
   # （fork PR からの任意コード実行リスク。代替は Webhook + Cloudflare Tunnel + HMAC）。
   runner:
+    profiles: ["runner"]
     build:
       context: .
       dockerfile: docker/runner/Dockerfile

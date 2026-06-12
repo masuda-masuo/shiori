@@ -1,7 +1,9 @@
 # self-hosted runner によるイベント駆動索引更新（issue #6）。
 # push / issue / PR の各イベントを受け取り、差分同期を実行する。
 # self-hosted runner は private リポジトリ専用。
-# public 化する場合はこのワークフローを削除し、Webhook + Cloudflare Tunnel + HMAC に切り替える。
+# if: github.event.repository.private == true により、public 化時はジョブが自動スキップされる（issue #15）。
+# public 化する場合はプロファイル無効化 + config.sh remove + 本ガードにより自動停止。
+# 根本的な代替は Webhook + Cloudflare Tunnel + HMAC。
 name: reindex
 
 on:
@@ -25,6 +27,7 @@ concurrency:
 
 jobs:
   ingest:
+    if: github.event.repository.private == true
     runs-on: [self-hosted, shiori]
     timeout-minutes: 15   # 初回: 埋め込みモデルダウンロードを考慮した値
     steps:
