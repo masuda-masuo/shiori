@@ -174,7 +174,8 @@ def _walk_code_files(base: str, prefix: str) -> set[str]:
     """クローンを walk し、コードファイル（非ドキュメント）の相対パス集合を返す。
 
     .git はスキップ。.md / .mdx / .markdown は doc_files が担当するため除外。
-    prefix が指定された場合はその配下のファイルのみを返す。
+    prefix が指定された場合はそのパス自身またはその配下のファイルのみを返す
+    （例: prefix="src" は "src/main.py" にマッチ、"src2/main.py" にはマッチしない）。
     """
     paths: set[str] = set()
     if not os.path.isdir(base):
@@ -188,7 +189,9 @@ def _walk_code_files(base: str, prefix: str) -> set[str]:
             if any(fn.endswith(ext) for ext in _DOC_EXTENSIONS):
                 continue
             rel_path = os.path.join(rel_dir, fn) if rel_dir else fn
-            if prefix and not rel_path.startswith(prefix):
+            if prefix and not (
+                rel_path == prefix or rel_path.startswith(prefix + "/")
+            ):
                 continue
             paths.add(rel_path)
     return paths
@@ -270,9 +273,13 @@ def list_tree(path: str | None = None, repo: str | None = None) -> list[str]:
     # 1. 索引済みドキュメント（doc_files テーブル）
     with _conn() as conn, conn.cursor() as cur:
         if path:
+            # path 自身または path/ 配下にマッチ（例: "src" で "src2" は除外）
+            prefix = path.rstrip("/")
             cur.execute(
-                "SELECT path FROM doc_files WHERE repo = %s AND path LIKE %s ORDER BY path",
-                (target, path.rstrip("/") + "%"),
+                "SELECT path FROM doc_files"
+                " WHERE repo = %s AND (path = %s OR path LIKE %s)"
+                " ORDER BY path",
+                (target, prefix, prefix + "/%"),
             )
         else:
             cur.execute(
