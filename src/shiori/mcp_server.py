@@ -163,19 +163,56 @@ def _auto_sync_loop(interval: int) -> None:
             log.exception("auto sync failed")
 
 
-# コードファイルとみなさない拡張子（ドキュメントとして索引済み）
+# ── _walk_code_files: コードファイル収集 ──
+
+# ドキュメント拡張子（大文字小文字無視）。doc_files テーブルが担当するため walk から除外
 _DOC_EXTENSIONS = {".md", ".mdx", ".markdown"}
 
-# os.walk で常にスキップするディレクトリ名
-_EXCLUDE_DIRS = {".git"}
+# os.walk でスキップするディレクトリ名（設計 10 決定 7: 量と質の両面でノイズ除去）
+_EXCLUDE_DIRS = {
+    ".git",
+    "node_modules",
+    ".venv", "venv",
+    "dist", "build",
+    "__pycache__",
+    ".tox", ".eggs",
+    ".next",  # Next.js
+    "target",  # Rust
+}
+
+# コードリストに含めないファイル拡張子（大文字小文字無視）
+# バイナリ・アセット・ロックファイル等、LLM が読んでも有益でないもの
+_EXCLUDE_EXTENSIONS = {
+    ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".webp",
+    ".woff", ".woff2", ".ttf", ".eot", ".otf",
+    ".pyc", ".pyo",
+    ".so", ".dylib", ".dll", ".wasm",
+    ".zip", ".tar", ".gz", ".bz2", ".xz", ".7z",
+    ".pdf",
+    ".lock",  # package-lock.json, yarn.lock, Gemfile.lock 等
+    ".min.js", ".min.css",  # minified
+}
+
+
+def _is_doc_file(filename: str) -> bool:
+    """ファイル名がドキュメント拡張子か（大文字小文字無視）。"""
+    return any(filename.lower().endswith(ext) for ext in _DOC_EXTENSIONS)
+
+
+def _is_excluded_file(filename: str) -> bool:
+    """ファイル名が除外拡張子か（大文字小文字無視）。"""
+    lower = filename.lower()
+    return any(lower.endswith(ext) for ext in _EXCLUDE_EXTENSIONS)
 
 
 def _walk_code_files(base: str, prefix: str) -> set[str]:
-    """クローンを walk し、コードファイル（非ドキュメント）の相対パス集合を返す。
+    """クローンを walk し、コードファイルの相対パス集合を返す。
 
-    .git はスキップ。.md / .mdx / .markdown は doc_files が担当するため除外。
-    prefix が指定された場合はそのパス自身またはその配下のファイルのみを返す
-    （例: prefix="src" は "src/main.py" にマッチ、"src2/main.py" にはマッチしない）。
+    - .git / node_modules / .venv / __pycache__ 等のノイズディレクトリをスキップ
+    - .md / .mdx / .markdown は doc_files テーブルが担当するため除外
+    - バイナリ・アセット・ロックファイル等の非テキスト拡張子も除外
+    - prefix が指定された場合はそのパス自身またはその配下のファイルのみを返す
+      （例: prefix="src" は "src/main.py" にマッチ、"src2/main.py" にはマッチしない）
     """
     paths: set[str] = set()
     if not os.path.isdir(base):
@@ -186,7 +223,7 @@ def _walk_code_files(base: str, prefix: str) -> set[str]:
         if rel_dir == ".":
             rel_dir = ""
         for fn in filenames:
-            if any(fn.endswith(ext) for ext in _DOC_EXTENSIONS):
+            if _is_doc_file(fn) or _is_excluded_file(fn):
                 continue
             rel_path = os.path.join(rel_dir, fn) if rel_dir else fn
             if prefix and not (
@@ -202,15 +239,15 @@ mcp = FastMCP(
     host=settings.mcp_host,
     port=settings.mcp_port,
     instructions=(
-        "GitHub リポジトリの知識（Markdown ドキュメント、issue/PR の議論、"
-        "ソースコード）へのハイブリッド検索。"
+        "GitHub リポジトリの知識（Markdown ドキュメントと issue/PR の議論）への"
+        "ハイブリッド検索。"
         "まず shiori_semantic_search で検索し、ポインタ＋スニペットを得て、"
         "必要な範囲だけ shiori_read_file / shiori_read_issue で取得すること。固有名詞・API 名・"
         "エラーコード等の厳密一致には shiori_keyword_search を使う。"
         "索引が古い・未索引と思われる場合（直近の変更がヒットしない等）は"
         "shiori_ingest を呼んで差分同期する。索引が最新かどうかの確認は shiori_status。"
-        "コードファイルの発見には shiori_list_tree を使い、"
-        "shiori_read_file で中身を読める（path, start_line, end_line 指定可）。"
+        "コードファイルは shiori_list_tree で発見し shiori_read_file で読める"
+        "（path, start_line, end_line 指定可。検索は未対応のため発見には list_tree を使うこと）。"
     ),
 )
 
