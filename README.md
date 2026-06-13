@@ -38,7 +38,7 @@ dependabot 等の bot 投稿は検索ノイズを避けるため原則索引か�
 
 - `shiori_semantic_search` — 意味ベースの検索（内部でハイブリッド融合）。入口ツール
 - `shiori_keyword_search` — 完全一致／識別子検索（日本語対応トークナイズ）
-- `shiori_list_tree` — リポジトリ構造の閲覧
+- `shiori_list_tree` — リポジトリ構造の閲覧。`source_type`（`doc` / `code`）と `extension`（`.py` / `.md` 等）で絞り込み可能
 - `shiori_read_file` / `shiori_read_issue` — 指定ファイル／スレッドを必要なら一部だけ取得
 - `shiori_ingest` — 索引の差分更新（オンデマンド。`rebuild=true` で全件再構築）
 
