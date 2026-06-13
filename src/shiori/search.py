@@ -4,6 +4,7 @@
 - `semantic_search` は内部でハイブリッド: pgvector 類似度と pgroonga キーワードの
   双方で候補を取り、RRF (k=60) で融合して top-k を返す。エージェントの入口ツール。
 - `keyword_search` は pgroonga (`&@~`) による厳密寄りの検索専用として分離して残す。
+  code チャンクに対しては content に加えて symbols カラムも OR 検索する（issue #33）。
 - リランクモデルは v1 では不採用（RRF のみ）。
 - 返すのは常にポインタ＋スニペット（既定 400 字）。state / updated_at を結果に
   含め、鮮度の判断はエージェント側に委ねる。
@@ -52,7 +53,7 @@ class SearchHit:
 def _filter_sql(filters: dict | None) -> tuple[str, list]:
     clauses, params = [], []
     f = filters or {}
-    for col in ("source_type", "language", "state", "repo"):
+    for col in ("source_type", "language", "state", "repo", "prog_lang"):
         if f.get(col):
             clauses.append(f"{col} = %s")
             params.append(f[col])
@@ -104,16 +105,18 @@ def _keyword_candidates(
     conn: psycopg.Connection, query: str, filters: dict | None, limit: int
 ) -> list[tuple]:
     fsql, fparams = _filter_sql(filters)
+    # code チャンクは content（シグネチャ＋docstring）と symbols（識別子分割文字列）の
+    # 両方を pgroonga 検索する。OR 検索で片方にヒットすれば候補になる。
     with conn.cursor() as cur:
         cur.execute(
             f"""
             SELECT {_RESULT_COLS}, pgroonga_score(tableoid, ctid) AS score
             FROM chunks
-            WHERE content &@~ %s{fsql}
+            WHERE (content &@~ %s OR symbols &@~ %s){fsql}
             ORDER BY score DESC
             LIMIT %s
             """,
-            [query, *fparams, limit],
+            [query, query, *fparams, limit],
         )
         return cur.fetchall()
 
@@ -125,6 +128,13 @@ def keyword_search(
     filters: dict | None = None,
     top_k: int | None = None,
 ) -> list[dict]:
+    """キーワード検索（日本語対応トークナイズ）。関数名・API 名・エラーコード・設定キーなど
+    固有の文字列の一致に強い。semantic_search で取りこぼした厳密な語に使う。
+
+    code チャンクに対しては content（シグネチャ＋docstring）に加えて symbols
+    （識別子分割済み文字列）も OR 検索するため、camelCase や snake_case の部分一致でも
+    発見できる（詳細設計/10 決定 3）。
+    """
     k = top_k or settings.default_top_k
     rows = _keyword_candidates(conn, query, filters, k)
     return [
@@ -141,7 +151,12 @@ def semantic_search(
     filters: dict | None = None,
     top_k: int | None = None,
 ) -> list[dict]:
-    """ハイブリッド検索。ベクトルとキーワードの順位を RRF で融合する。"""
+    """ハイブリッド検索。ベクトルとキーワードの順位を RRF で融合する。
+
+    source_type='code' のチャンクも検索対象に含まれる。
+    キーワード側は symbols カラムも OR 検索するため、関数名やクラス名の部分一致でも
+    発見できる（詳細設計/10 決定 3）。
+    """
     k = top_k or settings.default_top_k
     pool = max(k * 4, 20)
     qvec = embedder.embed_query(query)
