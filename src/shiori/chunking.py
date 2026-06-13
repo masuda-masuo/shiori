@@ -23,14 +23,34 @@ _JA_CHAR_RE = re.compile(r"[\u3040-\u30ff\u4e00-\u9fff]")
 # --- tree-sitter ---
 _TS_AVAILABLE = False
 _TS_LANGUAGES: set[str] = set()
+_TS_PARSER_CACHE: dict[str, object] = {}
 try:
-    from tree_sitter_language_pack import get_binding, get_parser  # type: ignore[import-untyped]
+    from tree_sitter_language_pack import (  # type: ignore[import-untyped]
+        available_languages,
+        get_language,
+        get_parser,
+        has_language,
+    )
 
     _TS_AVAILABLE = True
-    _binding = get_binding()
-    _TS_LANGUAGES = set(_binding.keys()) if hasattr(_binding, "keys") else set()
-except ImportError:
+    _TS_LANGUAGES = set(available_languages())
+except Exception:
+    # バージョン違い（古い tree-sitter-language-pack）やビルド失敗を安全に処理
     pass
+
+
+def _ts_get_parser(lang: str):
+    """tree-sitter パーサーをキャッシュして返す。非対応言語は None。"""
+    if lang not in _TS_PARSER_CACHE:
+        if not _TS_AVAILABLE or not has_language(lang):
+            _TS_PARSER_CACHE[lang] = None
+        else:
+            try:
+                _TS_PARSER_CACHE[lang] = get_parser(lang)
+            except Exception:
+                _TS_PARSER_CACHE[lang] = None
+    return _TS_PARSER_CACHE[lang]
+
 
 # 拡張子 → tree-sitter 言語名
 _EXT_TO_LANG: dict[str, str] = {
@@ -73,7 +93,6 @@ _EXT_TO_LANG: dict[str, str] = {
     ".zig": "zig",
     ".cmake": "cmake",
     ".proto": "protobuf",
-    ".sql": "sql",
     ".tf": "hcl",
     ".vue": "vue",
     ".svelte": "svelte",
@@ -423,20 +442,6 @@ def _get_signature_text(node, source_lines: list[str]) -> str:
     return sig
 
 
-def _collect_def_nodes(node, query) -> list[tuple]:
-    """tree-sitter クエリを実行し、(capture_name, node) のリストを返す。"""
-    try:
-        matches = query.matches(node)
-        results: list[tuple[str, object]] = []
-        for pattern_index, capture_map in matches:
-            for capture_name, captured_nodes in capture_map.items():
-                for n in captured_nodes:
-                    results.append((capture_name, n))
-        return results
-    except Exception:
-        return []
-
-
 def _build_heading_path(path_prefix: str, name: str, kind: str) -> str:
     """シンボルパスの1要素を heading_path 用に整形。"""
     kind_label = {
@@ -453,7 +458,7 @@ def _build_heading_path(path_prefix: str, name: str, kind: str) -> str:
 
 def split_code(
     file_path: str,
-    content: str,
+    source: str,
     max_chars: int = _CODE_MAX_CHARS,
 ) -> list[Chunk]:
     """ソースコードを関数/メソッド/クラス単位でチャンク分割する（詳細設計/10 Step 2）。
@@ -465,7 +470,7 @@ def split_code(
     ----------
     file_path:
         ファイルパス（拡張子から言語判定に使う）。
-    content:
+    source:
         ファイルの全文。
     max_chars:
         フォールバック時の最大文字数。
@@ -480,55 +485,56 @@ def split_code(
         - symbols: 識別子分割済み文字列
     """
     prog_lang = _detect_prog_lang(file_path)
-    if not prog_lang or prog_lang not in _TS_LANGUAGES or not _TS_AVAILABLE:
+    if not prog_lang or not _TS_AVAILABLE or not has_language(prog_lang):
         # tree-sitter 非対応 → フォールバック
-        return _split_code_fallback(content, file_path, max_chars)
+        return _split_code_fallback(source, file_path, max_chars)
 
-    parser = get_parser(prog_lang)
-    tree = parser.parse(bytes(content, "utf-8"))
+    parser = _ts_get_parser(prog_lang)
+    if parser is None:
+        return _split_code_fallback(source, file_path, max_chars)
+
+    try:
+        tree = parser.parse(bytes(source, "utf-8"))
+    except Exception:
+        return _split_code_fallback(source, file_path, max_chars)
+
     root = tree.root_node
-    source_lines = content.splitlines()
+    source_lines = source.splitlines()
 
     # クエリを準備
     query_src = _TREE_SITTER_QUERIES.get(prog_lang)
     if query_src is None:
-        return _split_code_fallback(content, file_path, max_chars)
+        return _split_code_fallback(source, file_path, max_chars)
 
     try:
         from tree_sitter import Query
 
         query = Query(parser.language, query_src)
     except Exception:
-        return _split_code_fallback(content, file_path, max_chars)
+        return _split_code_fallback(source, file_path, max_chars)
 
-    # 全定義ノードを収集（ネスト込み）
-    def _walk_defs(node, depth=0) -> list[tuple[str, object, int]]:
-        """(capture_name, node, depth) のリストを返す。"""
-        results: list[tuple[str, object, int]] = []
-        try:
-            matches = query.matches(node)
-            for _pattern_index, capture_map in matches:
-                for capture_name, captured_nodes in capture_map.items():
-                    for n in captured_nodes:
-                        # トップレベルのマッチのみ（子孫のマッチは再帰でカバー）
-                        if n == node or n.parent == node.parent:
-                            results.append((capture_name, n, depth))
-        except Exception:
-            pass
-        for child in node.children:
-            results.extend(_walk_defs(child, depth + 1))
-        return results
+    # 全定義ノードを root 一発で収集（O(n) 相当）
+    def_nodes_raw: list[tuple[str, object]] = []
+    try:
+        matches = query.matches(root)
+        for _pattern_index, capture_map in matches:
+            for capture_name, captured_nodes in capture_map.items():
+                for n in captured_nodes:
+                    def_nodes_raw.append((capture_name, n))
+    except Exception:
+        pass
 
-    def_nodes = _walk_defs(root)
-
-    # 定義の親子関係を解決して heading_path を生成
-    # 各定義について、自分を包含する定義を親とする
-    chunks: list[Chunk] = []
+    if not def_nodes_raw:
+        return _split_code_fallback(source, file_path, max_chars)
 
     # start_line でソート
-    def_nodes.sort(key=lambda x: x[1].start_point[0])
+    def_nodes_raw.sort(key=lambda x: x[1].start_point[0])
 
-    for capture_name, ts_node, _depth in def_nodes:
+    # 親子関係を解決して heading_path を生成
+    chunks: list[Chunk] = []
+    all_nodes = [n for _, n in def_nodes_raw]
+
+    for capture_name, ts_node in def_nodes_raw:
         start_line = ts_node.start_point[0]  # 0-based
         end_line = ts_node.end_point[0]
 
@@ -537,14 +543,19 @@ def split_code(
         signature = _get_signature_text(ts_node, source_lines)
 
         # heading_path: 自分を含む親定義から構築
-        # 親定義を探す（start_line が自分より前で、end_line が自分以上、最も近いもの）
         parent_path_parts: list[str] = []
-        for p_capture, p_node, _p_depth in def_nodes:
+        for p_node in all_nodes:
             if p_node == ts_node:
                 continue
             p_start = p_node.start_point[0]
             p_end = p_node.end_point[0]
             if p_start < start_line and p_end >= end_line:
+                p_capture = ""
+                # capture名を再特定（O(n²)だがノード数は高々数百）
+                for cn, pn in def_nodes_raw:
+                    if pn == p_node:
+                        p_capture = cn
+                        break
                 p_name = _get_node_name(p_node) or f"<{p_capture}>"
                 parent_path_parts.append(f"({p_capture} {p_name})")
 
@@ -560,24 +571,20 @@ def split_code(
             content_parts.append(signature)
         if docstring:
             content_parts.append(docstring)
-        content = "\n\n".join(content_parts)
+        chunk_content = "\n\n".join(content_parts)
 
         # symbols: 関数名＋クラス名を分割
         sym_text = _split_symbols(name)
 
         chunks.append(
             Chunk(
-                content=content,
+                content=chunk_content,
                 heading_path=heading_path,
                 start_line=start_line + 1,  # 1-based
                 end_line=end_line + 1,
                 symbols=sym_text,
             )
         )
-
-    # チャンクが空（tree-sitter で何も見つからなかった）場合 → フォールバック
-    if not chunks:
-        return _split_code_fallback(content, file_path, max_chars)
 
     for i, c in enumerate(chunks):
         c.chunk_index = i
