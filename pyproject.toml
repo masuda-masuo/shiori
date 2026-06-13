@@ -12,6 +12,8 @@ dependencies = [
     "sentence-transformers>=3.0",
     "numpy>=1.26",
     "pyjwt[crypto]>=2.8",
+    "tree-sitter>=0.23,<1.0",
+    "tree-sitter-language-pack>=0.3",
 ]
 
 [project.optional-dependencies]
