@@ -29,7 +29,13 @@ import subprocess
 import httpx
 import psycopg
 
-from .chunking import detect_language, split_code, split_issue_text, split_markdown
+from .chunking import (
+    _detect_prog_lang,
+    detect_language,
+    split_code,
+    split_issue_text,
+    split_markdown,
+)
 from .config import Settings
 from .db import delete_chunks_by_key, get_cursor, insert_chunk, set_cursor
 from .embedding import Embedder
@@ -312,7 +318,7 @@ def sync_code(
                 continue
             if _is_excluded_by_glob(rel, settings):
                 continue
-            with open(abspptah, "rb") as fp:
+            with open(abspath, "rb") as fp:
                 current[rel] = hashlib.sha256(fp.read()).hexdigest()
 
     # 既存索引（kind='code' の doc_files 行）
