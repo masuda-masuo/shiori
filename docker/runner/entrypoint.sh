@@ -46,7 +46,9 @@ if [ -f "${BIN_DIR}/.image-runner-version" ]; then
         # イメージバージョン情報はコピーしない（volume 用は別途作成）
         continue
       fi
-      cp -a "$item" "${STATE_DIR}/" 2>/dev/null || true
+      if ! cp -a "$item" "${STATE_DIR}/" 2>/dev/null; then
+        echo "[shiori-runner] WARNING: failed to copy $item to volume" >&2
+      fi
     done
 
     # 退避した登録情報をリストア
