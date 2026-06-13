@@ -4,6 +4,7 @@
 - _match_extension: 拡張子マッチ（大文字小文字無視、ドット有無対応）
 - _walk_code_files: コードファイル収集（パス・除外・prefix・extension フィルタ）
 - source_type バリデーション
+- source_type + extension 組み合わせ
 """
 
 from __future__ import annotations
@@ -303,7 +304,7 @@ class TestSourceTypeValidation:
     def _validate_source_type(source_type: str | None) -> None:
         if source_type is not None and source_type not in _VALID_SOURCE_TYPES:
             raise ValueError(
-                f"無効な source_type です: '{source_type}'。"
+                f"無効な source_type '{source_type}' です。"
                 f"有効な値: {', '.join(sorted(_VALID_SOURCE_TYPES))}"
             )
 
@@ -333,6 +334,82 @@ class TestSourceTypeValidation:
         """任意の文字列は無効"""
         with pytest.raises(ValueError, match="無効な source_type"):
             self._validate_source_type("xyz")
+
+
+# ===================================================================
+# source_type + extension 組み合わせテスト
+# ===================================================================
+
+
+class TestSourceTypeExtensionCombo:
+    """source_type と extension の組み合わせテスト。
+
+    list_tree のフィルタ分岐ロジックを純粋関数で検証する。
+    実際の list_tree は:
+    1. source_type in (None, "doc") → doc_files クエリ → extension フィルタ
+    2. source_type in (None, "code") → _walk_code_files → extension フィルタ
+    3. 両方の結果を set に集約 → sorted
+    """
+
+    def test_doc_all_md(self):
+        """source_type='doc' + extension='.md' は doc_files だけを通す"""
+        with tempfile.TemporaryDirectory() as tmp:
+            _make_tree(tmp, ["README.md", "main.py", "docs/guide.md"])
+            # doc_files 模擬パス
+            doc_paths = {"README.md", "docs/guide.md"}
+            # extension フィルタ
+            doc_filtered = {p for p in doc_paths if _match_extension(p, ".md")}
+            # source_type="doc" -> code walk はスキップ
+            assert doc_filtered == {"README.md", "docs/guide.md"}
+
+    def test_doc_py_returns_empty(self):
+        """source_type='doc' + extension='.py' は空（doc に .py はない）"""
+        doc_paths = {"README.md", "docs/guide.md"}
+        doc_filtered = {p for p in doc_paths if _match_extension(p, ".py")}
+        assert doc_filtered == set()
+
+    def test_code_all_py(self):
+        """source_type='code' + extension='.py' はコードファイルのみ通す"""
+        with tempfile.TemporaryDirectory() as tmp:
+            _make_tree(tmp, ["main.py", "utils.py", "utils.ts", "README.md"])
+            code_paths = _walk_code_files(tmp, "", extension=".py")
+            assert code_paths == {"main.py", "utils.py"}
+
+    def test_code_ts(self):
+        """source_type='code' + extension='.ts' で .ts だけ"""
+        with tempfile.TemporaryDirectory() as tmp:
+            _make_tree(tmp, ["main.py", "utils.ts", "types.ts"])
+            code_paths = _walk_code_files(tmp, "", extension=".ts")
+            assert code_paths == {"utils.ts", "types.ts"}
+
+    def test_both_with_extension(self):
+        """source_type=None + extension='.py' は両方から .py だけ"""
+        with tempfile.TemporaryDirectory() as tmp:
+            _make_tree(tmp, ["main.py", "utils.ts", "README.md"])
+            # doc_files 模擬（.md だけなので .py フィルタで空）
+            doc_paths: set[str] = set()
+            # code walk
+            code_paths = _walk_code_files(tmp, "", extension=".py")
+            all_paths = doc_paths | code_paths
+            assert all_paths == {"main.py"}
+
+    def test_both_no_extension(self):
+        """source_type=None + extension=None は両方の全ファイル"""
+        with tempfile.TemporaryDirectory() as tmp:
+            _make_tree(tmp, ["main.py", "utils.ts", "README.md"])
+            doc_paths = {"README.md"}
+            code_paths = _walk_code_files(tmp, "")
+            all_paths = doc_paths | code_paths
+            assert "main.py" in all_paths
+            assert "utils.ts" in all_paths
+            assert "README.md" in all_paths
+
+    def test_code_empty_extension(self):
+        """source_type='code' + extension='.go'（マッチなし）は空"""
+        with tempfile.TemporaryDirectory() as tmp:
+            _make_tree(tmp, ["main.py", "utils.py"])
+            code_paths = _walk_code_files(tmp, "", extension=".go")
+            assert code_paths == set()
 
 
 # ===================================================================
