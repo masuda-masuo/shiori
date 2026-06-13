@@ -19,22 +19,18 @@ _HEADING_RE = re.compile(r"^(#{1,6})\s+(.*)$")
 _SENTENCE_END_RE = re.compile(r"(?<=[。．！？!?\\.])\s*|\n{2,}")
 _JA_CHAR_RE = re.compile(r"[\u3040-\u30ff\u4e00-\u9fff]")
 
-# --- tree-sitter ---
-# get_parser の import だけ試み、実際のパーサ取得成否で判定する。
-# バージョンごとの API 差異（get_binding / available_languages 等）に依存しない。
+# --- tree-sitter (0.23 系。0.24+ は API 激変のため非対応) ---
 _TS_AVAILABLE = False
 _TS_PARSER_CACHE: dict[str, object] = {}
 _TS_FAILED: set[str] = set()
 try:
     from tree_sitter_language_pack import get_parser  # type: ignore[import-untyped]
-
     _TS_AVAILABLE = True
 except Exception:
     pass
 
 
 def _ts_get_parser(lang: str):
-    """tree-sitter パーサーを取得してキャッシュ。失敗時は None を返し次回以降スキップ。"""
     if lang in _TS_PARSER_CACHE:
         return _TS_PARSER_CACHE[lang]
     if lang in _TS_FAILED or not _TS_AVAILABLE:
@@ -48,7 +44,6 @@ def _ts_get_parser(lang: str):
         return None
 
 
-# 拡張子 → tree-sitter 言語名
 _EXT_TO_LANG: dict[str, str] = {
     ".py": "python",
     ".js": "javascript", ".jsx": "javascript",
@@ -323,24 +318,16 @@ def split_code(file_path: str, source: str, max_chars: int = _CODE_MAX_CHARS) ->
     except Exception:
         return _split_code_fallback(source, file_path, max_chars)
 
-    # 定義ノードを収集
-    # tree-sitter 0.24+: captures() → list[tuple[Node, str]]
-    # tree-sitter 0.23 : matches()  → list[tuple[int, dict[str, list[Node]]]]
+    # tree-sitter 0.23: query.matches(root) → list[tuple[int, dict[str, list[Node]]]]
     def_nodes_raw: list[tuple[str, object]] = []
     try:
-        raw = query.captures(root)
-        for node, capture_name in raw:
-            name = capture_name.decode() if isinstance(capture_name, bytes) else capture_name
-            def_nodes_raw.append((name, node))
-    except AttributeError:
-        try:
-            for _pattern_index, capture_map in query.matches(root):
-                for capture_name, captured_nodes in capture_map.items():
-                    name = capture_name.decode() if isinstance(capture_name, bytes) else capture_name
-                    for n in captured_nodes:
-                        def_nodes_raw.append((name, n))
-        except Exception:
-            pass
+        for _pattern_index, capture_map in query.matches(root):
+            for capture_name, captured_nodes in capture_map.items():
+                name = capture_name.decode() if isinstance(capture_name, bytes) else capture_name
+                for n in captured_nodes:
+                    def_nodes_raw.append((name, n))
+    except Exception:
+        pass
 
     if not def_nodes_raw:
         return _split_code_fallback(source, file_path, max_chars)
