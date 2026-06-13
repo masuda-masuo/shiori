@@ -290,6 +290,8 @@ def sync_code(
 
     sync_docs と同一クローンを共有するため、git pull は sync_docs 側で完了済み。
     sha デルタで変化したファイルのみ再チャンク・再埋め込みする。
+    HEAD sha を sync_state(kind='code') カーソルに保存し、HEAD 不変時は walk を
+    スキップする（設計 10 決定 8 のカーソル管理）。
 
     Returns
     -------
@@ -306,6 +308,11 @@ def sync_code(
         return 0
 
     head = _git(["rev-parse", "HEAD"], cwd=repo_dir)
+
+    # カーソルチェック: HEAD が前回と同じなら walk をスキップ
+    prev_head = get_cursor(conn, repo, "code")
+    if prev_head == head:
+        return 0
 
     # 現在のコードファイル集合（sha 付き）
     current: dict[str, str] = {}
@@ -342,10 +349,6 @@ def sync_code(
             )
         log.info("removed code %s", path)
 
-    default_branch = _git(
-        ["rev-parse", "--abbrev-ref", "origin/HEAD"], cwd=repo_dir
-    ).split("/")[-1]
-
     # 変更・追加ファイルの再索引
     for path in changed:
         abspath = os.path.join(repo_dir, path)
@@ -364,12 +367,12 @@ def sync_code(
             prog_lang = _detect_prog_lang(path)
             vectors = embedder.embed_passages([c.content for c in chunks])
             for c, v in zip(chunks, vectors):
-                # URL は行範囲付き
+                # permalink は commit_sha を使用（行ズレに強い。should-fix #5）
                 url = (
-                    f"https://github.com/{repo}/blob/{default_branch}/{path}"
+                    f"https://github.com/{repo}/blob/{head}/{path}"
                     f"#L{c.start_line}-L{c.end_line}"
                     if c.start_line and c.end_line
-                    else f"https://github.com/{repo}/blob/{default_branch}/{path}"
+                    else f"https://github.com/{repo}/blob/{head}/{path}"
                 )
                 insert_chunk(
                     conn,
@@ -405,6 +408,7 @@ def sync_code(
         log.info("indexed code %s (%d chunks, %s)", path, len(chunks), prog_lang or "?")
 
     conn.commit()
+    set_cursor(conn, repo, "code", head)
     return len(changed) + len(removed)
 
 
