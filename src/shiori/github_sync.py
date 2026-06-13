@@ -11,6 +11,7 @@
   ただし SHIORI_INDEX_BOT_LOGINS に列挙された login は allowlist として索引対象にする（issue #25）。
   生データは issue_items に is_bot=true で保持する（read_issue では表示する）。
 - PR の diff 自体は索引しない。レビューコメントには diff_hunk を文脈として付与する。
+- code は sync_docs と同一クローンを共有し、sha デルタで変化ファイルのみ再索引する（issue #33）。
 認証は TokenProvider 抽象経由（詳細設計/09）。git は http.extraHeader でトークンを注入し、
 API は httpx の Auth フックでリクエスト毎に注入する。
 """
@@ -18,6 +19,7 @@ API は httpx の Auth フックでリクエスト毎に注入する。
 from __future__ import annotations
 
 import base64
+import fnmatch
 import hashlib
 import logging
 import os
@@ -27,7 +29,13 @@ import subprocess
 import httpx
 import psycopg
 
-from .chunking import detect_language, split_issue_text, split_markdown
+from .chunking import (
+    _detect_prog_lang,
+    detect_language,
+    split_code,
+    split_issue_text,
+    split_markdown,
+)
 from .config import Settings
 from .db import delete_chunks_by_key, get_cursor, insert_chunk, set_cursor
 from .embedding import Embedder
@@ -214,6 +222,193 @@ def sync_docs(
 
     conn.commit()
     set_cursor(conn, repo, "docs", head)
+    return len(changed) + len(removed)
+
+
+# ---------------------------------------------------------------------------
+# code（git 同一クローン共有、sha デルタ）
+# ---------------------------------------------------------------------------
+
+# os.walk でスキップするディレクトリ名
+_EXCLUDE_DIRS = {
+    ".git",
+    "node_modules",
+    ".venv", "venv",
+    "dist", "build",
+    "__pycache__",
+    ".tox", ".eggs",
+    ".next",
+    "target",
+}
+
+# コード索引から除外するファイル拡張子（バイナリ・アセット等）
+_EXCLUDE_EXTENSIONS = {
+    ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".webp",
+    ".woff", ".woff2", ".ttf", ".eot", ".otf",
+    ".pyc", ".pyo",
+    ".so", ".dylib", ".dll", ".wasm",
+    ".zip", ".tar", ".gz", ".bz2", ".xz", ".7z",
+    ".pdf",
+    ".lock",
+    ".min.js", ".min.css",
+}
+
+
+def _is_code_file(filename: str, settings: Settings) -> bool:
+    """コード索引対象のファイルか判定する。
+
+    - ドキュメント拡張子（.md / .mdx / .markdown）は除外
+    - バイナリ・アセット拡張子は除外
+    - SHIORI_CODE_EXTENSIONS が設定されていれば、その拡張子のみ対象
+    """
+    lower = filename.lower()
+    if lower.endswith((".md", ".mdx", ".markdown")):
+        return False
+    if any(lower.endswith(ext) for ext in _EXCLUDE_EXTENSIONS):
+        return False
+    if settings.code_extensions:
+        return any(lower.endswith(ext) for ext in settings.code_extensions)
+    return True
+
+
+def _is_excluded_by_glob(rel_path: str, settings: Settings) -> bool:
+    """除外 glob パターンにマッチするか。"""
+    for pattern in settings.code_exclude_globs:
+        if fnmatch.fnmatch(rel_path, pattern):
+            return True
+    return False
+
+
+def sync_code(
+    settings: Settings,
+    conn: psycopg.Connection,
+    embedder: Embedder,
+    repo: str,
+    provider: TokenProvider,
+) -> int:
+    """リポジトリのソースコードを同期し、変化分だけ索引する（詳細設計/10 Step 3）。
+
+    sync_docs と同一クローンを共有するため、git pull は sync_docs 側で完了済み。
+    sha デルタで変化したファイルのみ再チャンク・再埋め込みする。
+    HEAD sha を sync_state(kind='code') カーソルに保存し、HEAD 不変時は walk を
+    スキップする（設計 10 決定 8 のカーソル管理）。
+
+    Returns
+    -------
+    int
+        更新（追加・変更・削除）したファイル数。
+    """
+    if not settings.index_code:
+        return 0
+
+    repo_dir = settings.repo_dir(repo)
+
+    if not os.path.isdir(repo_dir):
+        log.warning("sync_code: クローンが存在しません（sync_docs 未実行?）")
+        return 0
+
+    head = _git(["rev-parse", "HEAD"], cwd=repo_dir)
+
+    # カーソルチェック: HEAD が前回と同じなら walk をスキップ
+    prev_head = get_cursor(conn, repo, "code")
+    if prev_head == head:
+        return 0
+
+    # 現在のコードファイル集合（sha 付き）
+    current: dict[str, str] = {}
+    for root, dirs, files in os.walk(repo_dir):
+        dirs[:] = [d for d in dirs if d not in _EXCLUDE_DIRS]
+        for f in files:
+            abspath = os.path.join(root, f)
+            rel = os.path.relpath(abspath, repo_dir)
+            if not _is_code_file(f, settings):
+                continue
+            if _is_excluded_by_glob(rel, settings):
+                continue
+            with open(abspath, "rb") as fp:
+                current[rel] = hashlib.sha256(fp.read()).hexdigest()
+
+    # 既存索引（kind='code' の doc_files 行）
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT path, content_sha FROM doc_files WHERE repo = %s AND kind = 'code'",
+            (repo,),
+        )
+        indexed = dict(cur.fetchall())
+
+    removed = set(indexed) - set(current)
+    changed = [p for p, sha in current.items() if indexed.get(p) != sha]
+
+    # 削除
+    for path in removed:
+        delete_chunks_by_key(conn, f"code:{repo}:{path}")
+        with conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM doc_files WHERE repo = %s AND path = %s AND kind = 'code'",
+                (repo, path),
+            )
+        log.info("removed code %s", path)
+
+    # 変更・追加ファイルの再索引
+    for path in changed:
+        abspath = os.path.join(repo_dir, path)
+        try:
+            with open(abspath, encoding="utf-8", errors="replace") as fp:
+                text = fp.read()
+        except Exception as exc:
+            log.warning("sync_code: skip %s (%s)", path, exc)
+            continue
+
+        chunks = split_code(path, text, settings.chunk_max_chars)
+        chunk_key = f"code:{repo}:{path}"
+        delete_chunks_by_key(conn, chunk_key)
+
+        if chunks:
+            prog_lang = _detect_prog_lang(path)
+            vectors = embedder.embed_passages([c.content for c in chunks])
+            for c, v in zip(chunks, vectors):
+                # permalink は commit_sha を使用（行ズレに強い。should-fix #5）
+                url = (
+                    f"https://github.com/{repo}/blob/{head}/{path}"
+                    f"#L{c.start_line}-L{c.end_line}"
+                    if c.start_line and c.end_line
+                    else f"https://github.com/{repo}/blob/{head}/{path}"
+                )
+                insert_chunk(
+                    conn,
+                    chunk_key=chunk_key,
+                    chunk_index=c.chunk_index,
+                    source_type="code",
+                    repo=repo,
+                    path=path,
+                    language=None,  # code は language=NULL（決定4）
+                    heading_path=c.heading_path,
+                    content=c.content,
+                    embedding=v,
+                    line=c.start_line,
+                    end_line=c.end_line,
+                    commit_sha=head,
+                    prog_lang=prog_lang,
+                    symbols=c.symbols,
+                    url=url,
+                )
+
+        # doc_files に kind='code' で記録
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO doc_files (repo, path, content_sha, language, kind)
+                VALUES (%s, %s, %s, NULL, 'code')
+                ON CONFLICT (repo, path) DO UPDATE
+                SET content_sha = EXCLUDED.content_sha, kind = 'code'
+                """,
+                (repo, path, current[path]),
+            )
+        conn.commit()
+        log.info("indexed code %s (%d chunks, %s)", path, len(chunks), prog_lang or "?")
+
+    conn.commit()
+    set_cursor(conn, repo, "code", head)
     return len(changed) + len(removed)
 
 

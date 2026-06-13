@@ -10,7 +10,7 @@
     自動同期や MCP ツール ingest との同時実行を防ぐ。
     SYNC_LOCK_KEY は mcp_server.py と同じ値（0x5348494F = 'SHIO'）。
 
-鮮度の記録（issue #22）:
+鮮度の記録（issue #22 / #33）:
     リポジトリごとの同期完了時に sync_runs へ完了時刻と経路を記録する。
     経路は環境変数 SHIORI_INGEST_ROUTE（既定 'cli'）。reindex.yml（self-hosted
     runner）は 'runner' を設定して実行経路を識別できるようにする。
@@ -25,7 +25,7 @@ from . import db
 from .config import Settings, load_settings
 from .embedding import Embedder
 from .github_auth import build_token_provider
-from .github_sync import sync_docs, sync_issues
+from .github_sync import sync_code, sync_docs, sync_issues
 
 log = logging.getLogger(__name__)
 
@@ -75,11 +75,17 @@ def run_ingest(
             log.info("docs: %d files updated", n_docs)
             n_items = sync_issues(settings, conn, embedder, repo, provider)
             log.info("issues/PR: %d items indexed", n_items)
-            finished_at = db.record_sync_run(conn, repo, route, n_docs, n_items)
+            n_code = sync_code(settings, conn, embedder, repo, provider)
+            log.info("code: %d files updated", n_code)
+            finished_at = db.record_sync_run(
+                conn, repo, route, n_docs, n_items, n_code
+            )
             log.info("synced at %s (route=%s)", finished_at.isoformat(), route)
 
         with conn.cursor() as cur:
-            cur.execute("SELECT source_type, count(*) FROM chunks GROUP BY 1 ORDER BY 1")
+            cur.execute(
+                "SELECT source_type, count(*) FROM chunks GROUP BY 1 ORDER BY 1"
+            )
             for st, n in cur.fetchall():
                 log.info("chunks[%s] = %d", st, n)
     finally:

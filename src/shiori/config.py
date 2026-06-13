@@ -24,6 +24,25 @@ def _index_bot_logins_from_env() -> set[str]:
     return {s.strip().lower() for s in raw.split(",") if s.strip()}
 
 
+def _code_extensions_from_env() -> set[str]:
+    """SHIORI_CODE_EXTENSIONS を小文字の set で返す。
+
+    カンマ区切り（ドット付き）。例: ``.py,.js,.ts,.go,.rs``
+    未設定なら None（= 全コード拡張子が対象）。
+    """
+    raw = os.environ.get("SHIORI_CODE_EXTENSIONS", "")
+    return {s.strip().lower() for s in raw.split(",") if s.strip()}
+
+
+def _code_exclude_globs_from_env() -> list[str]:
+    """SHIORI_CODE_EXCLUDE_GLOBS をリストで返す。
+
+    カンマ区切り。glob パターン（例: ``**/test_*, **/migrations/*``）。
+    """
+    raw = os.environ.get("SHIORI_CODE_EXCLUDE_GLOBS", "")
+    return [s.strip() for s in raw.split(",") if s.strip()]
+
+
 @dataclass
 class Settings:
     # Postgres (pgvector + pgroonga)
@@ -95,6 +114,18 @@ class Settings:
     # GitHub App 経由の投稿は [bot] 扱いになるが、ユーザーの代理として
     # 価値のある投稿を行う bot をここに列挙することで索引対象にできる。
     index_bot_logins: set[str] = field(default_factory=_index_bot_logins_from_env)
+    # --- ソースコード索引（詳細設計/10 決定 7） ---
+    # マスタスイッチ。off だとコード索引をスキップする。
+    index_code: bool = field(
+        default_factory=lambda: os.environ.get("SHIORI_INDEX_CODE", "").lower()
+        in ("1", "true", "yes")
+    )
+    # コードとして扱う拡張子（小文字）。空/未設定 = 全コード拡張子が対象。
+    code_extensions: set[str] = field(default_factory=_code_extensions_from_env)
+    # 除外 glob パターン（カンマ区切り）。例: "**/test_*, **/migrations/*"
+    code_exclude_globs: list[str] = field(
+        default_factory=_code_exclude_globs_from_env
+    )
 
     def repo_dir(self, repo: str) -> str:
         owner, name = repo.split("/", 1)
