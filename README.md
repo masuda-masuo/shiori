@@ -19,7 +19,7 @@ shiori はこれを逆転させる。リポジトリをローカルに索引し�
 
 日本語・英語の両方に対応し、クロスリンガル検索（日本語で尋ねて英語ドキュメントを引く、その逆も）にも対応する。
 
-dependabot 等の bot 投稿は検索ノイズを避けるため原則索引から除外される。GitHub App 経由でユーザーの代理として投稿する bot は `SHIORI_INDEX_BOT_LOGINS` 環境変数で allowlist 指定できる（issue #25）。
+dependabot 等の bot 投稿は検索ノイズを避けるため原則索引から除外される。GitHub App 経由でユーザーの代理として投稿する bot は `SHIORI_INDEX_BOT_LOGINS` 環境変数で allowlist 指定できる（issue #25）。設定値は GitHub App 名 + `[bot]` 形式のログイン名をカンマ区切りで指定する。
 
 ## 仕組み
 
@@ -55,10 +55,6 @@ docker compose run --rm ingest
 ```
 
 MCP クライアントからは `http://localhost:8765/mcp`（streamable HTTP）に接続する。詳細は `docs/guides/セットアップ.md`。
-
-## ステータス
-
-✅ **v1 実装済み。** 取り込み（差分同期）・ハイブリッド検索・MCP ツール 6 種・Docker Compose 構成まで動作する。設計時の未決事項の解消は各設計書の「決定」節に記録している。残課題は `docs/design/基本設計.md` の未決事項サマリを参照。
 
 ## ドキュメント構成
 
