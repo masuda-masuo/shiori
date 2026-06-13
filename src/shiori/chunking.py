@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import os
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.*)$")
 _SENTENCE_END_RE = re.compile(r"(?<=[。．！？!?\\.])\s*|\n{2,}")
@@ -81,68 +81,20 @@ _EXT_TO_LANG: dict[str, str] = {
 }
 
 _TREE_SITTER_QUERIES: dict[str, str] = {
-    "python": """
-        (function_definition) @func
-        (class_definition) @class
-    """,
-    "javascript": """
-        (function_declaration) @func
-        (method_definition) @method
-        (class_declaration) @class
-    """,
-    "typescript": """
-        (function_declaration) @func
-        (method_definition) @method
-        (class_declaration) @class
-    """,
-    "go": """
-        (function_declaration) @func
-        (method_declaration) @method
-    """,
-    "rust": """
-        (function_item) @func
-        (struct_item) @struct
-        (impl_item) @impl
-        (trait_item) @trait
-    """,
-    "java": """
-        (method_declaration) @method
-        (class_declaration) @class
-    """,
-    "ruby": """
-        (method) @method
-        (class) @class
-        (module) @module
-    """,
-    "c": """
-        (function_definition) @func
-        (struct_specifier) @struct
-    """,
-    "cpp": """
-        (function_definition) @func
-        (class_specifier) @class
-        (struct_specifier) @struct
-    """,
-    "csharp": """
-        (method_declaration) @method
-        (class_declaration) @class
-    """,
-    "php": """
-        (function_definition) @func
-        (class_declaration) @class
-        (method_declaration) @method
-    """,
-    "swift": """
-        (function_declaration) @func
-        (class_declaration) @class
-    """,
-    "kotlin": """
-        (function_declaration) @func
-        (class_declaration) @class
-    """,
-    "bash": """
-        (function_definition) @func
-    """,
+    "python": """(function_definition) @func (class_definition) @class""",
+    "javascript": """(function_declaration) @func (method_definition) @method (class_declaration) @class""",
+    "typescript": """(function_declaration) @func (method_definition) @method (class_declaration) @class""",
+    "go": """(function_declaration) @func (method_declaration) @method""",
+    "rust": """(function_item) @func (struct_item) @struct (impl_item) @impl (trait_item) @trait""",
+    "java": """(method_declaration) @method (class_declaration) @class""",
+    "ruby": """(method) @method (class) @class (module) @module""",
+    "c": """(function_definition) @func (struct_specifier) @struct""",
+    "cpp": """(function_definition) @func (class_specifier) @class (struct_specifier) @struct""",
+    "csharp": """(method_declaration) @method (class_declaration) @class""",
+    "php": """(function_definition) @func (class_declaration) @class (method_declaration) @method""",
+    "swift": """(function_declaration) @func (class_declaration) @class""",
+    "kotlin": """(function_declaration) @func (class_declaration) @class""",
+    "bash": """(function_definition) @func""",
 }
 
 _CODE_MAX_CHARS = 1200
@@ -159,7 +111,6 @@ class Chunk:
 
 
 def detect_language(text: str) -> str:
-    """日本語文字（ひらがな・カタカナ・漢字）の比率で ja / en を判定する。"""
     if not text:
         return "en"
     ja = len(_JA_CHAR_RE.findall(text))
@@ -170,7 +121,6 @@ def detect_language(text: str) -> str:
 
 
 def _split_long_text(text: str, max_chars: int) -> list[str]:
-    """文境界を優先しつつ max_chars 以下の断片に貪欲に詰める。"""
     text = text.strip()
     if len(text) <= max_chars:
         return [text] if text else []
@@ -198,7 +148,6 @@ def _split_long_text(text: str, max_chars: int) -> list[str]:
 
 
 def split_markdown(text: str, max_chars: int = 1200) -> list[Chunk]:
-    """Markdown を見出し単位で分割する。"""
     lines = text.splitlines()
     sections: list[tuple[str | None, list[str]]] = []
     stack: list[tuple[int, str]] = []
@@ -242,7 +191,6 @@ def split_markdown(text: str, max_chars: int = 1200) -> list[Chunk]:
 
 
 def split_issue_text(title: str | None, body: str, max_chars: int = 1200) -> list[Chunk]:
-    """issue/PR 本文・コメントをチャンク化する。"""
     prefix = f"[{title.strip()}]\n" if title and title.strip() else ""
     budget = max(max_chars - len(prefix), 200)
     parts = _split_long_text(body or "", budget)
@@ -375,22 +323,24 @@ def split_code(file_path: str, source: str, max_chars: int = _CODE_MAX_CHARS) ->
     except Exception:
         return _split_code_fallback(source, file_path, max_chars)
 
+    # 定義ノードを収集
+    # tree-sitter 0.24+: captures() → list[tuple[Node, str]]
+    # tree-sitter 0.23 : matches()  → list[tuple[int, dict[str, list[Node]]]]
     def_nodes_raw: list[tuple[str, object]] = []
     try:
-        matches = query.matches(root)
-        for match in matches:
-            if hasattr(match, "captures"):
-                for capture in match.captures:
-                    def_nodes_raw.append((capture.name, capture.node))
-            elif isinstance(match, tuple) and len(match) == 2:
-                _pattern_index, capture_map = match
+        raw = query.captures(root)
+        for node, capture_name in raw:
+            name = capture_name.decode() if isinstance(capture_name, bytes) else capture_name
+            def_nodes_raw.append((name, node))
+    except AttributeError:
+        try:
+            for _pattern_index, capture_map in query.matches(root):
                 for capture_name, captured_nodes in capture_map.items():
-                    if isinstance(capture_name, bytes):
-                        capture_name = capture_name.decode()
+                    name = capture_name.decode() if isinstance(capture_name, bytes) else capture_name
                     for n in captured_nodes:
-                        def_nodes_raw.append((capture_name, n))
-    except Exception:
-        pass
+                        def_nodes_raw.append((name, n))
+        except Exception:
+            pass
 
     if not def_nodes_raw:
         return _split_code_fallback(source, file_path, max_chars)
