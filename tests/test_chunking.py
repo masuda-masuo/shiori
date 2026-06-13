@@ -1,5 +1,6 @@
 from shiori.chunking import (
     Chunk,
+    _TS_AVAILABLE,
     detect_language,
     split_code,
     split_issue_text,
@@ -158,3 +159,79 @@ def test_split_code_no_definitions():
     chunks = split_code("vars.py", code)
     # tree-sitter が動けば空リストか、フォールバックで 1 チャンク
     assert isinstance(chunks, list)
+
+
+# ---------------------------------------------------------------------------
+# tree-sitter が利用可能な場合の断定的テスト（should-fix #3）
+# フォールバックで緑になる（回帰を隠す）のを防ぐ
+# ---------------------------------------------------------------------------
+
+import pytest
+
+
+@pytest.mark.skipif(not _TS_AVAILABLE, reason="tree-sitter not available")
+def test_split_code_tree_sitter_python_has_chunks():
+    """tree-sitter が利用可能なら Python で必ず2チャンク以上＋start_line 設定。"""
+    code = """\
+def hello():
+    print("hello")
+
+class Greeter:
+    def greet(self, name: str) -> str:
+        return f"Hello {name}"
+"""
+    chunks = split_code("test.py", code)
+    assert len(chunks) >= 2, f"expected >=2 chunks, got {len(chunks)}"
+    for c in chunks:
+        assert c.start_line is not None, f"start_line missing in {c}"
+        assert c.end_line is not None, f"end_line missing in {c}"
+        assert c.symbols is not None, f"symbols missing in {c}"
+        assert c.heading_path is not None
+
+
+@pytest.mark.skipif(not _TS_AVAILABLE, reason="tree-sitter not available")
+def test_split_code_tree_sitter_python_docstring_emitted():
+    """docstring が content に含まれる（tree-sitter 前提、断定的）。"""
+    code = '''\
+def add(a: int, b: int) -> int:
+    """Add two numbers together."""
+    return a + b
+'''
+    chunks = split_code("math.py", code)
+    assert len(chunks) >= 1
+    combined = "\n".join(c.content for c in chunks)
+    assert "Add two numbers together" in combined
+    assert "add" in combined.lower()
+
+
+@pytest.mark.skipif(not _TS_AVAILABLE, reason="tree-sitter not available")
+def test_split_code_tree_sitter_python_heading_path_nesting():
+    """クラスの中のメソッドの heading_path に親クラス情報が含まれる。"""
+    code = """\
+class Calculator:
+    def add(self, a, b):
+        return a + b
+
+    def sub(self, a, b):
+        return a - b
+"""
+    chunks = split_code("calc.py", code)
+    assert len(chunks) >= 2
+    # メソッドの heading_path に "Calculator" が含まれることを確認
+    method_chunks = [c for c in chunks if "add" in c.content.lower()]
+    if method_chunks:
+        hp = method_chunks[0].heading_path or ""
+        assert "Calculator" in hp
+
+
+@pytest.mark.skipif(not _TS_AVAILABLE, reason="tree-sitter not available")
+def test_split_code_tree_sitter_symbols_are_present():
+    """symbols に分割済み識別子が入る（Python）。"""
+    code = "def parse_config_file(path):\n    return None\n"
+    chunks = split_code("cfg.py", code)
+    assert len(chunks) >= 1
+    sym = chunks[0].symbols or ""
+    # "parse_config_file" → "parse config file"
+    assert "parse" in sym
+    assert "config" in sym
+    assert "file" in sym
