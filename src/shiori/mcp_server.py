@@ -6,7 +6,7 @@
 - list_tree(path?)                  : 索引済みドキュメント＋コードファイルのツリー閲覧。
 - read_file(path, start?, end?)     : ローカルクローンからファイル（の一部）を取得。
 - read_issue(number)                : issue/PR スレッド全体を取得。
-- ingest(rebuild?, repo?)           : docs / issue / PR の差分同期（索引更新）。
+- ingest(rebuild?, repo?)           : docs / issue / PR / code の差分同期（索引更新）。
 - status()                          : 索引の鮮度と健全性（最終同期時刻・件数内訳・警告）。
 
 実際に MCP クライアントに公開されるツール名は shiori_ 接頭辞付き（issue #8）。
@@ -23,6 +23,9 @@ filesystem 等の他 MCP サーバーとの名前衰突を避けるため。関�
 
 同期が成功するたびに sync_runs へ完了時刻と経路（mcp / auto。runner / cli は
 ingest.py 側で記録）を残し、shiori_status で照会できる（issue #22）。
+
+code 索引（issue #33）は SHIORI_INDEX_CODE=true で有効化。sync_docs と同一クローンを
+共有し、sha デルタで変化ファイルのみ再索引する。
 """
 
 from __future__ import annotations
@@ -39,7 +42,7 @@ from . import db, search
 from .config import Settings, load_settings
 from .embedding import Embedder
 from .github_auth import build_token_provider
-from .github_sync import sync_docs, sync_issues
+from .github_sync import sync_code, sync_docs, sync_issues
 
 log = logging.getLogger(__name__)
 
@@ -82,6 +85,7 @@ def _make_filters(
     repo: str | None,
     path_prefix: str | None,
     updated_after: str | None,
+    prog_lang: str | None = None,
 ) -> dict:
     return {
         "source_type": source_type,
@@ -90,6 +94,7 @@ def _make_filters(
         "repo": repo,
         "path_prefix": path_prefix,
         "updated_after": updated_after,
+        "prog_lang": prog_lang,
     }
 
 
@@ -104,7 +109,7 @@ def _do_sync(
     プロセス横断排他: PostgreSQL advisory lock (pg_try_advisory_lock) で、
     runner ジョブ（別プロセス）との同時実行を防ぐ。
     どちらも非ブロッキング（取得失敗 = skip）。
-    リポジトリごとの完了時に sync_runs へ完了時刻と経路を記録する（issue #22）。
+    リポジトリごとの完了時に sync_runs へ完了時刻と経路を記録する（issue #22 / #33）。
     """
     if not _sync_lock.acquire(blocking=False):
         return {"status": "skipped", "reason": "同期が既に実行中です"}
@@ -134,17 +139,19 @@ def _do_sync(
                 for repo in targets:
                     n_docs = sync_docs(settings, conn, embedder, repo, provider)
                     n_items = sync_issues(settings, conn, embedder, repo, provider)
+                    n_code = sync_code(settings, conn, embedder, repo, provider)
                     finished_at = db.record_sync_run(
-                        conn, repo, route, n_docs, n_items
+                        conn, repo, route, n_docs, n_items, n_code
                     )
                     result["repos"][repo] = {
                         "docs_updated": n_docs,
                         "issues_indexed": n_items,
+                        "code_indexed": n_code,
                         "synced_at": finished_at.isoformat(),
                     }
                     log.info(
-                        "synced %s: docs=%d issues=%d (route=%s)",
-                        repo, n_docs, n_items, route,
+                        "synced %s: docs=%d issues=%d code=%d (route=%s)",
+                        repo, n_docs, n_items, n_code, route,
                     )
             finally:
                 with conn.cursor() as cur:
@@ -239,15 +246,17 @@ mcp = FastMCP(
     host=settings.mcp_host,
     port=settings.mcp_port,
     instructions=(
-        "GitHub リポジトリの知識（Markdown ドキュメントと issue/PR の議論）への"
-        "ハイブリッド検索。"
+        "GitHub リポジトリの知識（Markdown ドキュメントと issue/PR の議論、"
+        "およびソースコード）へのハイブリッド検索。"
         "まず shiori_semantic_search で検索し、ポインタ＋スニペットを得て、"
         "必要な範囲だけ shiori_read_file / shiori_read_issue で取得すること。固有名詞・API 名・"
-        "エラーコード等の厳密一致には shiori_keyword_search を使う。"
+        "エラーコード・関数名等の厳密一致には shiori_keyword_search を使う。"
         "索引が古い・未索引と思われる場合（直近の変更がヒットしない等）は"
         "shiori_ingest を呼んで差分同期する。索引が最新かどうかの確認は shiori_status。"
         "コードファイルは shiori_list_tree で発見し shiori_read_file で読める"
-        "（path, start_line, end_line 指定可。検索は未対応のため発見には list_tree を使うこと）。"
+        "（path, start_line, end_line 指定可）。"
+        "コードの検索は shiori_semantic_search / shiori_keyword_search で可能"
+        "（source_type='code' で絞り込み可、prog_lang フィルタで言語指定も可）。"
     ),
 )
 
@@ -261,17 +270,19 @@ def semantic_search(
     repo: str | None = None,
     path_prefix: str | None = None,
     updated_after: str | None = None,
+    prog_lang: str | None = None,
     top_k: int | None = None,
 ) -> list[dict[str, Any]]:
     """意味ベースの検索（入口ツール）。言い換え・概念・クロスリンガル（日本語クエリで英語ドキュメント）に強い。
     内部でキーワード検索とのハイブリッド融合 (RRF) を行う。
     ポインタ（path / heading_path / issue_no）＋スニペット＋URL を返す。全文は read 系で取得すること。
-    filters: source_type は doc / issue / pr_review、language は ja / en、state は open / closed、
+    filters: source_type は doc / issue / pr_review / code、language は ja / en、
+    state は open / closed、prog_lang は python / go / rust 等、
     updated_after は ISO8601 日付。"""
     with _conn() as conn:
         return search.semantic_search(
             settings, conn, _get_embedder(), query,
-            _make_filters(source_type, language, state, repo, path_prefix, updated_after),
+            _make_filters(source_type, language, state, repo, path_prefix, updated_after, prog_lang),
             top_k,
         )
 
@@ -285,14 +296,17 @@ def keyword_search(
     repo: str | None = None,
     path_prefix: str | None = None,
     updated_after: str | None = None,
+    prog_lang: str | None = None,
     top_k: int | None = None,
 ) -> list[dict[str, Any]]:
     """キーワード検索（日本語対応トークナイズ）。関数名・API 名・エラーコード・設定キーなど
-    固有の文字列の一致に強い。semantic_search で取りこぼした厳密な語に使う。"""
+    固有の文字列の一致に強い。semantic_search で取りこぼした厳密な語に使う。
+    code チャンクは content（シグネチャ＋docstring）と symbols（識別子分割済み文字列）の
+    OR 検索になるため、camelCase/snake_case の部分一致でも発見できる。"""
     with _conn() as conn:
         return search.keyword_search(
             settings, conn, query,
-            _make_filters(source_type, language, state, repo, path_prefix, updated_after),
+            _make_filters(source_type, language, state, repo, path_prefix, updated_after, prog_lang),
             top_k,
         )
 
@@ -399,7 +413,7 @@ def read_issue(number: int, repo: str | None = None) -> dict[str, Any]:
                 "author": r[3],
                 "is_bot": r[4],
                 "kind": r[1],
-                **({"path": r[6], "line": r[7]} if r[6] else {}),
+                **( {"path": r[6], "line": r[7]} if r[6] else {}),
                 "created_at": r[10].isoformat() if r[10] else None,
                 "body": r[8],
                 "url": r[9],
@@ -411,10 +425,11 @@ def read_issue(number: int, repo: str | None = None) -> dict[str, Any]:
 
 @mcp.tool(name="shiori_ingest")
 def ingest(rebuild: bool = False, repo: str | None = None) -> dict[str, Any]:
-    """docs と issue/PR を GitHub から同期し索引を更新する（差分同期なので通常は数秒）。
+    """docs / issue/PR / code を GitHub から同期し索引を更新する（差分同期なので通常は数秒）。
     検索結果が古い・未索引と思われる場合（直近の変更がヒットしない、ユーザーが
     最近の変更に言及している等）に呼ぶ。rebuild=True で索引を破棄して全件作り直す
-    （埋め込みモデル変更時のみ）。repo 省略時は設定済みの全リポジトリを同期する。"""
+    （埋め込みモデル変更時のみ）。repo 省略時は設定済みの全リポジトリを同期する。
+    code 索引は SHIORI_INDEX_CODE=true で有効化。"""
     return _do_sync(repos=[repo] if repo else None, rebuild=rebuild, route="mcp")
 
 
@@ -462,7 +477,7 @@ def _build_warnings(
 def status() -> dict[str, Any]:
     """索引の鮮度と健全性を返す。リポジトリごとに最終同期の完了時刻（last_synced_at）・
     経過秒数（age_seconds）・実行経路（cli / runner / mcp / auto）・直近の更新件数・
-    チャンク数内訳（doc / issue / pr_review）・issue_items 全件数・差分同期カーソル・
+    チャンク数内訳（doc / issue / pr_review / code）・issue_items 全件数・差分同期カーソル・
     警告（warnings）を返す。「索引は最新か?」の判断に使う:
     age_seconds が小さければ同期済み、大きい／last_synced_at が null なら
     shiori_ingest で差分同期すること。warnings があれば索引に異常がある可能性。"""
@@ -476,6 +491,7 @@ def status() -> dict[str, Any]:
                 "route": None,
                 "docs_updated": None,
                 "issues_indexed": None,
+                "code_indexed": None,
             }
             chunk_counts = db.get_chunk_counts(conn, repo)
             items_in_db = db.get_issue_item_count(conn, repo)
