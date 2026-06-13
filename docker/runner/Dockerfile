@@ -18,28 +18,40 @@ ENV HF_HOME=/models
 
 # --- Actions runner レイヤー ---
 # issue #46: バージョン固定による deprecated 停止問題への恒久対策
-# デフォルトは latest で、ビルド時に GitHub API から最新安定版を動的解決する。
+#
+# 【設計】
+# runner のバイナリは /opt/actions-runner に配置し、volume で隠されないようにする。
+# /actions-runner（volume 先）は登録情報（.runner / .credentials）のみ保持する場所で、
+# 起動時に entrypoint.sh が /opt/actions-runner から /actions-runner へ
+# バイナリを同期する（バージョン不一致時のみ上書き）。
+#
+# これにより:
+#   1. ビルド時に最新バージョンを取得（デフォルトは動的解決）
+#   2. entrypoint で volume とイメージのバージョン不一致を検出し自動同期
+#   3. volume 削除＋再登録が不要
+
+# デフォルトは latest。ビルド時に GitHub API から最新安定版を動的解決する。
 # 固定したい場合は --build-arg RUNNER_VERSION=2.xxx.x で上書き可能。
-# また entrypoint.sh が volume 内のバイナリとイメージのバージョンを
-# 比較し、不一致時に自動同期する（.runner / .credentials は保持）。
 ARG RUNNER_VERSION=latest
 
 RUN useradd -m runner
 
-WORKDIR /actions-runner
+# バイナリ配置先（volume に隠されない場所）
+WORKDIR /opt/actions-runner
 # latest 指定時は GitHub API から最新リリースタグを取得して動的解決
 RUN if [ "$RUNNER_VERSION" = "latest" ]; then \
       RUNNER_VERSION=$(curl -s https://api.github.com/repos/actions/runner/releases/latest \
         | python3 -c "import sys,json; print(json.load(sys.stdin)['tag_name'].lstrip('v'))"); \
       echo "Resolved latest runner version: v${RUNNER_VERSION}"; \
     fi \
+    && echo "Downloading actions/runner v${RUNNER_VERSION}..." \
     && curl -fsSL -o runner.tar.gz \
       "https://github.com/actions/runner/releases/download/v${RUNNER_VERSION}/actions-runner-linux-x64-${RUNNER_VERSION}.tar.gz" \
     && tar xzf runner.tar.gz && rm runner.tar.gz \
     && ./bin/installdependencies.sh \
-    && chown -R runner:runner /actions-runner \
+    && chown -R runner:runner /opt/actions-runner \
     # イメージのバージョン情報を保存（entrypoint.sh が volume との比較に使用）
-    && echo -n "${RUNNER_VERSION}" > /actions-runner/.image-runner-version
+    && echo -n "${RUNNER_VERSION}" > /opt/actions-runner/.image-runner-version
 
 # installdependencies.sh がベースイメージの Debian リリースで libicu を解決できないため
 # .NET ランタイムの依存を明示的にインストールする（issue #20）
@@ -49,6 +61,9 @@ RUN apt-get update \
 
 # Python（base イメージのグローバル環境）を runner ユーザーでも使えるようにする
 RUN chown -R runner:runner /usr/local/lib/python3.12 /usr/local/bin || true
+
+# /actions-runner を初期化（volume マウントポイント。初回は空）
+RUN mkdir -p /actions-runner && chown runner:runner /actions-runner
 
 USER runner
 
