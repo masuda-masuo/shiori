@@ -25,52 +25,56 @@ _TS_AVAILABLE = False
 _TS_LANGUAGES: set[str] = set()
 _TS_PARSER_CACHE: dict[str, object] = {}
 try:
-    # tree-sitter-language-pack 0.9.x（同梱方式）: get_binding() で全言語取得
-    from tree_sitter_language_pack import get_binding, get_parser  # type: ignore[import-untyped]
+    # tree-sitter-language-pack 1.x（実行時DL方式）をプライマリに
+    from tree_sitter_language_pack import (  # type: ignore[import-untyped]
+        available_languages,
+        get_language,
+        get_parser,
+        has_language,
+    )
 
     _TS_AVAILABLE = True
-    _binding = get_binding()
-    _TS_LANGUAGES = set(_binding.keys()) if hasattr(_binding, "keys") else set()
+    _TS_LANGUAGES = set(available_languages())
 except Exception:
     try:
-        # tree-sitter-language-pack 1.x（実行時DL方式）: available_languages() 等
-        from tree_sitter_language_pack import (  # type: ignore[import-untyped]
-            available_languages,
-            get_language,
-            get_parser,
-            has_language,
-        )
+        # tree-sitter-language-pack 0.9.x（同梱方式）にフォールバック
+        from tree_sitter_language_pack import get_binding, get_parser  # type: ignore[import-untyped]
 
         _TS_AVAILABLE = True
-        _TS_LANGUAGES = set(available_languages())
+        _binding = get_binding()
+        _TS_LANGUAGES = set(_binding.keys()) if hasattr(_binding, "keys") else set()
     except Exception:
         pass
 
 
 def _ts_has_language(lang: str) -> bool:
-    """tree-sitter が指定言語をサポートしているか。0.x / 1.x 両対応。"""
+    """tree-sitter が指定言語をサポートしているか。
+
+    _TS_LANGUAGES にあれば即 True。無くても get_parser() が成功すれば
+    動的に追加される（1.x 系の初回DLに対応）。
+    """
     if not _TS_AVAILABLE:
         return False
     if lang in _TS_LANGUAGES:
         return True
-    # 1.x 系で _TS_LANGUAGES が空（パーサ未DL）でも has_language が参照する場合
-    try:
-        # 同名のグローバルをインポート試行
-        from tree_sitter_language_pack import has_language  # type: ignore[import-untyped]
-
-        return bool(has_language(lang))
-    except Exception:
-        return False
+    return _ts_get_parser(lang) is not None
 
 
 def _ts_get_parser(lang: str):
-    """tree-sitter パーサーをキャッシュして返す。取得失敗時は None。"""
+    """tree-sitter パーサーをキャッシュして返す。
+
+    1.x 系では初回呼び出し時にパーサが GitHub Releases からダウンロードされる。
+    成功時は _TS_LANGUAGES にも追加し、次回以降 _ts_has_language が即 True になる。
+    取得失敗時は None。
+    """
     if lang not in _TS_PARSER_CACHE:
         if not _TS_AVAILABLE:
             _TS_PARSER_CACHE[lang] = None
         else:
             try:
-                _TS_PARSER_CACHE[lang] = get_parser(lang)
+                parser = get_parser(lang)
+                _TS_PARSER_CACHE[lang] = parser
+                _TS_LANGUAGES.add(lang)
             except Exception:
                 _TS_PARSER_CACHE[lang] = None
     return _TS_PARSER_CACHE[lang]
@@ -393,14 +397,11 @@ def _get_docstring_text(node, lang: str) -> str:
     if body is None:
         return ""
     if lang == "python":
-        # Python: body の最初の子が expression_statement で、その中に string がある
         for child in body.children:
             if child.type == "expression_statement":
-                # string ノードを探す
                 for sub in child.children:
                     if "string" in sub.type:
                         text = _ts_node_text(sub)
-                        # クォートとトリプルクォートを除去
                         text = re.sub(r'^["\']{1,3}|["\']{1,3}$', "", text)
                         return text.strip()
     elif lang in ("javascript", "typescript"):
@@ -411,7 +412,6 @@ def _get_docstring_text(node, lang: str) -> str:
                         text = _ts_node_text(sub)
                         text = re.sub(r'^[`"\']|[`"\']$', "", text)
                         return text.strip()
-            # JSDoc comment
             if child.type == "comment":
                 text = _ts_node_text(child)
                 text = re.sub(r"^/\*+|\*+/$", "", text)
@@ -425,14 +425,12 @@ def _get_docstring_text(node, lang: str) -> str:
                         text = _ts_node_text(sub)
                         text = re.sub(r'^["\']|["\']$', "", text)
                         return text.strip()
-            # doc comment (/// or //!)
             if child.type == "line_comment":
                 text = _ts_node_text(child)
                 text = re.sub(r"^//[/!]?\s*", "", text)
                 if text:
                     return text.strip()
     else:
-        # 汎用: body 内の comment / string を探す
         for child in body.children:
             if child.type == "comment":
                 text = _ts_node_text(child)
@@ -445,23 +443,16 @@ def _get_signature_text(node, source_lines: list[str]) -> str:
     """定義ノードのシグネチャ（先頭行〜 '{' または ':' の前まで）を取得。"""
     start = node.start_point[0]
     end = node.end_point[0]
-
-    # シグネチャはおおむね先頭の数行。body 直前まで。
     body = node.child_by_field_name("body")
     if body is not None:
         sig_end_line = body.start_point[0]
     else:
-        # body が無い場合（プロトタイプ等）は全体
         sig_end_line = end
-
-    # start_line から sig_end_line まで（ただし空行でない範囲）
     sig_lines = []
     for i in range(start, min(sig_end_line + 1, len(source_lines))):
         line = source_lines[i]
         sig_lines.append(line)
-
     sig = "\n".join(sig_lines)
-    # 末尾の空白行と `{`, `:` 行以降の余計なものを除去
     sig = sig.strip()
     return sig
 
@@ -509,10 +500,10 @@ def split_code(
         - symbols: 識別子分割済み文字列
     """
     prog_lang = _detect_prog_lang(file_path)
-    if not prog_lang or not _ts_has_language(prog_lang):
-        # tree-sitter 非対応 → フォールバック
+    if not prog_lang:
         return _split_code_fallback(source, file_path, max_chars)
 
+    # has_language に頼らず get_parser を直接呼ぶ（1.x 系の初回DLに対応）
     parser = _ts_get_parser(prog_lang)
     if parser is None:
         return _split_code_fallback(source, file_path, max_chars)
@@ -543,11 +534,11 @@ def split_code(
     try:
         matches = query.matches(root)
         for match in matches:
-            # 新API (0.24+): QueryMatch オブジェクト (captures: list[QueryCapture])
+            # 新API (tree-sitter 0.24+): QueryMatch オブジェクト
             if hasattr(match, "captures"):
                 for capture in match.captures:
                     def_nodes_raw.append((capture.name, capture.node))
-            # 旧API (0.23): (pattern_index, captures_dict) タプル
+            # 旧API (tree-sitter 0.23): (pattern_index, captures_dict) タプル
             elif isinstance(match, tuple) and len(match) == 2:
                 _pattern_index, capture_map = match
                 for capture_name, captured_nodes in capture_map.items():
@@ -585,7 +576,6 @@ def split_code(
             p_end = p_node.end_point[0]
             if p_start < start_line and p_end >= end_line:
                 p_capture = ""
-                # capture名を再特定
                 for cn, pn in def_nodes_raw:
                     if pn == p_node:
                         p_capture = cn
@@ -593,7 +583,6 @@ def split_code(
                 p_name = _get_node_name(p_node) or f"<{p_capture}>"
                 parent_path_parts.append(f"({p_capture} {p_name})")
 
-        # ファイル名をベースに heading_path 構築
         base_name = os.path.basename(file_path)
         path_prefix = " > ".join(parent_path_parts)
         heading_path = f"{base_name} > {path_prefix}" if path_prefix else base_name
@@ -607,7 +596,6 @@ def split_code(
             content_parts.append(docstring)
         chunk_content = "\n\n".join(content_parts)
 
-        # symbols: 関数名＋クラス名を分割
         sym_text = _split_symbols(name)
 
         chunks.append(
