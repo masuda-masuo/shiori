@@ -15,14 +15,14 @@
 
 検索系には `source_type`（doc / issue / pr_review）, `language`, `state` 等のフィルタを持たせる。bot 投稿は原則索引から除外されるが、`SHIORI_INDEX_BOT_LOGINS` 環境変数（GitHub App 名 + `[bot]` 形式のログイン名をカンマ区切りで指定）で allowlist 指定が可能（issue #25）。
 
-### shiori_status の警告（issue #31）
+### shiori_status の警告（issue #31, #35）
 
-`warnings` は以下の異常を自動検出する:
+`warnings` は以下の異常を自動検出する。警告がない場合も `"warnings": []` を常に返す:
 
 | 条件 | 警告の意味 |
 |---|---|
 | `age_seconds > 86400` | 最終同期から長時間経過。索引が古い可能性 |
-| `items_in_db ≫ chunks[issue]` | issue_items に比べ検索可能チャンクが極端に少ない。bot 除外や索引欠落の可能性 |
+| `chunks["issue"] + chunks["pr_review"] < items_in_db // 2` | issue_items に比べ検索可能チャンクが極端に少ない。bot 除外や索引欠落の可能性 |
 | sync_state に未登録カテゴリ | 一部カテゴリが未同期。差分同期が必要 |
 
 ## 設計方針
