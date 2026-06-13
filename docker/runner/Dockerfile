@@ -17,16 +17,50 @@ RUN pip install --no-cache-dir .
 ENV HF_HOME=/models
 
 # --- Actions runner レイヤー ---
-ARG RUNNER_VERSION=2.325.0
+# issue #46: バージョン固定による deprecated 停止問題への恒久対策
+#
+# 【設計】
+# runner のバイナリは /opt/actions-runner に配置し、volume で隠されないようにする。
+# /actions-runner（volume 先）は登録情報（.runner / .credentials）のみ保持する場所で、
+# 起動時に entrypoint.sh が /opt/actions-runner から /actions-runner へ
+# バイナリを同期する（バージョン不一致時のみ上書き）。
+#
+# これにより:
+#   1. ビルド時に最新バージョンを取得（デフォルトは動的解決）
+#   2. entrypoint で volume とイメージのバージョン不一致を検出し自動同期
+#   3. volume 削除＋再登録が不要
+
+# デフォルトは latest。ビルド時に GitHub API から最新安定版を動的解決する。
+# 固定したい場合は --build-arg RUNNER_VERSION=2.xxx.x で上書き可能。
+ARG RUNNER_VERSION=latest
 
 RUN useradd -m runner
 
-WORKDIR /actions-runner
-RUN curl -fsSL -o runner.tar.gz \
+# バイナリ配置先（volume に隠されない場所）
+WORKDIR /opt/actions-runner
+# latest 指定時は GitHub API から最新リリースタグを取得して動的解決
+# 注意: 未認証の GitHub API は 60 req/h のレート制限がある。
+# 制限超過やネットワーク障害に備え、フォールバックとして既知の安定版を使用する。
+RUN if [ "$RUNNER_VERSION" = "latest" ]; then \
+      RUNNER_VERSION=$(curl -sSf https://api.github.com/repos/actions/runner/releases/latest 2>/dev/null \
+        | python3 -c "import sys,json; print(json.load(sys.stdin)['tag_name'].lstrip('v'))" 2>/dev/null \
+      ) || { \
+        echo "WARNING: Failed to resolve latest runner version from GitHub API." >&2; \
+        echo "WARNING: Possible causes: rate limit exceeded, network unreachable, or API changed." >&2; \
+        echo "WARNING: Falling back to known stable version 2.335.1." >&2; \
+        echo "WARNING: To pin a specific version, use: docker compose build --build-arg RUNNER_VERSION=2.xxx.x" >&2; \
+        RUNNER_VERSION="2.335.1"; \
+      }; \
+      echo "Resolved runner version: v${RUNNER_VERSION}"; \
+    fi \
+    && echo "Downloading actions/runner v${RUNNER_VERSION}..." \
+    && curl -fsSL -o runner.tar.gz \
       "https://github.com/actions/runner/releases/download/v${RUNNER_VERSION}/actions-runner-linux-x64-${RUNNER_VERSION}.tar.gz" \
     && tar xzf runner.tar.gz && rm runner.tar.gz \
     && ./bin/installdependencies.sh \
-    && chown -R runner:runner /actions-runner
+    && chown -R runner:runner /opt/actions-runner \
+    # イメージのバージョン情報を保存（entrypoint.sh が volume との比較に使用）
+    && echo -n "${RUNNER_VERSION}" > /opt/actions-runner/.image-runner-version
 
 # installdependencies.sh がベースイメージの Debian リリースで libicu を解決できないため
 # .NET ランタイムの依存を明示的にインストールする（issue #20）
@@ -36,6 +70,9 @@ RUN apt-get update \
 
 # Python（base イメージのグローバル環境）を runner ユーザーでも使えるようにする
 RUN chown -R runner:runner /usr/local/lib/python3.12 /usr/local/bin || true
+
+# /actions-runner を初期化（volume マウントポイント。初回は空）
+RUN mkdir -p /actions-runner && chown runner:runner /actions-runner
 
 USER runner
 
