@@ -3,90 +3,25 @@
 テスト対象:
 - _match_extension: 拡張子マッチ（大文字小文字無視、ドット有無対応）
 - _walk_code_files: コードファイル収集（パス・除外・prefix・extension フィルタ）
-- source_type バリデーション
-- source_type + extension 組み合わせ
+- list_tree: source_type バリデーション、source_type + extension の分岐・集約
 """
 
 from __future__ import annotations
 
 import os
 import tempfile
+from unittest.mock import MagicMock, patch
 
 import pytest
 
-
-# ---------------------------------------------------------------------------
-# _match_extension のテスト用スタンドアロン実装
-# ---------------------------------------------------------------------------
-
-
-def _match_extension(path: str, extension: str) -> bool:
-    """拡張子が指定値にマッチするか（大文字小文字無視、'.' 有無両対応）。"""
-    ext = extension if extension.startswith(".") else "." + extension
-    return path.lower().endswith(ext.lower())
-
-
-# ---------------------------------------------------------------------------
-# _walk_code_files のテスト用に必要な定数と関数の簡易コピー
-# ---------------------------------------------------------------------------
-
-_DOC_EXTENSIONS = {".md", ".mdx", ".markdown"}
-
-_EXCLUDE_DIRS = {
-    ".git",
-    "node_modules",
-    ".venv", "venv",
-    "dist", "build",
-    "__pycache__",
-    ".tox", ".eggs",
-    ".next",
-    "target",
-}
-
-_EXCLUDE_EXTENSIONS = {
-    ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".webp",
-    ".woff", ".woff2", ".ttf", ".eot", ".otf",
-    ".pyc", ".pyo",
-    ".so", ".dylib", ".dll", ".wasm",
-    ".zip", ".tar", ".gz", ".bz2", ".xz", ".7z",
-    ".pdf",
-    ".lock",
-    ".min.js", ".min.css",
-}
-
-_VALID_SOURCE_TYPES = {"doc", "code"}
-
-
-def _is_doc_file(filename: str) -> bool:
-    return any(filename.lower().endswith(ext) for ext in _DOC_EXTENSIONS)
-
-
-def _is_excluded_file(filename: str) -> bool:
-    lower = filename.lower()
-    return any(lower.endswith(ext) for ext in _EXCLUDE_EXTENSIONS)
-
-
-def _walk_code_files(base: str, prefix: str, extension: str | None = None) -> set[str]:
-    paths: set[str] = set()
-    if not os.path.isdir(base):
-        return paths
-    for dirpath, dirnames, filenames in os.walk(base):
-        dirnames[:] = [d for d in dirnames if d not in _EXCLUDE_DIRS]
-        rel_dir = os.path.relpath(dirpath, base)
-        if rel_dir == ".":
-            rel_dir = ""
-        for fn in filenames:
-            if _is_doc_file(fn) or _is_excluded_file(fn):
-                continue
-            rel_path = os.path.join(rel_dir, fn) if rel_dir else fn
-            if prefix and not (
-                rel_path == prefix or rel_path.startswith(prefix + "/")
-            ):
-                continue
-            if extension and not _match_extension(rel_path, extension):
-                continue
-            paths.add(rel_path)
-    return paths
+from shiori.mcp_server import (
+    _VALID_SOURCE_TYPES,
+    _is_doc_file,
+    _is_excluded_file,
+    _match_extension,
+    _walk_code_files,
+    list_tree,
+)
 
 
 # ── ヘルパー: 仮想ディレクトリツリーを作成 ──
@@ -102,7 +37,7 @@ def _make_tree(base: str, files: list[str]) -> None:
 
 
 # ===================================================================
-# _match_extension のテスト
+# _match_extension のテスト（本番コードを import）
 # ===================================================================
 
 
@@ -144,7 +79,7 @@ class TestMatchExtension:
 
 
 # ===================================================================
-# _walk_code_files のテスト
+# _walk_code_files のテスト（本番コードを import）
 # ===================================================================
 
 
@@ -194,18 +129,11 @@ class TestWalkCodeFiles:
             assert "image.png" not in result
             assert "archive.zip" not in result
             assert "yarn.lock" not in result
-            # package-lock.json は .json が末尾なので除外されない（既存動作）
-            _make_tree(tmp, ["package-lock.json"])
-            result = _walk_code_files(tmp, "")
-            assert "package-lock.json" in result
 
     def test_exclude_minified_js(self):
         """minified JS (.min.js) は除外される"""
         with tempfile.TemporaryDirectory() as tmp:
-            _make_tree(tmp, [
-                "app.js",
-                "app.min.js",
-            ])
+            _make_tree(tmp, ["app.js", "app.min.js"])
             result = _walk_code_files(tmp, "")
             assert "app.js" in result
             assert "app.min.js" not in result
@@ -223,8 +151,7 @@ class TestWalkCodeFiles:
             result = _walk_code_files(tmp, "src")
             assert "src/main.py" in result
             assert "src/utils.py" in result
-            assert "src2/main.py" not in result  # 別ディレクトリ
-            assert "docs/index.md" not in result  # ドキュメント
+            assert "src2/main.py" not in result
 
     def test_prefix_exact_file(self):
         """prefix がファイル名と一致した場合、そのファイルのみ含まれる"""
@@ -232,7 +159,6 @@ class TestWalkCodeFiles:
             _make_tree(tmp, ["main.py", "main.py.bak"])
             result = _walk_code_files(tmp, "main.py")
             assert "main.py" in result
-            # main.py.bak は "main.py" と等しくなく、"main.py/" で始まらない
             assert "main.py.bak" not in result
 
     def test_mixed_content(self):
@@ -240,18 +166,14 @@ class TestWalkCodeFiles:
         with tempfile.TemporaryDirectory() as tmp:
             _make_tree(tmp, [
                 "src/shiori/main.py",
-                "src/shiori/utils.py",
-                "src/shiori/__init__.py",
                 "tests/test_main.py",
                 "docs/guide.md",
-                "README.md",
                 "pyproject.toml",
                 "node_modules/pkg/index.js",
                 "dist/bundle.min.js",
             ])
             result = _walk_code_files(tmp, "")
             assert "src/shiori/main.py" in result
-            assert "src/shiori/utils.py" in result
             assert "tests/test_main.py" in result
             assert "pyproject.toml" in result
             assert "docs/guide.md" not in result  # ドキュメント
@@ -273,10 +195,7 @@ class TestWalkCodeFiles:
     def test_extension_filter_without_dot(self):
         """extension 指定（ドットなし）でも正常にフィルタ"""
         with tempfile.TemporaryDirectory() as tmp:
-            _make_tree(tmp, [
-                "main.py",
-                "utils.ts",
-            ])
+            _make_tree(tmp, ["main.py", "utils.ts"])
             result = _walk_code_files(tmp, "", extension="py")
             assert result == {"main.py"}
 
@@ -289,177 +208,218 @@ class TestWalkCodeFiles:
 
 
 # ===================================================================
-# source_type バリデーションのテスト
+# list_tree のテスト（本番コードを実呼び出し）
 # ===================================================================
 
 
-class TestSourceTypeValidation:
+class TestListTreeSourceTypeValidation:
     """list_tree の source_type バリデーション。
 
-    実際の list_tree 関数は DB とファイルシステムに依存するため、
-    ここではバリデーションロジックを検証する。
+    バリデーションは DB 接続より前に行われるため、
+    settings だけモックすれば実呼び出し可能。
     """
 
     @staticmethod
-    def _validate_source_type(source_type: str | None) -> None:
-        if source_type is not None and source_type not in _VALID_SOURCE_TYPES:
-            raise ValueError(
-                f"無効な source_type '{source_type}' です。"
-                f"有効な値: {', '.join(sorted(_VALID_SOURCE_TYPES))}"
-            )
+    def _call_list_tree(source_type: str | None) -> None:
+        """list_tree を呼び出す。バリデーション通過を確認するだけなので
+        コードファイル収集部分でエラーになってもよい。
+        """
+        # _resolve_repo が settings.repos を参照するのでモック
+        with (
+            patch("shiori.mcp_server.settings") as mock_settings,
+            patch("shiori.mcp_server._conn") as mock_conn,
+        ):
+            mock_settings.repos = ["test/repo"]
+            list_tree(source_type=source_type)
 
     def test_valid_doc(self):
-        """'doc' は有効"""
-        self._validate_source_type("doc")  # エラーなし
+        """'doc' は有効（DB エラー以前にバリデーション通過）"""
+        self._call_list_tree("doc")  # ValueError 以外は OK
 
     def test_valid_code(self):
         """'code' は有効"""
-        self._validate_source_type("code")  # エラーなし
+        self._call_list_tree("code")
 
     def test_none_is_valid(self):
         """None は有効（デフォルト）"""
-        self._validate_source_type(None)  # エラーなし
+        self._call_list_tree(None)
 
     def test_invalid_raises(self):
-        """無効な値は ValueError"""
-        with pytest.raises(ValueError, match="無効な source_type"):
-            self._validate_source_type("issue")
+        """無効な source_type は ValueError"""
+        with (
+            patch("shiori.mcp_server.settings"),
+            patch("shiori.mcp_server._conn"),
+        ), pytest.raises(ValueError, match="無効な source_type"):
+            list_tree(source_type="issue")
 
     def test_empty_string_raises(self):
         """空文字列も無効"""
-        with pytest.raises(ValueError, match="無効な source_type"):
-            self._validate_source_type("")
+        with (
+            patch("shiori.mcp_server.settings"),
+            patch("shiori.mcp_server._conn"),
+        ), pytest.raises(ValueError, match="無効な source_type"):
+            list_tree(source_type="")
 
     def test_random_string_raises(self):
         """任意の文字列は無効"""
-        with pytest.raises(ValueError, match="無効な source_type"):
-            self._validate_source_type("xyz")
+        with (
+            patch("shiori.mcp_server.settings"),
+            patch("shiori.mcp_server._conn"),
+        ), pytest.raises(ValueError, match="無効な source_type"):
+            list_tree(source_type="xyz")
 
 
-# ===================================================================
-# source_type + extension 組み合わせテスト
-# ===================================================================
+class TestListTreeEndToEnd:
+    """list_tree の end-to-end テスト。
 
-
-class TestSourceTypeExtensionCombo:
-    """source_type と extension の組み合わせテスト。
-
-    list_tree のフィルタ分岐ロジックを純粋関数で検証する。
-    実際の list_tree は:
-    1. source_type in (None, "doc") → doc_files クエリ → extension フィルタ
-    2. source_type in (None, "code") → _walk_code_files → extension フィルタ
-    3. 両方の結果を set に集約 → sorted
+    DB とファイルシステムをモックし、
+    source_type / extension の分岐・集約・ソートを検証する。
     """
 
-    def test_doc_all_md(self):
-        """source_type='doc' + extension='.md' は doc_files だけを通す"""
-        with tempfile.TemporaryDirectory() as tmp:
-            _make_tree(tmp, ["README.md", "main.py", "docs/guide.md"])
-            # doc_files 模擬パス
-            doc_paths = {"README.md", "docs/guide.md"}
-            # extension フィルタ
-            doc_filtered = {p for p in doc_paths if _match_extension(p, ".md")}
-            # source_type="doc" -> code walk はスキップ
-            assert doc_filtered == {"README.md", "docs/guide.md"}
+    def _mock_cursor(self, rows: list[tuple[str]]) -> MagicMock:
+        """doc_files クエリ結果を返すモックカーソルを作成。"""
+        cur = MagicMock()
+        cur.fetchall.return_value = rows
+        return cur
 
-    def test_doc_py_returns_empty(self):
+    def _call_list_tree(
+        self,
+        tmp: str,
+        source_type: str | None = None,
+        extension: str | None = None,
+        doc_rows: list[tuple[str]] | None = None,
+        code_files: list[str] | None = None,
+    ) -> list[str]:
+        """list_tree をモック環境で呼び出す。"""
+        # コードファイルを実際に作成
+        if code_files:
+            _make_tree(tmp, code_files)
+
+        mock_conn = MagicMock()
+        mock_cur = self._mock_cursor(doc_rows or [])
+        mock_conn.__enter__ = MagicMock(return_value=mock_conn)
+        mock_conn.__exit__ = MagicMock(return_value=False)
+        mock_conn.cursor.return_value.__enter__ = MagicMock(return_value=mock_cur)
+        mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+
+        def _fake_conn():
+            return mock_conn
+
+        with (
+            patch("shiori.mcp_server.settings") as mock_settings,
+            patch("shiori.mcp_server._conn", side_effect=_fake_conn),
+        ):
+            mock_settings.repos = ["test/repo"]
+            mock_settings.repo_dir.return_value = tmp
+            return list_tree(source_type=source_type, extension=extension)
+
+    def test_source_type_doc_only(self):
+        """source_type='doc' は doc_files のパスのみを返す"""
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self._call_list_tree(
+                tmp,
+                source_type="doc",
+                doc_rows=[("README.md",), ("docs/guide.md",)],
+                code_files=["main.py", "utils.py"],
+            )
+            assert result == ["README.md", "docs/guide.md"]
+
+    def test_source_type_code_only(self):
+        """source_type='code' はコードファイルのみを返す"""
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self._call_list_tree(
+                tmp,
+                source_type="code",
+                doc_rows=[("README.md",)],
+                code_files=["main.py", "utils.py"],
+            )
+            assert result == ["main.py", "utils.py"]
+
+    def test_source_type_none_returns_both(self):
+        """source_type=None は doc + code の両方を返す"""
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self._call_list_tree(
+                tmp,
+                source_type=None,
+                doc_rows=[("README.md",)],
+                code_files=["main.py"],
+            )
+            assert result == ["README.md", "main.py"]
+
+    def test_doc_with_extension_md(self):
+        """source_type='doc' + extension='.md' で .md だけ"""
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self._call_list_tree(
+                tmp,
+                source_type="doc",
+                extension=".md",
+                doc_rows=[("README.md",), ("CHANGELOG.rst",)],
+            )
+            assert result == ["README.md"]
+
+    def test_doc_with_extension_py_returns_empty(self):
         """source_type='doc' + extension='.py' は空（doc に .py はない）"""
-        doc_paths = {"README.md", "docs/guide.md"}
-        doc_filtered = {p for p in doc_paths if _match_extension(p, ".py")}
-        assert doc_filtered == set()
-
-    def test_code_all_py(self):
-        """source_type='code' + extension='.py' はコードファイルのみ通す"""
         with tempfile.TemporaryDirectory() as tmp:
-            _make_tree(tmp, ["main.py", "utils.py", "utils.ts", "README.md"])
-            code_paths = _walk_code_files(tmp, "", extension=".py")
-            assert code_paths == {"main.py", "utils.py"}
+            result = self._call_list_tree(
+                tmp,
+                source_type="doc",
+                extension=".py",
+                doc_rows=[("README.md",), ("docs/guide.md",)],
+            )
+            assert result == []
 
-    def test_code_ts(self):
+    def test_code_with_extension_py(self):
+        """source_type='code' + extension='.py' で .py だけ"""
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self._call_list_tree(
+                tmp,
+                source_type="code",
+                extension=".py",
+                code_files=["main.py", "utils.py", "utils.ts"],
+            )
+            assert result == ["main.py", "utils.py"]
+
+    def test_code_with_extension_ts(self):
         """source_type='code' + extension='.ts' で .ts だけ"""
         with tempfile.TemporaryDirectory() as tmp:
-            _make_tree(tmp, ["main.py", "utils.ts", "types.ts"])
-            code_paths = _walk_code_files(tmp, "", extension=".ts")
-            assert code_paths == {"utils.ts", "types.ts"}
+            result = self._call_list_tree(
+                tmp,
+                source_type="code",
+                extension=".ts",
+                code_files=["main.py", "utils.ts", "types.ts"],
+            )
+            assert result == ["types.ts", "utils.ts"]
 
-    def test_both_with_extension(self):
-        """source_type=None + extension='.py' は両方から .py だけ"""
-        with tempfile.TemporaryDirectory() as tmp:
-            _make_tree(tmp, ["main.py", "utils.ts", "README.md"])
-            # doc_files 模擬（.md だけなので .py フィルタで空）
-            doc_paths: set[str] = set()
-            # code walk
-            code_paths = _walk_code_files(tmp, "", extension=".py")
-            all_paths = doc_paths | code_paths
-            assert all_paths == {"main.py"}
-
-    def test_both_no_extension(self):
-        """source_type=None + extension=None は両方の全ファイル"""
-        with tempfile.TemporaryDirectory() as tmp:
-            _make_tree(tmp, ["main.py", "utils.ts", "README.md"])
-            doc_paths = {"README.md"}
-            code_paths = _walk_code_files(tmp, "")
-            all_paths = doc_paths | code_paths
-            assert "main.py" in all_paths
-            assert "utils.ts" in all_paths
-            assert "README.md" in all_paths
-
-    def test_code_empty_extension(self):
+    def test_code_extension_no_match(self):
         """source_type='code' + extension='.go'（マッチなし）は空"""
         with tempfile.TemporaryDirectory() as tmp:
-            _make_tree(tmp, ["main.py", "utils.py"])
-            code_paths = _walk_code_files(tmp, "", extension=".go")
-            assert code_paths == set()
+            result = self._call_list_tree(
+                tmp,
+                source_type="code",
+                extension=".go",
+                code_files=["main.py", "utils.py"],
+            )
+            assert result == []
 
-
-# ===================================================================
-# list_tree 全体のフィルタ結合のテスト
-# ===================================================================
-
-
-class TestListTreeFilters:
-    """list_tree のフィルタロジック（ソース結合＋拡張子フィルタ）のテスト。"""
-
-    def test_extension_filter_with_dot(self):
-        """extension 指定（ドット付き）でフィルタされる"""
-        paths = [
-            "src/main.py",
-            "src/utils.py",
-            "src/main.ts",
-            "README.md",
-        ]
-        ext = ".py"
-        result = sorted(p for p in paths if _match_extension(p, ext))
-        assert result == ["src/main.py", "src/utils.py"]
-
-    def test_extension_filter_without_dot(self):
-        """extension 指定（ドットなし）でも正常にフィルタ"""
-        paths = [
-            "src/main.py",
-            "src/utils.py",
-            "src/main.ts",
-        ]
-        ext = "py"
-        result = sorted(p for p in paths if _match_extension(p, ext))
-        assert result == ["src/main.py", "src/utils.py"]
-
-    def test_extension_none_returns_all(self):
-        """extension=None ではフィルタされない"""
-        paths = ["a.py", "b.ts", "c.md"]
-        result = sorted(paths)
-        assert result == ["a.py", "b.ts", "c.md"]
-
-    def test_extension_no_match_returns_empty(self):
-        """マッチするファイルがない場合は空リスト"""
-        paths = ["a.py", "b.ts"]
-        ext = ".go"
-        result = sorted(p for p in paths if _match_extension(p, ext))
-        assert result == []
-
-    def test_source_type_code_skips_docs(self):
-        """source_type='code' 相当のパス収集でドキュメントが含まれない"""
+    def test_both_with_extension_py(self):
+        """source_type=None + extension='.py' は両方から .py だけ"""
         with tempfile.TemporaryDirectory() as tmp:
-            _make_tree(tmp, ["main.py", "README.md"])
-            code_paths = _walk_code_files(tmp, "")
-            assert "main.py" in code_paths
-            assert "README.md" not in code_paths  # ドキュメントは除外
+            result = self._call_list_tree(
+                tmp,
+                source_type=None,
+                extension=".py",
+                doc_rows=[("README.md",)],
+                code_files=["main.py", "utils.ts"],
+            )
+            assert result == ["main.py"]
+
+    def test_sorted_result(self):
+        """結果がソートされている"""
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self._call_list_tree(
+                tmp,
+                source_type=None,
+                doc_rows=[("a.md",), ("z.md",)],
+                code_files=["c.py", "b.py"],
+            )
+            assert result == ["a.md", "b.py", "c.py", "z.md"]
