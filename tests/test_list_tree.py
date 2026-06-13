@@ -2,13 +2,16 @@
 
 テスト対象:
 - _match_extension: 拡張子マッチ（大文字小文字無視、ドット有無対応）
-- _walk_code_files: コードファイル収集（パス・除外・prefix フィルタ）
+- _walk_code_files: コードファイル収集（パス・除外・prefix・extension フィルタ）
+- source_type バリデーション
 """
 
 from __future__ import annotations
 
 import os
 import tempfile
+
+import pytest
 
 
 # ---------------------------------------------------------------------------
@@ -50,6 +53,8 @@ _EXCLUDE_EXTENSIONS = {
     ".min.js", ".min.css",
 }
 
+_VALID_SOURCE_TYPES = {"doc", "code"}
+
 
 def _is_doc_file(filename: str) -> bool:
     return any(filename.lower().endswith(ext) for ext in _DOC_EXTENSIONS)
@@ -60,7 +65,7 @@ def _is_excluded_file(filename: str) -> bool:
     return any(lower.endswith(ext) for ext in _EXCLUDE_EXTENSIONS)
 
 
-def _walk_code_files(base: str, prefix: str) -> set[str]:
+def _walk_code_files(base: str, prefix: str, extension: str | None = None) -> set[str]:
     paths: set[str] = set()
     if not os.path.isdir(base):
         return paths
@@ -76,6 +81,8 @@ def _walk_code_files(base: str, prefix: str) -> set[str]:
             if prefix and not (
                 rel_path == prefix or rel_path.startswith(prefix + "/")
             ):
+                continue
+            if extension and not _match_extension(rel_path, extension):
                 continue
             paths.add(rel_path)
     return paths
@@ -250,18 +257,91 @@ class TestWalkCodeFiles:
             assert "node_modules/pkg/index.js" not in result  # 除外ディレクトリ
             assert "dist/bundle.min.js" not in result  # 除外ディレクトリ+min.js
 
+    def test_extension_filter_dot(self):
+        """extension 指定（ドット付き）でウォーク中にフィルタされる"""
+        with tempfile.TemporaryDirectory() as tmp:
+            _make_tree(tmp, [
+                "src/main.py",
+                "src/utils.py",
+                "src/main.ts",
+                "README.md",
+            ])
+            result = _walk_code_files(tmp, "", extension=".py")
+            assert result == {"src/main.py", "src/utils.py"}
+
+    def test_extension_filter_without_dot(self):
+        """extension 指定（ドットなし）でも正常にフィルタ"""
+        with tempfile.TemporaryDirectory() as tmp:
+            _make_tree(tmp, [
+                "main.py",
+                "utils.ts",
+            ])
+            result = _walk_code_files(tmp, "", extension="py")
+            assert result == {"main.py"}
+
+    def test_extension_no_match(self):
+        """マッチする拡張子がない場合は空集合"""
+        with tempfile.TemporaryDirectory() as tmp:
+            _make_tree(tmp, ["main.py", "utils.py"])
+            result = _walk_code_files(tmp, "", extension=".go")
+            assert result == set()
+
 
 # ===================================================================
-# list_tree 全体のフィルタ結合のテスト（純粋関数としての振る舞い検証）
+# source_type バリデーションのテスト
+# ===================================================================
+
+
+class TestSourceTypeValidation:
+    """list_tree の source_type バリデーション。
+
+    実際の list_tree 関数は DB とファイルシステムに依存するため、
+    ここではバリデーションロジックを検証する。
+    """
+
+    @staticmethod
+    def _validate_source_type(source_type: str | None) -> None:
+        if source_type is not None and source_type not in _VALID_SOURCE_TYPES:
+            raise ValueError(
+                f"無効な source_type です: '{source_type}'。"
+                f"有効な値: {', '.join(sorted(_VALID_SOURCE_TYPES))}"
+            )
+
+    def test_valid_doc(self):
+        """'doc' は有効"""
+        self._validate_source_type("doc")  # エラーなし
+
+    def test_valid_code(self):
+        """'code' は有効"""
+        self._validate_source_type("code")  # エラーなし
+
+    def test_none_is_valid(self):
+        """None は有効（デフォルト）"""
+        self._validate_source_type(None)  # エラーなし
+
+    def test_invalid_raises(self):
+        """無効な値は ValueError"""
+        with pytest.raises(ValueError, match="無効な source_type"):
+            self._validate_source_type("issue")
+
+    def test_empty_string_raises(self):
+        """空文字列も無効"""
+        with pytest.raises(ValueError, match="無効な source_type"):
+            self._validate_source_type("")
+
+    def test_random_string_raises(self):
+        """任意の文字列は無効"""
+        with pytest.raises(ValueError, match="無効な source_type"):
+            self._validate_source_type("xyz")
+
+
+# ===================================================================
+# list_tree 全体のフィルタ結合のテスト
 # ===================================================================
 
 
 class TestListTreeFilters:
-    """list_tree のフィルタロジック（ソース結合＋拡張子フィルタ）のテスト。
-
-    DB アクセスを伴う doc_files クエリ部分はモックが必要なため、
-    ここでは _walk_code_files + extension フィルタの結合を検証する。
-    """
+    """list_tree のフィルタロジック（ソース結合＋拡張子フィルタ）のテスト。"""
 
     def test_extension_filter_with_dot(self):
         """extension 指定（ドット付き）でフィルタされる"""
