@@ -34,8 +34,6 @@ ENV HF_HOME=/models
 # 固定したい場合は --build-arg RUNNER_VERSION=2.xxx.x で上書き可能。
 ARG RUNNER_VERSION=latest
 
-RUN useradd -m runner
-
 # バイナリ配置先（volume に隠されない場所）
 WORKDIR /opt/actions-runner
 # latest 指定時は GitHub API から最新リリースタグを取得して動的解決
@@ -58,7 +56,6 @@ RUN if [ "$RUNNER_VERSION" = "latest" ]; then \
       "https://github.com/actions/runner/releases/download/v${RUNNER_VERSION}/actions-runner-linux-x64-${RUNNER_VERSION}.tar.gz" \
     && tar xzf runner.tar.gz && rm runner.tar.gz \
     && ./bin/installdependencies.sh \
-    && chown -R runner:runner /opt/actions-runner \
     # イメージのバージョン情報を保存（entrypoint.sh が volume との比較に使用）
     && echo -n "${RUNNER_VERSION}" > /opt/actions-runner/.image-runner-version
 
@@ -68,15 +65,27 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends libicu-dev liblttng-ust1 libkrb5-3 zlib1g \
     && rm -rf /var/lib/apt/lists/*
 
-# Python（base イメージのグローバル環境）を runner ユーザーでも使えるようにする
-RUN chown -R runner:runner /usr/local/lib/python3.12 /usr/local/bin || true
-
 # /actions-runner を初期化（volume マウントポイント。初回は空）
-RUN mkdir -p /actions-runner && chown runner:runner /actions-runner
+RUN mkdir -p /actions-runner
 
-USER runner
+# issue #48: /data/repos を app/ingest（root）と共有するため、runner も root で実行する。
+#
+# 背景: app/ingest は USER 指定なし＝root 実行で /data/repos にクローンを作成する。
+# runner を非root（USER runner）で動かすと、root 所有のクローンに対し git 操作
+# （remote set-url / fetch / reset --hard）が ".git/config を書けない" 権限エラーで失敗する。
+# PR #49 の safe.directory は「所有者チェック（dubious ownership）」のみを回避するもので、
+# 実体のファイル書き込み権限の衝突は別問題として残っていた。
+#
+# 対策: USER runner を撤去し root で実行することで、/data/repos を触る
+# app / ingest / runner の UID を root に一本化する。self-hosted runner は root 実行を
+# 拒否するため、RUNNER_ALLOW_RUNASROOT=1 で明示的に許可する。
+# 本構成は private リポジトリ専用のため許容する（public 化時は profiles 無効化が前提）。
+#
+# より安全な代替案: app / ingest / runner を同一の非root UID に統一し、
+# /data・/models を chown する（docker/app/Dockerfile への USER 追加が必要・差分大）。
+ENV RUNNER_ALLOW_RUNASROOT=1
 
-COPY --chown=runner:runner docker/runner/entrypoint.sh /entrypoint.sh
+COPY docker/runner/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
 ENTRYPOINT ["/entrypoint.sh"]
