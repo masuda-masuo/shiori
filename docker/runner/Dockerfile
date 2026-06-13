@@ -17,16 +17,23 @@ RUN pip install --no-cache-dir .
 ENV HF_HOME=/models
 
 # --- Actions runner レイヤー ---
-# issue #46: バージョン固定による deprecated 停止問題への対策
-# ビルド時に --build-arg RUNNER_VERSION=2.xxx.x で上書き可能
+# issue #46: バージョン固定による deprecated 停止問題への恒久対策
+# デフォルトは latest で、ビルド時に GitHub API から最新安定版を動的解決する。
+# 固定したい場合は --build-arg RUNNER_VERSION=2.xxx.x で上書き可能。
 # また entrypoint.sh が volume 内のバイナリとイメージのバージョンを
-# 比較し、不一致時に自動同期する（.runner / .credentials は保持）
-ARG RUNNER_VERSION=2.335.1
+# 比較し、不一致時に自動同期する（.runner / .credentials は保持）。
+ARG RUNNER_VERSION=latest
 
 RUN useradd -m runner
 
 WORKDIR /actions-runner
-RUN curl -fsSL -o runner.tar.gz \
+# latest 指定時は GitHub API から最新リリースタグを取得して動的解決
+RUN if [ "$RUNNER_VERSION" = "latest" ]; then \
+      RUNNER_VERSION=$(curl -s https://api.github.com/repos/actions/runner/releases/latest \
+        | python3 -c "import sys,json; print(json.load(sys.stdin)['tag_name'].lstrip('v'))"); \
+      echo "Resolved latest runner version: v${RUNNER_VERSION}"; \
+    fi \
+    && curl -fsSL -o runner.tar.gz \
       "https://github.com/actions/runner/releases/download/v${RUNNER_VERSION}/actions-runner-linux-x64-${RUNNER_VERSION}.tar.gz" \
     && tar xzf runner.tar.gz && rm runner.tar.gz \
     && ./bin/installdependencies.sh \
