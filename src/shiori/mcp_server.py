@@ -3,7 +3,7 @@
 ツール構成（決定: semantic / keyword は分離を維持。semantic が入口で内部ハイブリッド）:
 - semantic_search(query, filters?)  : 意味検索（内部で RRF ハイブリッド）。入口。
 - keyword_search(query, filters?)   : 完全一致寄りのキーワード検索（日本語対応）。
-- list_tree(path?)                  : 索引済みドキュメント＋コードファイルのツリー閲覧。
+- list_tree(path?, source_type?, extension?): 索引済みドキュメント＋コードファイルのツリー閲覧。
 - read_file(path, start?, end?)     : ローカルクローンからファイル（の一部）を取得。
 - read_issue(number)                : issue/PR スレッド全体を取得。
 - ingest(rebuild?, repo?)           : docs / issue / PR / code の差分同期（索引更新）。
@@ -212,7 +212,13 @@ def _is_excluded_file(filename: str) -> bool:
     return any(lower.endswith(ext) for ext in _EXCLUDE_EXTENSIONS)
 
 
-def _walk_code_files(base: str, prefix: str) -> set[str]:
+def _match_extension(path: str, extension: str) -> bool:
+    """拡張子が指定値にマッチするか（大文字小文字無視、'.' 有無両対応）。"""
+    ext = extension if extension.startswith(".") else "." + extension
+    return path.lower().endswith(ext.lower())
+
+
+def _walk_code_files(base: str, prefix: str, extension: str | None = None) -> set[str]:
     """クローンを walk し、コードファイルの相対パス集合を返す。
 
     - .git / node_modules / .venv / __pycache__ 等のノイズディレクトリをスキップ
@@ -220,6 +226,7 @@ def _walk_code_files(base: str, prefix: str) -> set[str]:
     - バイナリ・アセット・ロックファイル等の非テキスト拡張子も除外
     - prefix が指定された場合はそのパス自身またはその配下のファイルのみを返す
       （例: prefix="src" は "src/main.py" にマッチ、"src2/main.py" にはマッチしない）
+    - extension が指定された場合はウォーク中に拡張子フィルタを適用（大文字小文字無視）
     """
     paths: set[str] = set()
     if not os.path.isdir(base):
@@ -236,6 +243,8 @@ def _walk_code_files(base: str, prefix: str) -> set[str]:
             if prefix and not (
                 rel_path == prefix or rel_path.startswith(prefix + "/")
             ):
+                continue
+            if extension and not _match_extension(rel_path, extension):
                 continue
             paths.add(rel_path)
     return paths
@@ -255,6 +264,7 @@ mcp = FastMCP(
         "shiori_ingest を呼んで差分同期する。索引が最新かどうかの確認は shiori_status。"
         "コードファイルは shiori_list_tree で発見し shiori_read_file で読める"
         "（path, start_line, end_line 指定可）。"
+        "shiori_list_tree は source_type='doc'/'code' や extension='.py' で絞り込み可能。"
         "コードの検索は shiori_semantic_search / shiori_keyword_search で可能"
         "（source_type='code' で絞り込み可、prog_lang フィルタで言語指定も可）。"
     ),
@@ -311,39 +321,65 @@ def keyword_search(
         )
 
 
+# list_tree の source_type で有効な値
+_VALID_SOURCE_TYPES = {"doc", "code"}
+
+
 @mcp.tool(name="shiori_list_tree")
-def list_tree(path: str | None = None, repo: str | None = None) -> list[str]:
-    """索引済みドキュメント（Markdown）のパス一覧。path を渡すとその配下に絞る。
+def list_tree(
+    path: str | None = None,
+    source_type: str | None = None,
+    extension: str | None = None,
+    repo: str | None = None,
+) -> list[str]:
+    """索引済みドキュメントのパス一覧。path を渡すとその配下に絞る。
     リポジトリの構造を把握し、当たりをつけるのに使う。
 
     コードファイル（.py, .ts, .go 等）もクローンファイルシステムから返す。
-    コードは索引前でも発見可能。"""
+    コードは索引前でも発見可能。
+
+    source_type: 'doc'（索引済み Markdown）/'code'（クローンのコードファイル）で絞り込み。
+                 省略時は両方を返す。無効な値はエラー。
+    extension:   '.py' や '.md' 等の拡張子でフィルタ（先頭ドットの有無は自由）。
+                 大文字小文字無視。各取得経路でフィルタするため効率的。"""
+    # バリデーション
+    if source_type is not None and source_type not in _VALID_SOURCE_TYPES:
+        raise ValueError(
+            f"無効な source_type '{source_type}' です。"
+            f"有効な値: {', '.join(sorted(_VALID_SOURCE_TYPES))}"
+        )
+
     target = _resolve_repo(repo)
     paths: set[str] = set()
 
     # 1. 索引済みドキュメント（doc_files テーブル）
-    with _conn() as conn, conn.cursor() as cur:
-        if path:
-            # path 自身または path/ 配下にマッチ（例: "src" で "src2" は除外）
-            prefix = path.rstrip("/")
-            cur.execute(
-                "SELECT path FROM doc_files"
-                " WHERE repo = %s AND (path = %s OR path LIKE %s)"
-                " ORDER BY path",
-                (target, prefix, prefix + "/%"),
-            )
-        else:
-            cur.execute(
-                "SELECT path FROM doc_files WHERE repo = %s ORDER BY path", (target,)
-            )
-        for r in cur.fetchall():
-            paths.add(r[0])
+    if source_type is None or source_type == "doc":
+        with _conn() as conn, conn.cursor() as cur:
+            if path:
+                prefix = path.rstrip("/")
+                cur.execute(
+                    "SELECT path FROM doc_files"
+                    " WHERE repo = %s AND (path = %s OR path LIKE %s)"
+                    " ORDER BY path",
+                    (target, prefix, prefix + "/%"),
+                )
+            else:
+                cur.execute(
+                    "SELECT path FROM doc_files WHERE repo = %s ORDER BY path",
+                    (target,),
+                )
+            for r in cur.fetchall():
+                p = r[0]
+                if extension and not _match_extension(p, extension):
+                    continue
+                paths.add(p)
 
     # 2. コードファイル（クローンファイルシステム）
-    base = os.path.realpath(settings.repo_dir(target))
-    prefix = path.rstrip("/") if path else ""
-    code_paths = _walk_code_files(base, prefix)
-    paths.update(code_paths)
+    if source_type is None or source_type == "code":
+        base = os.path.realpath(settings.repo_dir(target))
+        prefix = path.rstrip("/") if path else ""
+        code_paths = _walk_code_files(base, prefix, extension=extension)
+        paths.update(code_paths)
 
     return sorted(paths)
 

@@ -8,12 +8,12 @@
 
 - `shiori_semantic_search(query, filters?)`: 意味検索。チャンクのポインタ＋スニペットを返す。
 - `shiori_keyword_search(query, filters?)`: キーワード／完全一致検索（日本語対応トークナイズ）。
-- `shiori_list_tree(path?)`: リポジトリ構造の閲覧。
+- `shiori_list_tree(path?, source_type?, extension?)`: リポジトリ構造の閲覧。`source_type`（`doc` / `code`）と `extension`（`.py` / `.md` 等）での絞り込みが可能（issue #43）。
 - `shiori_read_file(path, range?)` / `shiori_read_issue(number)`: 指定ファイル／スレッドを必要なら一部だけ取得。
-- `shiori_ingest(rebuild?)`: docs と issue/PR を GitHub から同期し索引を更新する（オンデマンド。`rebuild=true` で全件再構築。issue #6）。
+- `shiori_ingest(rebuild?)`: docs／issue／PR／code を GitHub から同期し索引を更新する（オンデマンド。`rebuild=true` で全件再構築。issue #6）。
 - `shiori_status()`: 索引の鮮度と健全性を照会する（issue #22, #31）。`chunks` の source_type 別内訳・`issue_items` 全件数・差分同期カーソル・警告（warnings）を返す。
 
-検索系には `source_type`（doc / issue / pr_review）, `language`, `state` 等のフィルタを持たせる。bot 投稿は原則索引から除外されるが、`SHIORI_INDEX_BOT_LOGINS` 環境変数（GitHub App 名 + `[bot]` 形式のログイン名をカンマ区切りで指定）で allowlist 指定が可能（issue #25）。
+検索系には `source_type`（doc / issue / pr_review / code）, `language`, `state` 等のフィルタを持たせる。bot 投稿は原則索引から除外されるが、`SHIORI_INDEX_BOT_LOGINS` 環境変数（GitHub App 名 + `[bot]` 形式のログイン名をカンマ区切りで指定）で allowlist 指定が可能（issue #25）。
 
 ### shiori_status の警告（issue #31, #35）
 
