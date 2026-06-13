@@ -39,10 +39,19 @@ RUN useradd -m runner
 # バイナリ配置先（volume に隠されない場所）
 WORKDIR /opt/actions-runner
 # latest 指定時は GitHub API から最新リリースタグを取得して動的解決
+# 注意: 未認証の GitHub API は 60 req/h のレート制限がある。
+# 制限超過やネットワーク障害に備え、フォールバックとして既知の安定版を使用する。
 RUN if [ "$RUNNER_VERSION" = "latest" ]; then \
-      RUNNER_VERSION=$(curl -s https://api.github.com/repos/actions/runner/releases/latest \
-        | python3 -c "import sys,json; print(json.load(sys.stdin)['tag_name'].lstrip('v'))"); \
-      echo "Resolved latest runner version: v${RUNNER_VERSION}"; \
+      RUNNER_VERSION=$(curl -sSf https://api.github.com/repos/actions/runner/releases/latest 2>/dev/null \
+        | python3 -c "import sys,json; print(json.load(sys.stdin)['tag_name'].lstrip('v'))" 2>/dev/null \
+      ) || { \
+        echo "WARNING: Failed to resolve latest runner version from GitHub API." >&2; \
+        echo "WARNING: Possible causes: rate limit exceeded, network unreachable, or API changed." >&2; \
+        echo "WARNING: Falling back to known stable version 2.335.1." >&2; \
+        echo "WARNING: To pin a specific version, use: docker compose build --build-arg RUNNER_VERSION=2.xxx.x" >&2; \
+        RUNNER_VERSION="2.335.1"; \
+      }; \
+      echo "Resolved runner version: v${RUNNER_VERSION}"; \
     fi \
     && echo "Downloading actions/runner v${RUNNER_VERSION}..." \
     && curl -fsSL -o runner.tar.gz \
