@@ -65,8 +65,15 @@ def _redact(text: str) -> str:
 
 
 def _git(args: list[str], cwd: str | None = None) -> str:
+    # cwd が指定されている場合、安全のため safe.directory を明示的に設定する。
+    # app/ingest（root）と runner（非root）が /data/repos を共有する構成で
+    # git の dubious ownership エラーを防ぐ（issue #48）。
+    cmd = ["git"]
+    if cwd:
+        cmd += ["-c", f"safe.directory={cwd}"]
+    cmd += args
     out = subprocess.run(
-        ["git", *args],
+        cmd,
         cwd=cwd,
         capture_output=True,
         text=True,
