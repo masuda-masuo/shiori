@@ -5,8 +5,10 @@ _should_index の allowlist 判定ロジックを検証する。
 
 from __future__ import annotations
 
+from unittest.mock import MagicMock, patch
+
 from shiori.config import Settings
-from shiori.github_sync import _is_bot, _should_index
+from shiori.github_sync import _git, _is_bot, _should_index
 
 
 # ---------------------------------------------------------------------------
@@ -91,3 +93,28 @@ class TestIsBot:
     def test_bot_suffix_case_insensitive(self):
         """[bot] 判定は大文字小文字を区別しない。"""
         assert _is_bot({"login": "My-App[BOT]", "type": "User"}) is True
+
+
+# ---------------------------------------------------------------------------
+# _git (safe.directory)
+# ---------------------------------------------------------------------------
+
+
+class TestGit:
+    """_git の safe.directory 付与ロジック（issue #48）。"""
+
+    @patch("shiori.github_sync.subprocess.run")
+    def test_safe_directory_added_when_cwd_given(self, mock_run):
+        """cwd 指定時に -c safe.directory=<cwd> が渡ること。"""
+        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
+        _git(["status"], cwd="/data/repos/foo")
+        called_cmd = mock_run.call_args[0][0]
+        assert called_cmd[:3] == ["git", "-c", "safe.directory=/data/repos/foo"]
+
+    @patch("shiori.github_sync.subprocess.run")
+    def test_no_safe_directory_when_cwd_none(self, mock_run):
+        """cwd=None（clone 時など）には safe.directory が付与されないこと。"""
+        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
+        _git(["clone", "url", "dest"])
+        called_cmd = mock_run.call_args[0][0]
+        assert "-c" not in called_cmd
