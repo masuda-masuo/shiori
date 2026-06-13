@@ -1,7 +1,7 @@
 """DB 接続とスキーマ。
 
 設計判断（詳細設計/04）:
-- docs / issue / pr_review は `source_type` 列で 1 テーブル (`chunks`) に統合する。
+- docs / issue / pr_review / code は `source_type` 列で 1 テーブル (`chunks`) に統合する。
 - 全文検索は pgroonga。索引作成時に TokenMecab（形態素解析）を試み、
   プラグインが無ければ TokenBigram にフォールバックする。
 - read_issue 用に生のスレッドを `issue_items` に保持する（チャンクとは別）。
@@ -41,7 +41,8 @@ CREATE TABLE IF NOT EXISTS sync_runs (
     route TEXT,                   -- 'cli' | 'runner' | 'mcp' | 'auto'
     finished_at TIMESTAMPTZ NOT NULL,
     docs_updated INTEGER,
-    issues_indexed INTEGER
+    issues_indexed INTEGER,
+    code_indexed INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS doc_files (
@@ -49,6 +50,7 @@ CREATE TABLE IF NOT EXISTS doc_files (
     path TEXT NOT NULL,
     content_sha TEXT NOT NULL,
     language TEXT,
+    kind TEXT NOT NULL DEFAULT 'doc',  -- 'doc' | 'code' (issue #33)
     PRIMARY KEY (repo, path)
 );
 
@@ -75,7 +77,7 @@ CREATE TABLE IF NOT EXISTS chunks (
     id BIGSERIAL PRIMARY KEY,
     chunk_key TEXT NOT NULL,       -- 由来を表す自然キー（doc:repo:path 等）
     chunk_index INTEGER NOT NULL DEFAULT 0,
-    source_type TEXT NOT NULL CHECK (source_type IN ('doc', 'issue', 'pr_review')),
+    source_type TEXT NOT NULL CHECK (source_type IN ('doc', 'issue', 'pr_review', 'code')),
     repo TEXT NOT NULL,
     path TEXT,
     issue_no INTEGER,
@@ -87,6 +89,10 @@ CREATE TABLE IF NOT EXISTS chunks (
     state TEXT,
     author TEXT,
     line INTEGER,
+    end_line INTEGER,             -- code の行範囲終端（source_type='code' 以外は NULL）
+    commit_sha TEXT,              -- コードの permalink 用 SHA
+    prog_lang TEXT,               -- プログラミング言語（source_type='code' 以外は NULL）
+    symbols TEXT,                 -- 識別子分割済み文字列（pgroonga 検索用）
     created_at TIMESTAMPTZ,
     updated_at TIMESTAMPTZ,
     url TEXT,
@@ -131,6 +137,58 @@ def migrate(conn: psycopg.Connection, settings: Settings) -> None:
         conn.commit()
         log.info("pgroonga index created with default tokenizer (TokenBigram)")
 
+    # --- Step 1: ソースコード索引用スキーマ変更（issue #33） ---
+    # 既存 DB に対する冪等な ALTER。CREATE TABLE IF NOT EXISTS では新カラムが追加されないため。
+
+    # 1. source_type CHECK 制約に 'code' を追加（既存制約を置き換え）
+    with conn.cursor() as cur:
+        cur.execute("ALTER TABLE chunks DROP CONSTRAINT IF EXISTS chunks_source_type_check")
+        cur.execute(
+            "ALTER TABLE chunks ADD CONSTRAINT chunks_source_type_check "
+            "CHECK (source_type IN ('doc', 'issue', 'pr_review', 'code'))"
+        )
+    conn.commit()
+
+    # 2. 新しいカラムを追加
+    with conn.cursor() as cur:
+        for col, typ in [
+            ("end_line", "INTEGER"),
+            ("commit_sha", "TEXT"),
+            ("prog_lang", "TEXT"),
+            ("symbols", "TEXT"),
+        ]:
+            cur.execute(f"ALTER TABLE chunks ADD COLUMN IF NOT EXISTS {col} {typ}")
+    conn.commit()
+
+    # 3. doc_files.kind 追加（既存行は 'doc' のまま）
+    with conn.cursor() as cur:
+        cur.execute("ALTER TABLE doc_files ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'doc'")
+    conn.commit()
+
+    # 4. sync_runs.code_indexed 追加
+    with conn.cursor() as cur:
+        cur.execute("ALTER TABLE sync_runs ADD COLUMN IF NOT EXISTS code_indexed INTEGER")
+    conn.commit()
+
+    # 5. symbols カラム用 pgroonga 索引
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS chunks_symbols_pgroonga "
+                "ON chunks USING pgroonga (symbols) WITH (tokenizer = 'TokenMecab')"
+            )
+        conn.commit()
+        log.info("pgroonga index on symbols created with TokenMecab")
+    except psycopg.Error:
+        conn.rollback()
+        with conn.cursor() as cur:
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS chunks_symbols_pgroonga "
+                "ON chunks USING pgroonga (symbols)"
+            )
+        conn.commit()
+        log.info("pgroonga index on symbols created with default tokenizer (TokenBigram)")
+
 
 def get_cursor(conn: psycopg.Connection, repo: str, kind: str) -> str | None:
     with conn.cursor() as cur:
@@ -165,8 +223,9 @@ def record_sync_run(
     route: str,
     docs_updated: int,
     issues_indexed: int,
+    code_indexed: int = 0,
 ):
-    """同期の成功をリポジトリ単位で記録し、完了時刻（DB の now()）を返す（issue #22）。
+    """同期の成功をリポジトリ単位で記録し、完了時刻（DB の now()）を返す（issue #22 / #33）。
 
     advisory lock で skip された実行は呼び出し側で記録しないこと（成功した同期のみ）。
     時刻は DB の now() を使う: 複数経路・複数プロセスでも単一 DB の時計で一貫する。
@@ -174,16 +233,17 @@ def record_sync_run(
     with conn.cursor() as cur:
         cur.execute(
             """
-            INSERT INTO sync_runs (repo, route, finished_at, docs_updated, issues_indexed)
-            VALUES (%s, %s, now(), %s, %s)
+            INSERT INTO sync_runs (repo, route, finished_at, docs_updated, issues_indexed, code_indexed)
+            VALUES (%s, %s, now(), %s, %s, %s)
             ON CONFLICT (repo) DO UPDATE SET
                 route = EXCLUDED.route,
                 finished_at = EXCLUDED.finished_at,
                 docs_updated = EXCLUDED.docs_updated,
-                issues_indexed = EXCLUDED.issues_indexed
+                issues_indexed = EXCLUDED.issues_indexed,
+                code_indexed = EXCLUDED.code_indexed
             RETURNING finished_at
             """,
-            (repo, route, docs_updated, issues_indexed),
+            (repo, route, docs_updated, issues_indexed, code_indexed),
         )
         finished_at = cur.fetchone()[0]
     conn.commit()
@@ -197,7 +257,7 @@ def get_sync_runs(conn: psycopg.Connection) -> dict[str, dict]:
             """
             SELECT repo, route, finished_at,
                    EXTRACT(EPOCH FROM (now() - finished_at))::bigint,
-                   docs_updated, issues_indexed
+                   docs_updated, issues_indexed, code_indexed
             FROM sync_runs
             """
         )
@@ -209,6 +269,7 @@ def get_sync_runs(conn: psycopg.Connection) -> dict[str, dict]:
             "route": r[1],
             "docs_updated": r[4],
             "issues_indexed": r[5],
+            "code_indexed": r[6],
         }
         for r in rows
     }
@@ -260,6 +321,10 @@ def insert_chunk(
     state: str | None = None,
     author: str | None = None,
     line: int | None = None,
+    end_line: int | None = None,
+    commit_sha: str | None = None,
+    prog_lang: str | None = None,
+    symbols: str | None = None,
     created_at=None,
     updated_at=None,
     url: str | None = None,
@@ -270,10 +335,11 @@ def insert_chunk(
             INSERT INTO chunks (
                 chunk_key, chunk_index, source_type, repo, path, issue_no,
                 comment_id, language, heading_path, content, embedding,
-                state, author, line, created_at, updated_at, url
+                state, author, line, end_line, commit_sha, prog_lang, symbols,
+                created_at, updated_at, url
             ) VALUES (
                 %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::vector,
-                %s, %s, %s, %s, %s, %s
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
             )
             ON CONFLICT (chunk_key, chunk_index) DO UPDATE SET
                 content = EXCLUDED.content,
@@ -283,6 +349,10 @@ def insert_chunk(
                 state = EXCLUDED.state,
                 author = EXCLUDED.author,
                 line = EXCLUDED.line,
+                end_line = EXCLUDED.end_line,
+                commit_sha = EXCLUDED.commit_sha,
+                prog_lang = EXCLUDED.prog_lang,
+                symbols = EXCLUDED.symbols,
                 created_at = EXCLUDED.created_at,
                 updated_at = EXCLUDED.updated_at,
                 url = EXCLUDED.url
@@ -290,6 +360,7 @@ def insert_chunk(
             (
                 chunk_key, chunk_index, source_type, repo, path, issue_no,
                 comment_id, language, heading_path, content, vec_literal(embedding),
-                state, author, line, created_at, updated_at, url,
+                state, author, line, end_line, commit_sha, prog_lang, symbols,
+                created_at, updated_at, url,
             ),
         )
