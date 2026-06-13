@@ -454,10 +454,11 @@ def _build_warnings(
         )
 
     # 構造的欠落: issue_items はあるが chunks が極端に少ない
-    issue_chunks = chunk_counts.get("issue", 0)
-    if items_in_db > 0 and issue_chunks < items_in_db // 2:
+    # pr_review を含めて比較する（review comment 比率の高いリポジトリでの過検知防止。issue #35）
+    total_issue_chunks = chunk_counts.get("issue", 0) + chunk_counts.get("pr_review", 0)
+    if items_in_db > 0 and total_issue_chunks < items_in_db // 2:
         warnings.append(
-            f"issue_items は {items_in_db} 件あるが chunks[issue] は {issue_chunks} 件。"
+            f"issue_items は {items_in_db} 件あるが chunks[issue]+chunks[pr_review] は {total_issue_chunks} 件。"
             "bot 除外（SHIORI_INDEX_BOT_LOGINS）または索引欠落の可能性があります"
         )
 
@@ -500,8 +501,7 @@ def status() -> dict[str, Any]:
             info["items_in_db"] = items_in_db
             info["cursors"] = cursors
             warnings = _build_warnings(info, chunk_counts, items_in_db, cursors)
-            if warnings:
-                info["warnings"] = warnings
+            info["warnings"] = warnings
             repos[repo] = info
     return {
         "repos": repos,
