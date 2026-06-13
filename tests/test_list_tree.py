@@ -16,8 +16,6 @@ import pytest
 
 from shiori.mcp_server import (
     _VALID_SOURCE_TYPES,
-    _is_doc_file,
-    _is_excluded_file,
     _match_extension,
     _walk_code_files,
     list_tree,
@@ -224,10 +222,9 @@ class TestListTreeSourceTypeValidation:
         """list_tree を呼び出す。バリデーション通過を確認するだけなので
         コードファイル収集部分でエラーになってもよい。
         """
-        # _resolve_repo が settings.repos を参照するのでモック
         with (
             patch("shiori.mcp_server.settings") as mock_settings,
-            patch("shiori.mcp_server._conn") as mock_conn,
+            patch("shiori.mcp_server._conn"),
         ):
             mock_settings.repos = ["test/repo"]
             list_tree(source_type=source_type)
@@ -249,7 +246,8 @@ class TestListTreeSourceTypeValidation:
         with (
             patch("shiori.mcp_server.settings"),
             patch("shiori.mcp_server._conn"),
-        ), pytest.raises(ValueError, match="無効な source_type"):
+            pytest.raises(ValueError, match="無効な source_type"),
+        ):
             list_tree(source_type="issue")
 
     def test_empty_string_raises(self):
@@ -257,7 +255,8 @@ class TestListTreeSourceTypeValidation:
         with (
             patch("shiori.mcp_server.settings"),
             patch("shiori.mcp_server._conn"),
-        ), pytest.raises(ValueError, match="無効な source_type"):
+            pytest.raises(ValueError, match="無効な source_type"),
+        ):
             list_tree(source_type="")
 
     def test_random_string_raises(self):
@@ -265,7 +264,8 @@ class TestListTreeSourceTypeValidation:
         with (
             patch("shiori.mcp_server.settings"),
             patch("shiori.mcp_server._conn"),
-        ), pytest.raises(ValueError, match="無効な source_type"):
+            pytest.raises(ValueError, match="無効な source_type"),
+        ):
             list_tree(source_type="xyz")
 
 
