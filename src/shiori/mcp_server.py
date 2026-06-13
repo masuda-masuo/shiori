@@ -345,7 +345,7 @@ def list_tree(
     # バリデーション
     if source_type is not None and source_type not in _VALID_SOURCE_TYPES:
         raise ValueError(
-            f"無効な source_type です: '{source_type}'。"
+            f"無効な source_type '{source_type}' です。"
             f"有効な値: {', '.join(sorted(_VALID_SOURCE_TYPES))}"
         )
 
