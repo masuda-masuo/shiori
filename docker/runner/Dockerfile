@@ -17,7 +17,11 @@ RUN pip install --no-cache-dir .
 ENV HF_HOME=/models
 
 # --- Actions runner レイヤー ---
-ARG RUNNER_VERSION=2.325.0
+# issue #46: バージョン固定による deprecated 停止問題への対策
+# ビルド時に --build-arg RUNNER_VERSION=2.xxx.x で上書き可能
+# また entrypoint.sh が volume 内のバイナリとイメージのバージョンを
+# 比較し、不一致時に自動同期する（.runner / .credentials は保持）
+ARG RUNNER_VERSION=2.335.1
 
 RUN useradd -m runner
 
@@ -26,7 +30,9 @@ RUN curl -fsSL -o runner.tar.gz \
       "https://github.com/actions/runner/releases/download/v${RUNNER_VERSION}/actions-runner-linux-x64-${RUNNER_VERSION}.tar.gz" \
     && tar xzf runner.tar.gz && rm runner.tar.gz \
     && ./bin/installdependencies.sh \
-    && chown -R runner:runner /actions-runner
+    && chown -R runner:runner /actions-runner \
+    # イメージのバージョン情報を保存（entrypoint.sh が volume との比較に使用）
+    && echo -n "${RUNNER_VERSION}" > /actions-runner/.image-runner-version
 
 # installdependencies.sh がベースイメージの Debian リリースで libicu を解決できないため
 # .NET ランタイムの依存を明示的にインストールする（issue #20）
