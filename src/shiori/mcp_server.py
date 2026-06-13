@@ -3,7 +3,7 @@
 ツール構成（決定: semantic / keyword は分離を維持。semantic が入口で内部ハイブリッド）:
 - semantic_search(query, filters?)  : 意味検索（内部で RRF ハイブリッド）。入口。
 - keyword_search(query, filters?)   : 完全一致寄りのキーワード検索（日本語対応）。
-- list_tree(path?)                  : 索引済みドキュメント＋コードファイルのツリー閲覧。
+- list_tree(path?, source_type?, extension?): 索引済みドキュメント＋コードファイルのツリー閲覧。
 - read_file(path, start?, end?)     : ローカルクローンからファイル（の一部）を取得。
 - read_issue(number)                : issue/PR スレッド全体を取得。
 - ingest(rebuild?, repo?)           : docs / issue / PR / code の差分同期（索引更新）。
@@ -241,6 +241,12 @@ def _walk_code_files(base: str, prefix: str) -> set[str]:
     return paths
 
 
+def _match_extension(path: str, extension: str) -> bool:
+    """拡張子が指定値にマッチするか（大文字小文字無視、'.' 有無両対応）。"""
+    ext = extension if extension.startswith(".") else "." + extension
+    return path.lower().endswith(ext.lower())
+
+
 mcp = FastMCP(
     "shiori",
     host=settings.mcp_host,
@@ -255,6 +261,7 @@ mcp = FastMCP(
         "shiori_ingest を呼んで差分同期する。索引が最新かどうかの確認は shiori_status。"
         "コードファイルは shiori_list_tree で発見し shiori_read_file で読める"
         "（path, start_line, end_line 指定可）。"
+        "shiori_list_tree は source_type='doc'/'code' や extension='.py' で絞り込み可能。"
         "コードの検索は shiori_semantic_search / shiori_keyword_search で可能"
         "（source_type='code' で絞り込み可、prog_lang フィルタで言語指定も可）。"
     ),
@@ -312,40 +319,57 @@ def keyword_search(
 
 
 @mcp.tool(name="shiori_list_tree")
-def list_tree(path: str | None = None, repo: str | None = None) -> list[str]:
-    """索引済みドキュメント（Markdown）のパス一覧。path を渡すとその配下に絞る。
+def list_tree(
+    path: str | None = None,
+    source_type: str | None = None,
+    extension: str | None = None,
+    repo: str | None = None,
+) -> list[str]:
+    """索引済みドキュメントのパス一覧。path を渡すとその配下に絞る。
     リポジトリの構造を把握し、当たりをつけるのに使う。
 
     コードファイル（.py, .ts, .go 等）もクローンファイルシステムから返す。
-    コードは索引前でも発見可能。"""
+    コードは索引前でも発見可能。
+
+    source_type: 'doc'（索引済み Markdown）/'code'（コードファイル）で絞り込み。
+                 省略時は両方を返す。
+    extension:   拡張子でフィルタ（'.py' / 'py' / '.md' 等。大文字小文字無視）。"""
     target = _resolve_repo(repo)
     paths: set[str] = set()
 
     # 1. 索引済みドキュメント（doc_files テーブル）
-    with _conn() as conn, conn.cursor() as cur:
-        if path:
-            # path 自身または path/ 配下にマッチ（例: "src" で "src2" は除外）
-            prefix = path.rstrip("/")
-            cur.execute(
-                "SELECT path FROM doc_files"
-                " WHERE repo = %s AND (path = %s OR path LIKE %s)"
-                " ORDER BY path",
-                (target, prefix, prefix + "/%"),
-            )
-        else:
-            cur.execute(
-                "SELECT path FROM doc_files WHERE repo = %s ORDER BY path", (target,)
-            )
-        for r in cur.fetchall():
-            paths.add(r[0])
+    if source_type is None or source_type == "doc":
+        with _conn() as conn, conn.cursor() as cur:
+            if path:
+                prefix = path.rstrip("/")
+                cur.execute(
+                    "SELECT path FROM doc_files"
+                    " WHERE repo = %s AND (path = %s OR path LIKE %s)"
+                    " ORDER BY path",
+                    (target, prefix, prefix + "/%"),
+                )
+            else:
+                cur.execute(
+                    "SELECT path FROM doc_files WHERE repo = %s ORDER BY path",
+                    (target,),
+                )
+            for r in cur.fetchall():
+                paths.add(r[0])
 
     # 2. コードファイル（クローンファイルシステム）
-    base = os.path.realpath(settings.repo_dir(target))
-    prefix = path.rstrip("/") if path else ""
-    code_paths = _walk_code_files(base, prefix)
-    paths.update(code_paths)
+    if source_type is None or source_type == "code":
+        base = os.path.realpath(settings.repo_dir(target))
+        prefix = path.rstrip("/") if path else ""
+        code_paths = _walk_code_files(base, prefix)
+        paths.update(code_paths)
 
-    return sorted(paths)
+    result = sorted(paths)
+
+    # 3. 拡張子フィルタ（大文字小文字無視）
+    if extension:
+        result = [p for p in result if _match_extension(p, extension)]
+
+    return result
 
 
 @mcp.tool(name="shiori_read_file")
