@@ -209,10 +209,12 @@ class Calculator:
 """
     chunks = split_code("calc.py", code)
     assert len(chunks) >= 2
-    method_chunks = [c for c in chunks if "add" in c.content.lower()]
-    if method_chunks:
-        hp = method_chunks[0].heading_path or ""
-        assert "Calculator" in hp
+    # 注意: クラスチャンクのシグネチャは body 開始行（= "def add" 行）まで含むため、
+    # "add" 一致だとクラスチャンク自身も拾ってしまう。メソッド本体に固有の行で一意に選ぶ。
+    method_chunks = [c for c in chunks if "return a + b" in c.content]
+    assert method_chunks, "add メソッドのチャンクが見つからない"
+    hp = method_chunks[0].heading_path or ""
+    assert "Calculator" in hp
 
 
 @pytest.mark.skipif(not _TS_PYTHON_OK, reason="tree-sitter python parser not available")
