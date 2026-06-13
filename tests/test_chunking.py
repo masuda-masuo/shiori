@@ -1,6 +1,7 @@
 from shiori.chunking import (
     Chunk,
     _TS_AVAILABLE,
+    _ts_get_parser,
     detect_language,
     split_code,
     split_issue_text,
@@ -35,7 +36,6 @@ def test_long_japanese_section_splits_on_sentence_boundary():
     for c in chunks:
         body = c.content.split("\n", 1)[-1]
         assert len(body) <= 500
-        # 文の途中で切れていない（プレフィックス行を除く）
         assert body.endswith("。") or body.endswith(")")
 
 
@@ -58,7 +58,6 @@ def test_detect_language():
 
 
 def test_rrf_fusion_orders_overlap_first():
-    # search.semantic_search の RRF 部分と同じ計算をスタンドアロンで検証
     RRF_K = 60
     vec = [10, 11, 12]
     kw = [12, 13]
@@ -68,7 +67,7 @@ def test_rrf_fusion_orders_overlap_first():
     for rank, rid in enumerate(kw):
         scores[rid] = scores.get(rid, 0.0) + 1.0 / (RRF_K + rank + 1)
     ranked = [rid for rid, _ in sorted(scores.items(), key=lambda kv: kv[1], reverse=True)]
-    assert ranked[0] == 12  # 両方にヒットしたものが先頭
+    assert ranked[0] == 12
 
 
 # ---------------------------------------------------------------------------
@@ -109,16 +108,11 @@ class Greeter:
         return f"Hello {name}"
 """
     chunks = split_code("test.py", code)
-    # tree-sitter が利用可能なら 2 チャンク（hello と Greeter）、
-    # 利用不可ならフォールバックで 1 チャンク
     assert len(chunks) >= 1
     if len(chunks) > 1:
-        # heading_path にファイル名が含まれる
         assert chunks[0].heading_path is not None
-        # start_line / end_line が設定されている
         assert chunks[0].start_line is not None
         assert chunks[0].end_line is not None
-        # symbols に関数名が含まれる
         assert chunks[0].symbols is not None
         assert "hello" in chunks[0].content.lower()
 
@@ -133,7 +127,6 @@ def add(a: int, b: int) -> int:
     chunks = split_code("math.py", code)
     assert len(chunks) >= 1
     if len(chunks) == 1 and chunks[0].symbols is not None:
-        # tree-sitter 利用時
         assert "add" in chunks[0].content
 
 
@@ -142,7 +135,6 @@ def test_split_code_fallback_for_unknown_ext():
     code = "some random text\n" * 100
     chunks = split_code("unknown.xyz", code, max_chars=200)
     assert len(chunks) > 1
-    # フォールバック時は symbols=None
     assert chunks[0].symbols is None
     assert chunks[0].start_line is None
 
@@ -157,21 +149,21 @@ def test_split_code_no_definitions():
     """定義がないファイルでもクラッシュしない。"""
     code = "x = 1\ny = 2\n"
     chunks = split_code("vars.py", code)
-    # tree-sitter が動けば空リストか、フォールバックで 1 チャンク
     assert isinstance(chunks, list)
 
 
 # ---------------------------------------------------------------------------
-# tree-sitter が利用可能な場合の断定的テスト（should-fix #3）
-# フォールバックで緑になる（回帰を隠す）のを防ぐ
+# tree-sitter 前提の断定的テスト（_ts_get_parser 成否で gate）
 # ---------------------------------------------------------------------------
 
 import pytest
 
+_TS_PYTHON_OK = _ts_get_parser("python") is not None
 
-@pytest.mark.skipif(not _TS_AVAILABLE, reason="tree-sitter not available")
-def test_split_code_tree_sitter_python_has_chunks():
-    """tree-sitter が利用可能なら Python で必ず2チャンク以上＋start_line 設定。"""
+
+@pytest.mark.skipif(not _TS_PYTHON_OK, reason="tree-sitter python parser not available")
+def test_split_code_ts_python_has_chunks():
+    """tree-sitter が使えるなら Python で必ず2チャンク以上＋start_line 設定。"""
     code = """\
 def hello():
     print("hello")
@@ -189,9 +181,9 @@ class Greeter:
         assert c.heading_path is not None
 
 
-@pytest.mark.skipif(not _TS_AVAILABLE, reason="tree-sitter not available")
-def test_split_code_tree_sitter_python_docstring_emitted():
-    """docstring が content に含まれる（tree-sitter 前提、断定的）。"""
+@pytest.mark.skipif(not _TS_PYTHON_OK, reason="tree-sitter python parser not available")
+def test_split_code_ts_python_docstring_emitted():
+    """docstring が content に含まれる。"""
     code = '''\
 def add(a: int, b: int) -> int:
     """Add two numbers together."""
@@ -204,8 +196,8 @@ def add(a: int, b: int) -> int:
     assert "add" in combined.lower()
 
 
-@pytest.mark.skipif(not _TS_AVAILABLE, reason="tree-sitter not available")
-def test_split_code_tree_sitter_python_heading_path_nesting():
+@pytest.mark.skipif(not _TS_PYTHON_OK, reason="tree-sitter python parser not available")
+def test_split_code_ts_python_nesting():
     """クラスの中のメソッドの heading_path に親クラス情報が含まれる。"""
     code = """\
 class Calculator:
@@ -217,21 +209,19 @@ class Calculator:
 """
     chunks = split_code("calc.py", code)
     assert len(chunks) >= 2
-    # メソッドの heading_path に "Calculator" が含まれることを確認
     method_chunks = [c for c in chunks if "add" in c.content.lower()]
     if method_chunks:
         hp = method_chunks[0].heading_path or ""
         assert "Calculator" in hp
 
 
-@pytest.mark.skipif(not _TS_AVAILABLE, reason="tree-sitter not available")
-def test_split_code_tree_sitter_symbols_are_present():
-    """symbols に分割済み識別子が入る（Python）。"""
+@pytest.mark.skipif(not _TS_PYTHON_OK, reason="tree-sitter python parser not available")
+def test_split_code_ts_python_symbols():
+    """symbols に分割済み識別子が入る。"""
     code = "def parse_config_file(path):\n    return None\n"
     chunks = split_code("cfg.py", code)
     assert len(chunks) >= 1
     sym = chunks[0].symbols or ""
-    # "parse_config_file" → "parse config file"
     assert "parse" in sym
     assert "config" in sym
     assert "file" in sym
