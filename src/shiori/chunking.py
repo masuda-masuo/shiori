@@ -25,24 +25,48 @@ _TS_AVAILABLE = False
 _TS_LANGUAGES: set[str] = set()
 _TS_PARSER_CACHE: dict[str, object] = {}
 try:
-    from tree_sitter_language_pack import (  # type: ignore[import-untyped]
-        available_languages,
-        get_language,
-        get_parser,
-        has_language,
-    )
+    # tree-sitter-language-pack 0.9.x（同梱方式）: get_binding() で全言語取得
+    from tree_sitter_language_pack import get_binding, get_parser  # type: ignore[import-untyped]
 
     _TS_AVAILABLE = True
-    _TS_LANGUAGES = set(available_languages())
+    _binding = get_binding()
+    _TS_LANGUAGES = set(_binding.keys()) if hasattr(_binding, "keys") else set()
 except Exception:
-    # バージョン違い（古い tree-sitter-language-pack）やビルド失敗を安全に処理
-    pass
+    try:
+        # tree-sitter-language-pack 1.x（実行時DL方式）: available_languages() 等
+        from tree_sitter_language_pack import (  # type: ignore[import-untyped]
+            available_languages,
+            get_language,
+            get_parser,
+            has_language,
+        )
+
+        _TS_AVAILABLE = True
+        _TS_LANGUAGES = set(available_languages())
+    except Exception:
+        pass
+
+
+def _ts_has_language(lang: str) -> bool:
+    """tree-sitter が指定言語をサポートしているか。0.x / 1.x 両対応。"""
+    if not _TS_AVAILABLE:
+        return False
+    if lang in _TS_LANGUAGES:
+        return True
+    # 1.x 系で _TS_LANGUAGES が空（パーサ未DL）でも has_language が参照する場合
+    try:
+        # 同名のグローバルをインポート試行
+        from tree_sitter_language_pack import has_language  # type: ignore[import-untyped]
+
+        return bool(has_language(lang))
+    except Exception:
+        return False
 
 
 def _ts_get_parser(lang: str):
-    """tree-sitter パーサーをキャッシュして返す。非対応言語は None。"""
+    """tree-sitter パーサーをキャッシュして返す。取得失敗時は None。"""
     if lang not in _TS_PARSER_CACHE:
-        if not _TS_AVAILABLE or not has_language(lang):
+        if not _TS_AVAILABLE:
             _TS_PARSER_CACHE[lang] = None
         else:
             try:
@@ -485,7 +509,7 @@ def split_code(
         - symbols: 識別子分割済み文字列
     """
     prog_lang = _detect_prog_lang(file_path)
-    if not prog_lang or not _TS_AVAILABLE or not has_language(prog_lang):
+    if not prog_lang or not _ts_has_language(prog_lang):
         # tree-sitter 非対応 → フォールバック
         return _split_code_fallback(source, file_path, max_chars)
 
@@ -513,14 +537,24 @@ def split_code(
     except Exception:
         return _split_code_fallback(source, file_path, max_chars)
 
-    # 全定義ノードを root 一発で収集（O(n) 相当）
+    # 全定義ノードを root 一発で収集
+    # 0.x系と1.x系で Query.matches() の戻り値が異なるため両対応
     def_nodes_raw: list[tuple[str, object]] = []
     try:
         matches = query.matches(root)
-        for _pattern_index, capture_map in matches:
-            for capture_name, captured_nodes in capture_map.items():
-                for n in captured_nodes:
-                    def_nodes_raw.append((capture_name, n))
+        for match in matches:
+            # 新API (0.24+): QueryMatch オブジェクト (captures: list[QueryCapture])
+            if hasattr(match, "captures"):
+                for capture in match.captures:
+                    def_nodes_raw.append((capture.name, capture.node))
+            # 旧API (0.23): (pattern_index, captures_dict) タプル
+            elif isinstance(match, tuple) and len(match) == 2:
+                _pattern_index, capture_map = match
+                for capture_name, captured_nodes in capture_map.items():
+                    if isinstance(capture_name, bytes):
+                        capture_name = capture_name.decode()
+                    for n in captured_nodes:
+                        def_nodes_raw.append((capture_name, n))
     except Exception:
         pass
 
@@ -551,7 +585,7 @@ def split_code(
             p_end = p_node.end_point[0]
             if p_start < start_line and p_end >= end_line:
                 p_capture = ""
-                # capture名を再特定（O(n²)だがノード数は高々数百）
+                # capture名を再特定
                 for cn, pn in def_nodes_raw:
                     if pn == p_node:
                         p_capture = cn
