@@ -203,13 +203,14 @@ def split_issue_text(title: str | None, body: str, max_chars: int = 1200) -> lis
 # ---------------------------------------------------------------------------
 
 _SYMBOL_SPLIT_RE = re.compile(
-    r"| _ | (?<=[a-z])(?=[A-Z0-9]) | (?<=[A-Z])(?=[A-Z][a-z]) "
+    r"_ | (?<=[a-z])(?=[A-Z0-9]) | (?<=[A-Z])(?=[A-Z][a-z]) "
     r"| (?<=[a-zA-Z])(?=\d) | (?<=\d)(?=[a-zA-Z])",
     re.VERBOSE,
 )
 
 
 def _split_symbols(text: str) -> str:
+    """識別子を snake_case / camelCase / PascalCase 境界で分割し、小文字スペース区切りで返す。"""
     if not text:
         return ""
     parts = _SYMBOL_SPLIT_RE.split(text)
