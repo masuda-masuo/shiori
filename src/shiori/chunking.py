@@ -21,60 +21,45 @@ _SENTENCE_END_RE = re.compile(r"(?<=[。．！？!?\\.])\s*|\n{2,}")
 _JA_CHAR_RE = re.compile(r"[\u3040-\u30ff\u4e00-\u9fff]")
 
 # --- tree-sitter ---
+# tree-sitter-language-pack 0.9.x（同梱方式）をプライマリに。
+# 1.x（実行時DL方式）はネットワーク環境依存で失敗し得るため、0.9.x にピン留め。
 _TS_AVAILABLE = False
 _TS_LANGUAGES: set[str] = set()
 _TS_PARSER_CACHE: dict[str, object] = {}
 try:
-    # tree-sitter-language-pack 1.x（実行時DL方式）をプライマリに
-    from tree_sitter_language_pack import (  # type: ignore[import-untyped]
-        available_languages,
-        get_language,
-        get_parser,
-        has_language,
-    )
+    from tree_sitter_language_pack import get_binding, get_parser  # type: ignore[import-untyped]
 
     _TS_AVAILABLE = True
-    _TS_LANGUAGES = set(available_languages())
+    _binding = get_binding()
+    _TS_LANGUAGES = set(_binding.keys()) if hasattr(_binding, "keys") else set()
 except Exception:
     try:
-        # tree-sitter-language-pack 0.9.x（同梱方式）にフォールバック
-        from tree_sitter_language_pack import get_binding, get_parser  # type: ignore[import-untyped]
+        from tree_sitter_language_pack import (  # type: ignore[import-untyped]
+            available_languages,
+            get_parser,
+        )
 
         _TS_AVAILABLE = True
-        _binding = get_binding()
-        _TS_LANGUAGES = set(_binding.keys()) if hasattr(_binding, "keys") else set()
+        _TS_LANGUAGES = set(available_languages())
     except Exception:
         pass
 
 
 def _ts_has_language(lang: str) -> bool:
-    """tree-sitter が指定言語をサポートしているか。
-
-    _TS_LANGUAGES にあれば即 True。無くても get_parser() が成功すれば
-    動的に追加される（1.x 系の初回DLに対応）。
-    """
+    """tree-sitter が指定言語をサポートしているか。"""
     if not _TS_AVAILABLE:
         return False
-    if lang in _TS_LANGUAGES:
-        return True
-    return _ts_get_parser(lang) is not None
+    return lang in _TS_LANGUAGES
 
 
 def _ts_get_parser(lang: str):
-    """tree-sitter パーサーをキャッシュして返す。
-
-    1.x 系では初回呼び出し時にパーサが GitHub Releases からダウンロードされる。
-    成功時は _TS_LANGUAGES にも追加し、次回以降 _ts_has_language が即 True になる。
-    取得失敗時は None。
-    """
+    """tree-sitter パーサーをキャッシュして返す。取得失敗時は None。"""
     if lang not in _TS_PARSER_CACHE:
         if not _TS_AVAILABLE:
             _TS_PARSER_CACHE[lang] = None
         else:
             try:
-                parser = get_parser(lang)
-                _TS_PARSER_CACHE[lang] = parser
-                _TS_LANGUAGES.add(lang)
+                _TS_PARSER_CACHE[lang] = get_parser(lang)
             except Exception:
                 _TS_PARSER_CACHE[lang] = None
     return _TS_PARSER_CACHE[lang]
@@ -127,7 +112,6 @@ _EXT_TO_LANG: dict[str, str] = {
 }
 
 # tree-sitter クエリ: 定義ノードをキャプチャする
-# 言語ごとに異なるノードタイプを同一の抽象「定義」にマップする。
 _TREE_SITTER_QUERIES: dict[str, str] = {
     "python": """
         (function_definition) @func
@@ -193,7 +177,6 @@ _TREE_SITTER_QUERIES: dict[str, str] = {
     """,
 }
 
-# コードブロックのデフォルト最大文字数
 _CODE_MAX_CHARS = 1200
 
 
@@ -230,7 +213,6 @@ def _split_long_text(text: str, max_chars: int) -> list[str]:
         s = s.strip()
         if not s:
             continue
-        # 単一の文が長すぎる場合は機械的に切る（コードブロック等）
         while len(s) > max_chars:
             if buf:
                 parts.append(buf)
@@ -248,12 +230,7 @@ def _split_long_text(text: str, max_chars: int) -> list[str]:
 
 
 def split_markdown(text: str, max_chars: int = 1200) -> list[Chunk]:
-    """Markdown を見出し単位で分割する。
-
-    - 見出しスタックから `親 > 子` 形式の heading_path を組み立てる。
-    - コードフェンス内の `#` は見出しとして扱わない。
-    - 各チャンク本文の先頭に heading_path を 1 行付け、チャンク単体でも文脈が分かるようにする。
-    """
+    """Markdown を見出し単位で分割する。"""
     lines = text.splitlines()
     sections: list[tuple[str | None, list[str]]] = []
     stack: list[tuple[int, str]] = []
@@ -299,11 +276,7 @@ def split_markdown(text: str, max_chars: int = 1200) -> list[Chunk]:
 def split_issue_text(
     title: str | None, body: str, max_chars: int = 1200
 ) -> list[Chunk]:
-    """issue/PR 本文・コメントをチャンク化する。
-
-    タイトルを `[title]` プレフィックスとして全チャンクに付け、
-    コメント単体でも何の議論か分かるようにする（詳細設計/02）。
-    """
+    """issue/PR 本文・コメントをチャンク化する。"""
     prefix = f"[{title.strip()}]\n" if title and title.strip() else ""
     budget = max(max_chars - len(prefix), 200)
     parts = _split_long_text(body or "", budget)
@@ -321,20 +294,11 @@ def split_issue_text(
 # Step 2: ソースコード分割（詳細設計/10）
 # ---------------------------------------------------------------------------
 
-# snake_case / camelCase / PascalCase の識別子を分割し、小文字スペース区切りにする。
-# 例: "parse_config" -> "parse config", "parseConfig" -> "parse config",
-#      "parseXML" -> "parse xml", "ParseXML" -> "parse xml"
 _SYMBOL_SPLIT_RE = re.compile(
     r"""
-    # 1) snake_case のアンダースコア → スペース
     | _
-    # 2) 小文字の直後に大文字（camelCase 境界）
-    #    lookbehind で小文字、lookahead で大文字 or 数字
     | (?<=[a-z])(?=[A-Z0-9])
-    # 3) 大文字連続の後に小文字が来る（e.g., "parseXML" -> "parse" + "XML"）
-    #    ただし先頭の大文字は維持したいので、大文字2文字以上の直後に小文字
     | (?<=[A-Z])(?=[A-Z][a-z])
-    # 4) 数字と英字の境界
     | (?<=[a-zA-Z])(?=\d)
     | (?<=\d)(?=[a-zA-Z])
     """,
@@ -343,21 +307,11 @@ _SYMBOL_SPLIT_RE = re.compile(
 
 
 def _split_symbols(text: str) -> str:
-    """識別子を snake/camel 境界で分割し、小文字スペース区切り文字列を返す。
-
-    >>> _split_symbols("parse_config")
-    'parse config'
-    >>> _split_symbols("parseConfig")
-    'parse config'
-    >>> _split_symbols("ParseXML")
-    'parse xml'
-    """
+    """識別子を snake/camel 境界で分割し、小文字スペース区切り文字列を返す。"""
     if not text:
         return ""
-    # アンダースコアと camelCase 境界で分割
     parts = _SYMBOL_SPLIT_RE.split(text)
     parts = [p for p in parts if p and p.strip()]
-    # さらに非アルファベット文字（記号類）で分割
     clean = re.sub(r"[^a-zA-Z0-9\s]", " ", " ".join(parts))
     return " ".join(clean.lower().split())
 
@@ -388,11 +342,7 @@ def _get_node_name(node) -> str:
 
 
 def _get_docstring_text(node, lang: str) -> str:
-    """Python/JS/TS 等の docstring を抽出する。
-
-    Python: body の先頭が expression_statement で単一文字列リテラル
-    JS/TS/Rust: body の先頭が expression_statement か、leading comment 等
-    """
+    """Python/JS/TS 等の docstring を抽出する。"""
     body = node.child_by_field_name("body")
     if body is None:
         return ""
@@ -440,7 +390,7 @@ def _get_docstring_text(node, lang: str) -> str:
 
 
 def _get_signature_text(node, source_lines: list[str]) -> str:
-    """定義ノードのシグネチャ（先頭行〜 '{' または ':' の前まで）を取得。"""
+    """定義ノードのシグネチャを取得。"""
     start = node.start_point[0]
     end = node.end_point[0]
     body = node.child_by_field_name("body")
@@ -480,30 +430,11 @@ def split_code(
 
     対応言語は tree-sitter で AST パースし、非対応言語は ``_split_long_text`` で
     フォールバック分割する。
-
-    Parameters
-    ----------
-    file_path:
-        ファイルパス（拡張子から言語判定に使う）。
-    source:
-        ファイルの全文。
-    max_chars:
-        フォールバック時の最大文字数。
-
-    Returns
-    -------
-    list[Chunk]
-        各 Chunk は以下を持つ:
-        - content: ``[シンボルパス]\\nシグネチャ\\ndocstring``
-        - heading_path: ``module.py > class Foo > def bar``
-        - start_line / end_line: 行範囲（1-based、後方互換のため）
-        - symbols: 識別子分割済み文字列
     """
     prog_lang = _detect_prog_lang(file_path)
-    if not prog_lang:
+    if not prog_lang or not _ts_has_language(prog_lang):
         return _split_code_fallback(source, file_path, max_chars)
 
-    # has_language に頼らず get_parser を直接呼ぶ（1.x 系の初回DLに対応）
     parser = _ts_get_parser(prog_lang)
     if parser is None:
         return _split_code_fallback(source, file_path, max_chars)
@@ -516,7 +447,6 @@ def split_code(
     root = tree.root_node
     source_lines = source.splitlines()
 
-    # クエリを準備
     query_src = _TREE_SITTER_QUERIES.get(prog_lang)
     if query_src is None:
         return _split_code_fallback(source, file_path, max_chars)
@@ -529,16 +459,14 @@ def split_code(
         return _split_code_fallback(source, file_path, max_chars)
 
     # 全定義ノードを root 一発で収集
-    # 0.x系と1.x系で Query.matches() の戻り値が異なるため両対応
+    # 0.23 互換 (pattern_index, captures_dict) と 0.24+ (QueryMatch) 両対応
     def_nodes_raw: list[tuple[str, object]] = []
     try:
         matches = query.matches(root)
         for match in matches:
-            # 新API (tree-sitter 0.24+): QueryMatch オブジェクト
             if hasattr(match, "captures"):
                 for capture in match.captures:
                     def_nodes_raw.append((capture.name, capture.node))
-            # 旧API (tree-sitter 0.23): (pattern_index, captures_dict) タプル
             elif isinstance(match, tuple) and len(match) == 2:
                 _pattern_index, capture_map = match
                 for capture_name, captured_nodes in capture_map.items():
@@ -552,22 +480,19 @@ def split_code(
     if not def_nodes_raw:
         return _split_code_fallback(source, file_path, max_chars)
 
-    # start_line でソート
     def_nodes_raw.sort(key=lambda x: x[1].start_point[0])
 
-    # 親子関係を解決して heading_path を生成
     chunks: list[Chunk] = []
     all_nodes = [n for _, n in def_nodes_raw]
 
     for capture_name, ts_node in def_nodes_raw:
-        start_line = ts_node.start_point[0]  # 0-based
+        start_line = ts_node.start_point[0]
         end_line = ts_node.end_point[0]
 
         name = _get_node_name(ts_node) or f"<{capture_name}>"
         docstring = _get_docstring_text(ts_node, prog_lang)
         signature = _get_signature_text(ts_node, source_lines)
 
-        # heading_path: 自分を含む親定義から構築
         parent_path_parts: list[str] = []
         for p_node in all_nodes:
             if p_node == ts_node:
@@ -587,7 +512,6 @@ def split_code(
         path_prefix = " > ".join(parent_path_parts)
         heading_path = f"{base_name} > {path_prefix}" if path_prefix else base_name
 
-        # content
         sym_path = _build_heading_path(path_prefix, name, capture_name)
         content_parts = [f"[{base_name} > {sym_path.split(' > ')[-1]}]"]
         if signature:
@@ -602,7 +526,7 @@ def split_code(
             Chunk(
                 content=chunk_content,
                 heading_path=heading_path,
-                start_line=start_line + 1,  # 1-based
+                start_line=start_line + 1,
                 end_line=end_line + 1,
                 symbols=sym_text,
             )
@@ -618,10 +542,7 @@ def _split_code_fallback(
     file_path: str,
     max_chars: int = _CODE_MAX_CHARS,
 ) -> list[Chunk]:
-    """tree-sitter 非対応言語向けフォールバック分割。
-
-    ファイル全体を ``_split_long_text`` で分割する。
-    """
+    """tree-sitter 非対応言語向けフォールバック分割。"""
     base_name = os.path.basename(file_path)
     parts = _split_long_text(content, max_chars)
     chunks = []
