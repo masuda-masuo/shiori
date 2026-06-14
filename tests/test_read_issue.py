@@ -13,8 +13,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from shiori.config import Settings
-from shiori.mcp_server import read_issue
+from shiori.mcp_server import read_issue, settings
 
 
 # ── テスト用のヘルパー ──
@@ -48,9 +47,11 @@ class TestReadIssueExcludeNoiseBots:
         cursor = MagicMock()
         cursor.fetchall.return_value = rows
         conn.cursor.return_value.__enter__.return_value = cursor
+        # with _conn() as conn で conn が自分自身を返すようにする
+        conn.__enter__.return_value = conn
         return conn
 
-    def test_default_returns_all_items(self, monkeypatch):
+    def test_default_returns_all_items(self):
         """exclude_noise_bots=False（既定）では bot 含め全件返す。"""
         rows = [
             _row(comment_id=0, author="human-user", is_bot=False),
@@ -77,9 +78,10 @@ class TestReadIssueExcludeNoiseBots:
         ]
         mock_conn = self._mock_conn_with_rows(rows)
 
+        monkeypatch.setattr(settings, "index_bot_logins",
+                            {"allowlisted-bot[bot]", "another-bot[bot]"})
         with patch("shiori.mcp_server._conn", return_value=mock_conn), \
-             patch("shiori.mcp_server._resolve_repo", return_value="o/r"), \
-             patch.object(Settings, "index_bot_logins", {"allowlisted-bot[bot]", "another-bot[bot]"}):
+             patch("shiori.mcp_server._resolve_repo", return_value="o/r"):
             result = read_issue(42, exclude_noise_bots=True)
 
         assert len(result["items"]) == 2
@@ -93,9 +95,10 @@ class TestReadIssueExcludeNoiseBots:
         ]
         mock_conn = self._mock_conn_with_rows(rows)
 
+        monkeypatch.setattr(settings, "index_bot_logins",
+                            {"allowlisted-bot[bot]"})
         with patch("shiori.mcp_server._conn", return_value=mock_conn), \
-             patch("shiori.mcp_server._resolve_repo", return_value="o/r"), \
-             patch.object(Settings, "index_bot_logins", {"allowlisted-bot[bot]"}):
+             patch("shiori.mcp_server._resolve_repo", return_value="o/r"):
             result = read_issue(42, exclude_noise_bots=True)
 
         assert len(result["items"]) == 1
@@ -109,9 +112,10 @@ class TestReadIssueExcludeNoiseBots:
         ]
         mock_conn = self._mock_conn_with_rows(rows)
 
+        monkeypatch.setattr(settings, "index_bot_logins",
+                            {"allowlisted-bot[bot]"})
         with patch("shiori.mcp_server._conn", return_value=mock_conn), \
-             patch("shiori.mcp_server._resolve_repo", return_value="o/r"), \
-             patch.object(Settings, "index_bot_logins", {"allowlisted-bot[bot]"}):
+             patch("shiori.mcp_server._resolve_repo", return_value="o/r"):
             with pytest.raises(ValueError, match="全項目が allowlist 外の bot"):
                 read_issue(42, exclude_noise_bots=True)
 
@@ -123,16 +127,17 @@ class TestReadIssueExcludeNoiseBots:
         ]
         mock_conn = self._mock_conn_with_rows(rows)
 
+        monkeypatch.setattr(settings, "index_bot_logins",
+                            {"allowlisted-bot[bot]"})
         with patch("shiori.mcp_server._conn", return_value=mock_conn), \
-             patch("shiori.mcp_server._resolve_repo", return_value="o/r"), \
-             patch.object(Settings, "index_bot_logins", {"allowlisted-bot[bot]"}):
+             patch("shiori.mcp_server._resolve_repo", return_value="o/r"):
             result = read_issue(42, exclude_noise_bots=True)
 
         # author=None の bot は除外される、人間は残る
         assert len(result["items"]) == 1
         assert result["items"][0]["author"] == "human-user"
 
-    def test_no_rows_raises_value_error(self, monkeypatch):
+    def test_no_rows_raises_value_error(self):
         """行が 0 件の場合は ValueError（既存動作）。"""
         mock_conn = self._mock_conn_with_rows([])
 
