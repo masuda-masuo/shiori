@@ -64,7 +64,7 @@ class TestGetPrChanges:
         """ファイルはあるが head_sha が NULL の場合。"""
         conn, cursor = self._mock_conn(
             [("src/x.py", "modified", 1, 1, 2, "url")],
-            head_sha=None,  # fetchone が None を返す
+            head_sha=None,
         )
         cursor.fetchone.return_value = None
 
@@ -73,19 +73,18 @@ class TestGetPrChanges:
         assert len(files) == 1
         assert sha is None
 
-    def test_files_sorted_by_path(self):
-        """ファイル一覧が path でソートされている。"""
-        conn, cursor = self._mock_conn(
-            [
-                ("c.txt", "modified", 1, 1, 2, "url3"),
-                ("a.py", "added", 1, 0, 1, "url1"),
-                ("b.go", "removed", 0, 1, 1, "url2"),
-            ],
-            head_sha="sha",
-        )
-        # SQL の ORDER BY path でソート済みのはず
-        files, _ = get_pr_changes(conn, "o/r", 42)
-        assert [f["path"] for f in files] == ["a.py", "b.go", "c.txt"]
+    def test_uses_order_by_path_in_query(self):
+        """SQL に ORDER BY path が含まれている。ソートは DB 側に委譲。"""
+        conn = MagicMock()
+        cursor = MagicMock()
+        cursor.fetchall.return_value = []
+        conn.cursor.return_value.__enter__.return_value = cursor
+
+        get_pr_changes(conn, "o/r", 42)
+
+        # 最初の execute 呼び出しの SQL に ORDER BY path が含まれていることを確認
+        sql = cursor.execute.call_args_list[0][0][0]
+        assert "ORDER BY path" in sql
 
 
 # ── upsert_pr_changes ──
@@ -145,7 +144,7 @@ class TestUpsertPrChanges:
         )
 
     def test_handles_none_fields(self):
-        """status 等が None でも正しく扱われる。"""
+        """blob_url 等が None でも正しく扱われる。"""
         conn = MagicMock()
         cursor = MagicMock()
         conn.cursor.return_value.__enter__.return_value = cursor
@@ -157,17 +156,24 @@ class TestUpsertPrChanges:
                 "additions": 0,
                 "deletions": 5,
                 "changes": 5,
-                "blob_url": None,  # None の blob_url
+                "blob_url": None,
             },
         ]
 
         upsert_pr_changes(conn, "o/r", 42, "def5678", files)
 
-        # INSERT の引数を検証
-        insert_call = cursor.execute.call_args_list[1]  # 2 番目の呼び出しが INSERT
-        assert insert_call[0][1][4] == "deleted.py"  # path
-        assert insert_call[0][1][5] == "removed"  # status
-        assert insert_call[0][1][9] is None  # blob_url
+        # INSERT のパラメータを検証
+        # params: (repo, issue_no, head_sha, path, status, additions, deletions, changes, blob_url)
+        insert_params = cursor.execute.call_args_list[1][0][1]
+        assert insert_params[0] == "o/r"       # repo
+        assert insert_params[1] == 42           # issue_no
+        assert insert_params[2] == "def5678"    # head_sha
+        assert insert_params[3] == "deleted.py" # path
+        assert insert_params[4] == "removed"    # status
+        assert insert_params[5] == 0            # additions
+        assert insert_params[6] == 5            # deletions
+        assert insert_params[7] == 5            # changes
+        assert insert_params[8] is None         # blob_url
 
 
 # ── get_pr_head_sha ──
