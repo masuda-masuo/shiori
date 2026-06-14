@@ -8,7 +8,7 @@ from __future__ import annotations
 from unittest.mock import MagicMock, patch
 
 from shiori.config import Settings
-from shiori.github_sync import _git, _is_bot, _should_index
+from shiori.github_sync import _git, _is_bot, _propagate_issue_state, _should_index
 
 
 # ---------------------------------------------------------------------------
@@ -93,6 +93,60 @@ class TestIsBot:
     def test_bot_suffix_case_insensitive(self):
         """[bot] 判定は大文字小文字を区別しない。"""
         assert _is_bot({"login": "My-App[BOT]", "type": "User"}) is True
+
+
+# ---------------------------------------------------------------------------
+# _propagate_issue_state (issue #56)
+# ---------------------------------------------------------------------------
+
+
+class TestPropagateIssueState:
+    """_propagate_issue_state の振る舞い（issue #56）。
+
+    issue_items.state 変更時に chunks.state を一括更新する。
+    """
+
+    def _mock_cursor(self, rowcount: int = 0):
+        conn = MagicMock()
+        cursor = MagicMock()
+        cursor.rowcount = rowcount
+        conn.cursor.return_value.__enter__.return_value = cursor
+        return conn, cursor
+
+    def test_propagate_state_from_issue_items_to_all_chunks(self):
+        """issue_items の state を全 chunk に伝播する UPDATE が発行される。"""
+        conn, cursor = self._mock_cursor(rowcount=5)
+
+        _propagate_issue_state(conn, "masuda-masuo/shiori", 50, "closed")
+
+        cursor.execute.assert_called_once_with(
+            "UPDATE chunks SET state = %s WHERE repo = %s AND issue_no = %s",
+            ("closed", "masuda-masuo/shiori", 50),
+        )
+
+    def test_propagate_state_none(self):
+        """state=None も正しく伝播される（例: issue 本文が空のケース）。"""
+        conn, cursor = self._mock_cursor(rowcount=0)
+
+        _propagate_issue_state(conn, "masuda-masuo/shiori", 50, None)
+
+        cursor.execute.assert_called_once_with(
+            "UPDATE chunks SET state = %s WHERE repo = %s AND issue_no = %s",
+            (None, "masuda-masuo/shiori", 50),
+        )
+
+    def test_propagate_state_open_to_closed_transition(self):
+        """open → closed の遷移が正しく伝播される。"""
+        conn, cursor = self._mock_cursor(rowcount=3)
+
+        _propagate_issue_state(conn, "masuda-masuo/shiori", 50, "open")
+        _propagate_issue_state(conn, "masuda-masuo/shiori", 50, "closed")
+
+        assert cursor.execute.call_count == 2
+        first_call = cursor.execute.call_args_list[0]
+        second_call = cursor.execute.call_args_list[1]
+        assert first_call[0][1] == ("open", "masuda-masuo/shiori", 50)
+        assert second_call[0][1] == ("closed", "masuda-masuo/shiori", 50)
 
 
 # ---------------------------------------------------------------------------
