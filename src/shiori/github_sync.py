@@ -12,6 +12,7 @@
   生データは issue_items に is_bot=true で保持する（read_issue では表示する）。
 - PR の diff 自体は索引しない。レビューコメントには diff_hunk を文脈として付与する。
 - code は sync_docs と同一クローンを共有し、sha デルタで変化ファイルのみ再索引する（issue #33）。
+- PR 変更ファイルマップはメタデータのみ同期・保持し、コンテンツ（patch）は GitHub MCP に委譲する（issue #54）。
 認証は TokenProvider 抽象経由（詳細設計/09）。git は http.extraHeader でトークンを注入し、
 API は httpx の Auth フックでリクエスト毎に注入する。
 """
@@ -37,7 +38,14 @@ from .chunking import (
     split_markdown,
 )
 from .config import Settings
-from .db import delete_chunks_by_key, get_cursor, insert_chunk, set_cursor
+from .db import (
+    delete_chunks_by_key,
+    get_cursor,
+    get_pr_head_sha,
+    insert_chunk,
+    set_cursor,
+    upsert_pr_changes,
+)
 from .embedding import Embedder
 from .github_auth import TokenProvider
 
@@ -536,6 +544,57 @@ def _index_item(
         )
 
 
+def _sync_pr_changes(
+    client: httpx.Client,
+    conn: psycopg.Connection,
+    repo: str,
+    issue_no: int,
+) -> None:
+    """PR の変更ファイルマップを同期する（issue #54）。
+
+    GET /repos/{repo}/pulls/{issue_no} で head_sha を取得し、
+    保存済みの head_sha と比較。変化があるか未保存の場合のみ
+    GET /repos/{repo}/pulls/{issue_no}/files でファイル一覧を取得して upsert する。
+
+    コンテンツ（patch）は取得・保持しない（GitHub MCP に委譲）。
+    """
+    # 1. PR 詳細を取得して head_sha を確認
+    try:
+        resp = client.get(f"{API}/repos/{repo}/pulls/{issue_no}")
+        resp.raise_for_status()
+        pr_data = resp.json()
+        head_sha = pr_data.get("head", {}).get("sha")
+        if not head_sha:
+            log.debug("PR #%d: head_sha が取得できませんでした", issue_no)
+            return
+    except httpx.HTTPError as exc:
+        log.warning("PR #%d の詳細取得に失敗: %s", issue_no, exc)
+        return
+
+    # 2. head_sha が前回と同じならスキップ
+    prev_sha = get_pr_head_sha(conn, repo, issue_no)
+    if prev_sha == head_sha:
+        log.debug("PR #%d: head_sha 変更なし、スキップ", issue_no)
+        return
+
+    # 3. ファイル一覧を取得
+    try:
+        files = _api_pages(
+            client,
+            f"{API}/repos/{repo}/pulls/{issue_no}/files",
+            {"per_page": 100},
+        )
+        log.debug("PR #%d: %d files fetched", issue_no, len(files))
+    except httpx.HTTPError as exc:
+        log.warning("PR #%d のファイル一覧取得に失敗: %s", issue_no, exc)
+        return
+
+    # 4. upsert
+    upsert_pr_changes(conn, repo, issue_no, head_sha, files)
+    log.info("PR #%d: 変更ファイルマップを更新（head_sha=%s, %d files）",
+             issue_no, head_sha[:7], len(files))
+
+
 def sync_issues(
     settings: Settings,
     conn: psycopg.Connection,
@@ -600,6 +659,9 @@ def sync_issues(
                     url=it.get("html_url"),
                 )
                 n_indexed += 1
+            # PR の場合は変更ファイルマップも同期
+            if kind == "pr":
+                _sync_pr_changes(client, conn, repo, no)
             conn.commit()
         if items:
             set_cursor(conn, repo, "issues", items[-1]["updated_at"])

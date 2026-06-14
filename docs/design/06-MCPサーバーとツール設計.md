@@ -10,6 +10,7 @@
 - `shiori_keyword_search(query, filters?)`: キーワード／完全一致検索（日本語対応トークナイズ）。
 - `shiori_list_tree(path?, source_type?, extension?)`: リポジトリ構造の閲覧。`source_type`（`doc` / `code`）と `extension`（`.py` / `.md` 等）での絞り込みが可能（issue #43）。
 - `shiori_read_file(path, range?)` / `shiori_read_issue(number)`: 指定ファイル／スレッドを必要なら一部だけ取得。
+- `shiori_pr_changes(number, repo?)`: PR の変更ファイルマップ（メタデータ）を返す（issue #54）。head_sha と変更ファイル一覧（path / status / additions / deletions / blob_url）。コンテンツ（patch）は GitHub MCP に委譲。
 - `shiori_ingest(rebuild?)`: docs／issue／PR／code を GitHub から同期し索引を更新する（オンデマンド。`rebuild=true` で全件再構築。issue #6）。
 - `shiori_status()`: 索引の鮮度と健全性を照会する（issue #22, #31）。`chunks` の source_type 別内訳・`issue_items` 全件数・差分同期カーソル・警告（warnings）を返す。
 
@@ -30,6 +31,7 @@
 - 「ツールボックスを渡してエージェントに選ばせる」形。
 - ツールが多いと選択自体がモデル性能依存になるため、各ツールの description を明確化し、まず `shiori_semantic_search` を入口に推奨する等の配慮を入れる。
 - 検索結果は常にポインタ。全文取得は明示的な read で行う。
+- PR diff/全文は shiori では保持せず、`shiori_pr_changes` が返す座標（repo / PR 番号 / head_sha / path / URL）で GitHub MCP から 1 ステップ取得する（issue #54）。
 
 ## 検討事項 / 未決
 

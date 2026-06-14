@@ -1,14 +1,17 @@
-"""github_sync のユニットテスト（issue #25）。
+"""github_sync のユニットテスト（issue #25, #54）。
 
-_should_index の allowlist 判定ロジックを検証する。
+_should_index の allowlist 判定ロジック、_sync_pr_changes の head_sha 比較による
+スキップ／再取得ロジックを検証する。
 """
 
 from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from shiori.config import Settings
-from shiori.github_sync import _git, _is_bot, _propagate_issue_state, _should_index
+from shiori.github_sync import _git, _is_bot, _propagate_issue_state, _should_index, _sync_pr_changes
 
 
 # ---------------------------------------------------------------------------
@@ -147,6 +150,145 @@ class TestPropagateIssueState:
         second_call = cursor.execute.call_args_list[1]
         assert first_call[0][1] == ("open", "masuda-masuo/shiori", 50)
         assert second_call[0][1] == ("closed", "masuda-masuo/shiori", 50)
+
+
+# ---------------------------------------------------------------------------
+# _sync_pr_changes (issue #54)
+# ---------------------------------------------------------------------------
+
+
+class TestSyncPrChanges:
+    """_sync_pr_changes の振る舞い（issue #54）。
+
+    head_sha 比較によるスキップ／force-push 時の再取得ロジックを検証する。
+    """
+
+    API = "https://api.github.com"
+
+    def _mock_client(self, head_sha: str, files: list[dict] | None = None,
+                     pull_status: int = 200, files_status: int = 200):
+        """httpx.Client をモックする。
+
+        - pull_status/files_status: HTTP ステータスコード
+        - head_sha: PR の head.sha
+        - files: ファイル一覧（None なら files エンドポイントを呼ばせない）
+        """
+        client = MagicMock()
+
+        def _get(url, **kwargs):
+            resp = MagicMock()
+            resp.links = {}
+            if "/pulls/" in url and "/files" not in url:
+                resp.status_code = pull_status
+                if pull_status == 200:
+                    resp.json.return_value = {"head": {"sha": head_sha}}
+                else:
+                    resp.raise_for_status.side_effect = __import__("httpx").HTTPStatusError(
+                        "error", request=MagicMock(), response=resp
+                    )
+            elif "/files" in url:
+                resp.status_code = files_status
+                if files_status == 200:
+                    resp.json.return_value = files or []
+                else:
+                    resp.raise_for_status.side_effect = __import__("httpx").HTTPStatusError(
+                        "error", request=MagicMock(), response=resp
+                    )
+            else:
+                resp.status_code = 404
+                resp.raise_for_status.side_effect = __import__("httpx").HTTPStatusError(
+                    "error", request=MagicMock(), response=resp
+                )
+            return resp
+
+        client.get.side_effect = _get
+        return client
+
+    def _mock_conn(self, prev_sha: str | None = None):
+        """pr_changes の head_sha 問い合わせをモックする。"""
+        conn = MagicMock()
+        cursor = MagicMock()
+        cursor.fetchone.return_value = (prev_sha,) if prev_sha else None
+        conn.cursor.return_value.__enter__.return_value = cursor
+        return conn, cursor
+
+    @patch("shiori.github_sync.upsert_pr_changes")
+    @patch("shiori.github_sync.get_pr_head_sha")
+    def test_skips_when_head_sha_unchanged(self, mock_get_sha, mock_upsert):
+        """head_sha が前回と同じならファイル一覧を取得せずスキップする。"""
+        client = self._mock_client(head_sha="abc1234")
+        conn = MagicMock()
+        mock_get_sha.return_value = "abc1234"  # 前回と同じ
+
+        _sync_pr_changes(client, conn, "o/r", 42)
+
+        # PR 詳細は取得されるが、files は取得されない
+        pull_calls = [c for c in client.get.call_args_list
+                      if "/files" not in str(c)]
+        files_calls = [c for c in client.get.call_args_list
+                       if "/files" in str(c)]
+        assert len(pull_calls) >= 1
+        assert len(files_calls) == 0
+        mock_upsert.assert_not_called()
+
+    @patch("shiori.github_sync.upsert_pr_changes")
+    @patch("shiori.github_sync.get_pr_head_sha")
+    def test_fetches_files_when_head_sha_changed(self, mock_get_sha, mock_upsert):
+        """head_sha が変化した場合（force-push）、ファイル一覧を再取得する。"""
+        files = [{"filename": "a.py", "status": "modified", "additions": 1, "deletions": 0, "changes": 1, "blob_url": "url"}]
+        client = self._mock_client(head_sha="new_sha", files=files)
+        conn = MagicMock()
+        mock_get_sha.return_value = "old_sha"  # 前回と異なる
+
+        _sync_pr_changes(client, conn, "o/r", 42)
+
+        mock_upsert.assert_called_once_with(conn, "o/r", 42, "new_sha", files)
+
+    @patch("shiori.github_sync.upsert_pr_changes")
+    @patch("shiori.github_sync.get_pr_head_sha")
+    def test_fetches_files_when_not_yet_synced(self, mock_get_sha, mock_upsert):
+        """未同期（prev_sha=None）の場合、ファイル一覧を取得する。"""
+        files = [{"filename": "b.py", "status": "added", "additions": 10, "deletions": 0, "changes": 10, "blob_url": "url"}]
+        client = self._mock_client(head_sha="abc", files=files)
+        conn = MagicMock()
+        mock_get_sha.return_value = None  # 未同期
+
+        _sync_pr_changes(client, conn, "o/r", 42)
+
+        mock_upsert.assert_called_once_with(conn, "o/r", 42, "abc", files)
+
+    @patch("shiori.github_sync.upsert_pr_changes")
+    @patch("shiori.github_sync.get_pr_head_sha")
+    def test_handles_empty_head_sha(self, mock_get_sha, mock_upsert):
+        """PR 詳細の head_sha が None なら何もせず return。"""
+        client = MagicMock()
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.json.return_value = {"head": {"sha": None}}
+        client.get.return_value = resp
+        conn = MagicMock()
+
+        _sync_pr_changes(client, conn, "o/r", 42)
+
+        mock_upsert.assert_not_called()
+
+    @patch("shiori.github_sync.upsert_pr_changes")
+    @patch("shiori.github_sync.get_pr_head_sha")
+    def test_handles_pull_api_error(self, mock_get_sha, mock_upsert):
+        """PR 詳細 API がエラーを返しても例外を投げず return。"""
+        client = MagicMock()
+        resp = MagicMock()
+        resp.status_code = 404
+        resp.raise_for_status.side_effect = __import__("httpx").HTTPStatusError(
+            "not found", request=MagicMock(), response=resp
+        )
+        client.get.return_value = resp
+        conn = MagicMock()
+
+        # 例外が投げられないことを確認
+        _sync_pr_changes(client, conn, "o/r", 42)
+
+        mock_upsert.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

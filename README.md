@@ -26,7 +26,7 @@ issue / PR は二次ソース。過去（クローズ／マージ済み）・現
 | ソースコード | main 上の `.py` / `.ts` / `.go` 等 | 確定・現在 | 索引（DB, 任意）＋ クローン | 実装の現在状態 |
 | issue | 本文＋コメント | 過去〜未確定が混在 | 索引（DB） | なぜ（経緯・既知バグ・回避策） |
 | PR | 本文＋レビューコメント（`diff_hunk` 付き） | 過去〜未確定が混在 | 索引（DB） | なぜ（設計判断・レビュー） |
-| PR 変更（予定: #54） | 変更ファイル一覧＋増減＋`head_sha`＋URL | 未確定（in-flight）のポインタ | ポインタ（DB） | レビュー・更新の起点 |
+| PR 変更 | 変更ファイル一覧＋増減＋`head_sha`＋URL | 未確定（in-flight）のポインタ | ポインタ（DB） | レビュー・更新の起点 |
 
 ストアは 2 系統に分かれる:
 
@@ -58,7 +58,9 @@ dependabot 等の bot 投稿は検索ノイズを避けるため原則索引か�
 - `shiori_keyword_search` — 完全一致／識別子検索（日本語対応トークナイズ）
 - `shiori_list_tree` — リポジトリ構造の閲覧。`source_type`（`doc` / `code`）と `extension`（`.py` / `.md` 等）で絞り込み可能
 - `shiori_read_file` / `shiori_read_issue` — 指定ファイル／スレッドを必要なら一部だけ取得
+- `shiori_pr_changes` — PR の変更ファイルマップ（メタデータ）。head_sha と変更ファイル一覧（path / status / additions / deletions / blob_url）。コンテンツ（patch）は GitHub MCP に委譲
 - `shiori_ingest` — 索引の差分更新（オンデマンド。`rebuild=true` で全件再構築）
+- `shiori_status` — 索引の鮮度と健全性の確認（最終同期時刻・件数内訳・警告）
 
 検索系ツールは全文ではなくポインタ（パス／見出しパス／issue 番号＋スニペット＋GitHub URL）を返す。
 
