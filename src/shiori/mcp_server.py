@@ -6,6 +6,7 @@
 - list_tree(path?, source_type?, extension?): 索引済みドキュメント＋コードファイルのツリー閲覧。
 - read_file(path, start?, end?)     : ローカルクローンからファイル（の一部）を取得。
 - read_issue(number)                : issue/PR スレッド全体を取得。
+- pr_changes(number, repo?)         : PR の変更ファイルマップ（ポインタ）を返す（issue #54）。
 - ingest(rebuild?, repo?)           : docs / issue / PR / code の差分同期（索引更新）。
 - status()                          : 索引の鮮度と健全性（最終同期時刻・件数内訳・警告）。
 
@@ -267,18 +268,20 @@ mcp = FastMCP(
         "shiori_list_tree は source_type='doc'/'code' や extension='.py' で絞り込み可能。"
         "コードの検索は shiori_semantic_search / shiori_keyword_search で可能"
         "（source_type='code' で絞り込み可、prog_lang フィルタで言語指定も可）。"
-        "\n"
-        "■ 二ストア・モデル（情報の出所）\n"
-        "shiori は 2 つの独立したデータソースを持つ:\n"
-        "1. 索引（Postgres/pgvector/pgroonga）\n"
-        "   - shiori_semantic_search / shiori_keyword_search: 埋め込み＋全文検索\n"
-        "   - shiori_read_issue: issue/PR スレッド（索引済みのもののみ）\n"
-        "   - shiori_list_tree (source_type='doc'): 索引済み doc_files テーブル\n"
-        "   - 鮮度は shiori_ingest / 自動同期に依存\n"
-        "2. クローン（ディスク、main ブランチ固定）\n"
-        "   - shiori_read_file: 実ファイルを直接読み取り（索引不要、クローンがあれば読める）\n"
-        "   - shiori_list_tree (source_type='code'): os.walk で物理的に存在するコードファイル\n"
-        "   - クローンは sync_docs が clone --depth=1 + reset --hard origin/HEAD で維持\n"
+        "PR の変更ファイルマップは shiori_pr_changes で取得できる。"
+        "\\n"
+        "■ 二ストア・モデル（情報の出所）\\n"
+        "shiori は 2 つの独立したデータソースを持つ:\\n"
+        "1. 索引（Postgres/pgvector/pgroonga）\\n"
+        "   - shiori_semantic_search / shiori_keyword_search: 埋め込み＋全文検索\\n"
+        "   - shiori_read_issue: issue/PR スレッド（索引済みのもののみ）\\n"
+        "   - shiori_list_tree (source_type='doc'): 索引済み doc_files テーブル\\n"
+        "   - shiori_pr_changes: PR 変更ファイルマップ（索引済みメタデータ）\\n"
+        "   - 鮮度は shiori_ingest / 自動同期に依存\\n"
+        "2. クローン（ディスク、main ブランチ固定）\\n"
+        "   - shiori_read_file: 実ファイルを直接読み取り（索引不要、クローンがあれば読める）\\n"
+        "   - shiori_list_tree (source_type='code'): os.walk で物理的に存在するコードファイル\\n"
+        "   - クローンは sync_docs が clone --depth=1 + reset --hard origin/HEAD で維持\\n"
         "   - 常に main ブランチ時点。PR head / 別 ref / diff は GitHub MCP に委譲"
     ),
 )
@@ -491,6 +494,37 @@ def read_issue(number: int, repo: str | None = None) -> dict[str, Any]:
             }
             for r in rows
         ],
+    }
+
+
+@mcp.tool(name="shiori_pr_changes")
+def pr_changes(number: int, repo: str | None = None) -> dict[str, Any]:
+    """PR の変更ファイルマップ（メタデータ）を返す。ポインタ層のツール（issue #54）。
+
+    保持するもの（メタデータ）:
+      - head_sha: PR の head コミット SHA（force-push 追従用）
+      - ファイル一覧: path / status / additions / deletions / changes / blob_url
+
+    保持しないもの（コンテンツ）:
+      - patch hunk 全文 → GitHub MCP の pull_request_read(method='get_diff') で取得
+      - PR head のファイル全文 → GitHub MCP の get_file_contents(sha=head_sha, ...) で取得
+
+    このツールは索引（DB）からメタデータを返す。shiori_read_file は main ブランチ固定のため、
+    PR head のファイル内容が必要な場合は必ず GitHub MCP を使うこと。
+    """
+    target = _resolve_repo(repo)
+    with _conn() as conn:
+        files, head_sha = db.get_pr_changes(conn, target, number)
+    if not files:
+        raise ValueError(
+            f"PR #{number} の変更ファイルマップが見つかりません。"
+            "shiori_ingest で同期してください。"
+        )
+    return {
+        "repo": target,
+        "number": number,
+        "head_sha": head_sha,
+        "files": files,
     }
 
 
