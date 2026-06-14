@@ -267,6 +267,19 @@ mcp = FastMCP(
         "shiori_list_tree は source_type='doc'/'code' や extension='.py' で絞り込み可能。"
         "コードの検索は shiori_semantic_search / shiori_keyword_search で可能"
         "（source_type='code' で絞り込み可、prog_lang フィルタで言語指定も可）。"
+        "\n"
+        "■ 二ストア・モデル（情報の出所）\n"
+        "shiori は 2 つの独立したデータソースを持つ:\n"
+        "1. 索引（Postgres/pgvector/pgroonga）\n"
+        "   - shiori_semantic_search / shiori_keyword_search: 埋め込み＋全文検索\n"
+        "   - shiori_read_issue: issue/PR スレッド（索引済みのもののみ）\n"
+        "   - shiori_list_tree (source_type='doc'): 索引済み doc_files テーブル\n"
+        "   - 鮮度は shiori_ingest / 自動同期に依存\n"
+        "2. クローン（ディスク、main ブランチ固定）\n"
+        "   - shiori_read_file: 実ファイルを直接読み取り（索引不要、クローンがあれば読める）\n"
+        "   - shiori_list_tree (source_type='code'): os.walk で物理的に存在するコードファイル\n"
+        "   - クローンは sync_docs が clone --depth=1 + reset --hard origin/HEAD で維持\n"
+        "   - 常に main ブランチ時点。PR head / 別 ref / diff は GitHub MCP に委譲"
     ),
 )
 
@@ -331,12 +344,21 @@ def list_tree(
     source_type: str | None = None,
     extension: str | None = None,
     repo: str | None = None,
-) -> list[str]:
-    """索引済みドキュメントのパス一覧。path を渡すとその配下に絞る。
+) -> list[dict[str, Any]]:
+    """索引済みドキュメント＋コードファイルのパス一覧。path を渡すとその配下に絞る。
     リポジトリの構造を把握し、当たりをつけるのに使う。
+
+    ■ 二ストア・モデルと source_type の意味:
+      - source_type='doc' (索引): doc_files テーブル（Postgres に索引済みの Markdown のみ）。
+        索引されていないドキュメントは返らない。
+      - source_type='code' (クローン): ディスク上のクローン（main 固定）を os.walk した結果。
+        索引前でも物理的に存在すれば返る。バイナリ・ロックファイル等は除外。
+      - 省略時: 両方を返すが、各エントリの source フィールドで出所を区別できる。
 
     コードファイル（.py, .ts, .go 等）もクローンファイルシステムから返す。
     コードは索引前でも発見可能。
+
+    戻り値は [{"path": ..., "source": "doc"|"code"}, ...] のリスト（path でソート済み）。
 
     source_type: 'doc'（索引済み Markdown）/'code'（クローンのコードファイル）で絞り込み。
                  省略時は両方を返す。無効な値はエラー。
@@ -350,7 +372,8 @@ def list_tree(
         )
 
     target = _resolve_repo(repo)
-    paths: set[str] = set()
+    entries: list[dict[str, Any]] = []
+    seen: set[str] = set()
 
     # 1. 索引済みドキュメント（doc_files テーブル）
     if source_type is None or source_type == "doc":
@@ -372,16 +395,24 @@ def list_tree(
                 p = r[0]
                 if extension and not _match_extension(p, extension):
                     continue
-                paths.add(p)
+                if p not in seen:
+                    seen.add(p)
+                    entries.append({"path": p, "source": "doc"})
 
     # 2. コードファイル（クローンファイルシステム）
     if source_type is None or source_type == "code":
         base = os.path.realpath(settings.repo_dir(target))
         prefix = path.rstrip("/") if path else ""
         code_paths = _walk_code_files(base, prefix, extension=extension)
-        paths.update(code_paths)
+        # 最終ソートがあるためコード側だけの事前ソートは不要
+        for p in code_paths:
+            if p not in seen:
+                seen.add(p)
+                entries.append({"path": p, "source": "code"})
 
-    return sorted(paths)
+    # path でソート（doc と code が混在する場合）
+    entries.sort(key=lambda e: e["path"])
+    return entries
 
 
 @mcp.tool(name="shiori_read_file")
@@ -393,14 +424,18 @@ def read_file(
 ) -> dict[str, Any]:
     """指定ファイルの全文（または start_line〜end_line の範囲）を取得する。
     検索結果のポインタから本当に必要な範囲だけ読むこと。
-    ドキュメントだけでなくコードファイルも読める。"""
+    ドキュメントだけでなくコードファイルも読める。
+
+    このツールは索引（Postgres）ではなく、ローカルクローン（main ブランチ固定）の
+    実ファイルを直接読み取る。索引が存在しなくても、クローンがあれば読める。
+    PR head / 別 ref / diff の取得は GitHub MCP に委譲すること。"""
     target = _resolve_repo(repo)
     base = os.path.realpath(settings.repo_dir(target))
     full = os.path.realpath(os.path.join(base, path))
     if not full.startswith(base + os.sep):
         raise ValueError("リポジトリ外のパスは読めません")
     if not os.path.isfile(full):
-        raise FileNotFoundError(f"{path} はクローンに存在しません（ingest 済みですか？）")
+        raise FileNotFoundError(f"{path} はクローンに存在しません（同期が必要かもしれません）")
     with open(full, encoding="utf-8", errors="replace") as fp:
         lines = fp.read().splitlines()
     total = len(lines)

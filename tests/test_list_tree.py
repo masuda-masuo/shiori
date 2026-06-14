@@ -3,7 +3,8 @@
 テスト対象:
 - _match_extension: 拡張子マッチ（大文字小文字無視、ドット有無対応）
 - _walk_code_files: コードファイル収集（パス・除外・prefix・extension フィルタ）
-- list_tree: source_type バリデーション、source_type + extension の分岐・集約
+- list_tree: source_type バリデーション、source_type + extension の分岐・集約、
+  source フィールド（二ストア・モデルの出所識別）
 """
 
 from __future__ import annotations
@@ -269,11 +270,27 @@ class TestListTreeSourceTypeValidation:
             list_tree(source_type="xyz")
 
 
+# ── helpers for end-to-end tests ──
+
+
+def _entries_to_paths(entries: list[dict]) -> list[str]:
+    """list_tree の戻り値から path のみのリストを抽出（後方互換確認用）。"""
+    return [e["path"] for e in entries]
+
+
+def _paths_with_source(
+    entries: list[dict], source: str
+) -> list[str]:
+    """list_tree の戻り値から特定 source の path リストを抽出。"""
+    return [e["path"] for e in entries if e["source"] == source]
+
+
 class TestListTreeEndToEnd:
     """list_tree の end-to-end テスト。
 
     DB とファイルシステムをモックし、
     source_type / extension の分岐・集約・ソートを検証する。
+    また、戻り値に source フィールドが正しく付与されていることも確認する。
     """
 
     def _mock_cursor(self, rows: list[tuple[str]]) -> MagicMock:
@@ -289,8 +306,13 @@ class TestListTreeEndToEnd:
         extension: str | None = None,
         doc_rows: list[tuple[str]] | None = None,
         code_files: list[str] | None = None,
-    ) -> list[str]:
-        """list_tree をモック環境で呼び出す。"""
+        mock_walk_return: set[str] | None = None,
+    ) -> list[dict]:
+        """list_tree をモック環境で呼び出す。
+
+        mock_walk_return が指定された場合は _walk_code_files をその戻り値でモックする。
+        指定されない場合は code_files から実ファイルを作成し本物の _walk_code_files を呼ぶ。
+        """
         # コードファイルを実際に作成
         if code_files:
             _make_tree(tmp, code_files)
@@ -305,16 +327,29 @@ class TestListTreeEndToEnd:
         def _fake_conn():
             return mock_conn
 
-        with (
-            patch("shiori.mcp_server.settings") as mock_settings,
-            patch("shiori.mcp_server._conn", side_effect=_fake_conn),
-        ):
-            mock_settings.repos = ["test/repo"]
-            mock_settings.repo_dir.return_value = tmp
-            return list_tree(source_type=source_type, extension=extension)
+        if mock_walk_return is not None:
+            with (
+                patch("shiori.mcp_server.settings") as mock_settings,
+                patch("shiori.mcp_server._conn", side_effect=_fake_conn),
+                patch(
+                    "shiori.mcp_server._walk_code_files",
+                    return_value=mock_walk_return,
+                ),
+            ):
+                mock_settings.repos = ["test/repo"]
+                mock_settings.repo_dir.return_value = tmp
+                return list_tree(source_type=source_type, extension=extension)
+        else:
+            with (
+                patch("shiori.mcp_server.settings") as mock_settings,
+                patch("shiori.mcp_server._conn", side_effect=_fake_conn),
+            ):
+                mock_settings.repos = ["test/repo"]
+                mock_settings.repo_dir.return_value = tmp
+                return list_tree(source_type=source_type, extension=extension)
 
     def test_source_type_doc_only(self):
-        """source_type='doc' は doc_files のパスのみを返す"""
+        """source_type='doc' は doc_files のパスのみを返し、source='doc' が付与される"""
         with tempfile.TemporaryDirectory() as tmp:
             result = self._call_list_tree(
                 tmp,
@@ -322,10 +357,12 @@ class TestListTreeEndToEnd:
                 doc_rows=[("README.md",), ("docs/guide.md",)],
                 code_files=["main.py", "utils.py"],
             )
-            assert result == ["README.md", "docs/guide.md"]
+            assert _entries_to_paths(result) == ["README.md", "docs/guide.md"]
+            for entry in result:
+                assert entry["source"] == "doc"
 
     def test_source_type_code_only(self):
-        """source_type='code' はコードファイルのみを返す"""
+        """source_type='code' はコードファイルのみを返し、source='code' が付与される"""
         with tempfile.TemporaryDirectory() as tmp:
             result = self._call_list_tree(
                 tmp,
@@ -333,10 +370,12 @@ class TestListTreeEndToEnd:
                 doc_rows=[("README.md",)],
                 code_files=["main.py", "utils.py"],
             )
-            assert result == ["main.py", "utils.py"]
+            assert _entries_to_paths(result) == ["main.py", "utils.py"]
+            for entry in result:
+                assert entry["source"] == "code"
 
     def test_source_type_none_returns_both(self):
-        """source_type=None は doc + code の両方を返す"""
+        """source_type=None は doc + code の両方を返し、各エントリに出所が付与される"""
         with tempfile.TemporaryDirectory() as tmp:
             result = self._call_list_tree(
                 tmp,
@@ -344,7 +383,9 @@ class TestListTreeEndToEnd:
                 doc_rows=[("README.md",)],
                 code_files=["main.py"],
             )
-            assert result == ["README.md", "main.py"]
+            assert _entries_to_paths(result) == ["README.md", "main.py"]
+            assert result[0] == {"path": "README.md", "source": "doc"}
+            assert result[1] == {"path": "main.py", "source": "code"}
 
     def test_doc_with_extension_md(self):
         """source_type='doc' + extension='.md' で .md だけ"""
@@ -355,7 +396,8 @@ class TestListTreeEndToEnd:
                 extension=".md",
                 doc_rows=[("README.md",), ("CHANGELOG.rst",)],
             )
-            assert result == ["README.md"]
+            assert _entries_to_paths(result) == ["README.md"]
+            assert result[0]["source"] == "doc"
 
     def test_doc_with_extension_py_returns_empty(self):
         """source_type='doc' + extension='.py' は空（doc に .py はない）"""
@@ -377,7 +419,9 @@ class TestListTreeEndToEnd:
                 extension=".py",
                 code_files=["main.py", "utils.py", "utils.ts"],
             )
-            assert result == ["main.py", "utils.py"]
+            assert _entries_to_paths(result) == ["main.py", "utils.py"]
+            for entry in result:
+                assert entry["source"] == "code"
 
     def test_code_with_extension_ts(self):
         """source_type='code' + extension='.ts' で .ts だけ"""
@@ -388,7 +432,9 @@ class TestListTreeEndToEnd:
                 extension=".ts",
                 code_files=["main.py", "utils.ts", "types.ts"],
             )
-            assert result == ["types.ts", "utils.ts"]
+            assert _entries_to_paths(result) == ["types.ts", "utils.ts"]
+            for entry in result:
+                assert entry["source"] == "code"
 
     def test_code_extension_no_match(self):
         """source_type='code' + extension='.go'（マッチなし）は空"""
@@ -411,10 +457,11 @@ class TestListTreeEndToEnd:
                 doc_rows=[("README.md",)],
                 code_files=["main.py", "utils.ts"],
             )
-            assert result == ["main.py"]
+            assert _entries_to_paths(result) == ["main.py"]
+            assert result[0]["source"] == "code"
 
     def test_sorted_result(self):
-        """結果がソートされている"""
+        """結果が path でソートされている"""
         with tempfile.TemporaryDirectory() as tmp:
             result = self._call_list_tree(
                 tmp,
@@ -422,4 +469,25 @@ class TestListTreeEndToEnd:
                 doc_rows=[("a.md",), ("z.md",)],
                 code_files=["c.py", "b.py"],
             )
-            assert result == ["a.md", "b.py", "c.py", "z.md"]
+            assert _entries_to_paths(result) == ["a.md", "b.py", "c.py", "z.md"]
+            # source フィールドも確認
+            assert result[0]["source"] == "doc"
+            assert result[1]["source"] == "code"
+            assert result[2]["source"] == "code"
+            assert result[3]["source"] == "doc"
+
+    def test_duplicate_path_across_stores(self):
+        """doc と code で同名パスが衝突した場合、doc が優先される。
+
+        _walk_code_files は Markdown を除外するため本番では通常発生しないが、
+        防御的コードとして seen による重複排除と doc 優先を検証する。
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self._call_list_tree(
+                tmp,
+                source_type=None,
+                doc_rows=[("src/foo.py",)],
+                mock_walk_return={"src/foo.py"},
+            )
+            assert len(result) == 1
+            assert result[0] == {"path": "src/foo.py", "source": "doc"}
