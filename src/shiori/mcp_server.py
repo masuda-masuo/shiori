@@ -5,7 +5,7 @@
 - keyword_search(query, filters?)   : 完全一致寄りのキーワード検索（日本語対応）。
 - list_tree(path?, source_type?, extension?): 索引済みドキュメント＋コードファイルのツリー閲覧。
 - read_file(path, start?, end?)     : ローカルクローンからファイル（の一部）を取得。
-- read_issue(number)                : issue/PR スレッド全体を取得。
+- read_issue(number, repo?, exclude_noise_bots?) : issue/PR スレッド全体を取得。
 - pr_changes(number, repo?)         : PR の変更ファイルマップ（ポインタ）を返す（issue #54）。
 - ingest(rebuild?, repo?)           : docs / issue / PR / code の差分同期（索引更新）。
 - status()                          : 索引の鮮度と健全性（最終同期時刻・件数内訳・警告）。
@@ -456,9 +456,14 @@ def read_file(
 
 
 @mcp.tool(name="shiori_read_issue")
-def read_issue(number: int, repo: str | None = None) -> dict[str, Any]:
+def read_issue(number: int, repo: str | None = None, exclude_noise_bots: bool = False) -> dict[str, Any]:
     """issue / PR のスレッド全体（本文＋コメント＋レビューコメント）を時系列で取得する。
-    bot コメントも含まれる（is_bot で識別可能）。"""
+    bot コメントも含まれる（is_bot で識別可能）。
+
+    number: issue または PR 番号。
+    repo: リポジトリ名（"owner/name"）。省略時は SHIORI_REPOS の最初のリポジトリ。
+    exclude_noise_bots: True で allowlist 外の bot（CI / dependabot 等）を除外する（既定 False）。
+        allowlist（SHIORI_INDEX_BOT_LOGINS）登録済み bot の投稿は残る（issue #44）。"""
     target = _resolve_repo(repo)
     with _conn() as conn, conn.cursor() as cur:
         cur.execute(
@@ -474,6 +479,15 @@ def read_issue(number: int, repo: str | None = None) -> dict[str, Any]:
         rows = cur.fetchall()
     if not rows:
         raise ValueError(f"#{number} は索引されていません（ingest 済みですか？）")
+    # allowlist 外の bot を除外（issue #44）
+    if exclude_noise_bots:
+        allowlist = settings.index_bot_logins
+        rows = [
+            r for r in rows
+            if not r[4] or (r[3] and r[3].lower() in allowlist)
+        ]
+        if not rows:
+            raise ValueError(f"#{number} の全項目が allowlist 外の bot です")
     head = rows[0]
     return {
         "repo": target,
