@@ -2,7 +2,8 @@
 
 決定事項:
 - `semantic_search` は内部でハイブリッド: pgvector 類似度と pgroonga キーワードの
-  双方で候補を取り、RRF (k=60) で融合して top-k を返す。エージェントの入口ツール。
+  双方で候補を取り、RRF (k=60) で融合して top-k を返す。MCP ツール `shiori_search`
+  の実体であり、エージェントの入口ツール。
 - `keyword_search` は pgroonga (`&@~`) による厳密寄りの検索専用として分離して残す。
   code チャンクに対しては content に加えて symbols カラムも OR 検索する（issue #33）。
 - リランクモデルは v1 では不採用（RRF のみ）。
@@ -129,7 +130,8 @@ def keyword_search(
     top_k: int | None = None,
 ) -> list[dict]:
     """キーワード検索（日本語対応トークナイズ）。関数名・API 名・エラーコード・設定キーなど
-    固有の文字列の一致に強い。semantic_search で取りこぼした厳密な語に使う。
+    固有の文字列の一致に強い。通常は shiori_search を使い、厳密一致が必要なときに
+    shiori_keyword_search を使うこと。
 
     code チャンクに対しては content（シグネチャ＋docstring）に加えて symbols
     （識別子分割済み文字列）も OR 検索するため、camelCase や snake_case の部分一致でも
@@ -152,6 +154,7 @@ def semantic_search(
     top_k: int | None = None,
 ) -> list[dict]:
     """ハイブリッド検索。ベクトルとキーワードの順位を RRF で融合する。
+    MCP ツール `shiori_search` の実体。エージェントの入口ツール。
 
     source_type='code' のチャンクも検索対象に含まれる。
     キーワード側は symbols カラムも OR 検索するため、関数名やクラス名の部分一致でも
