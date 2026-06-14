@@ -43,6 +43,18 @@ def _code_exclude_globs_from_env() -> list[str]:
     return [s.strip() for s in raw.split(",") if s.strip()]
 
 
+def _allow_rebuild_from_env() -> bool:
+    """SHIORI_ALLOW_REBUILD を bool で返す。
+
+    MCP ツール shiori_ingest からの rebuild=True（全 TRUNCATE）を許可するか。
+    既定 false。運用上必要な場合のみ true に設定する（issue #63）。
+    CLI 経路（python -m shiori ingest --rebuild）はこの設定に依らず常に許可。
+    """
+    return os.environ.get("SHIORI_ALLOW_REBUILD", "").lower() in (
+        "1", "true", "yes"
+    )
+
+
 @dataclass
 class Settings:
     # Postgres (pgvector + pgroonga)
@@ -126,6 +138,10 @@ class Settings:
     code_exclude_globs: list[str] = field(
         default_factory=_code_exclude_globs_from_env
     )
+    # MCP ツール shiori_ingest からの rebuild=True（全 TRUNCATE）を許可するか（issue #63）。
+    # 既定 false。運用上必要な場合のみ true に設定する。
+    # CLI 経路（python -m shiori ingest --rebuild）はこの設定に依らず常に許可。
+    allow_rebuild: bool = field(default_factory=_allow_rebuild_from_env)
 
     def repo_dir(self, repo: str) -> str:
         owner, name = repo.split("/", 1)

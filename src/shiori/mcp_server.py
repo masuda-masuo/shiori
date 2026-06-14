@@ -27,6 +27,10 @@ ingest.py 側で記録）を残し、shiori_status で照会できる（issue #2
 
 code 索引（issue #33）は SHIORI_INDEX_CODE=true で有効化。sync_docs と同一クローンを
 共有し、sha デルタで変化ファイルのみ再索引する。
+
+セキュリティ（issue #63）:
+- _do_sync の repo 引数は settings.repos と照合し、allowlist 外は拒否。
+- shiori_ingest の rebuild=True は SHIORI_ALLOW_REBUILD=true 時のみ許可。
 """
 
 from __future__ import annotations
@@ -112,6 +116,16 @@ def _do_sync(
     どちらも非ブロッキング（取得失敗 = skip）。
     リポジトリごとの完了時に sync_runs へ完了時刻と経路を記録する（issue #22 / #33）。
     """
+    # allowlist 検証: 明示的に指定された repo が settings.repos に含まれるか（issue #63）
+    if repos is not None:
+        allowed = set(settings.repos)
+        invalid = sorted(set(repos) - allowed)
+        if invalid:
+            raise ValueError(
+                f"指定されたリポジトリは SHIORI_REPOS に含まれていません: "
+                f"{', '.join(invalid)}"
+            )
+
     if not _sync_lock.acquire(blocking=False):
         return {"status": "skipped", "reason": "同期が既に実行中です"}
     try:
@@ -548,7 +562,17 @@ def ingest(rebuild: bool = False, repo: str | None = None) -> dict[str, Any]:
     検索結果が古い・未索引と思われる場合（直近の変更がヒットしない、ユーザーが
     最近の変更に言及している等）に呼ぶ。rebuild=True で索引を破棄して全件作り直す
     （埋め込みモデル変更時のみ）。repo 省略時は設定済みの全リポジトリを同期する。
-    code 索引は SHIORI_INDEX_CODE=true で有効化。"""
+    code 索引は SHIORI_INDEX_CODE=true で有効化。
+
+    rebuild=True は MCP ツールからは既定で無効化されている。使用するには
+    環境変数 SHIORI_ALLOW_REBUILD=true の設定が必要（issue #63）。
+    repo は SHIORI_REPOS に含まれるもののみ有効。"""
+    if rebuild and not settings.allow_rebuild:
+        raise ValueError(
+            "rebuild=True は MCP ツールからは実行できません。"
+            "CLI（python -m shiori ingest --rebuild）を使用するか、"
+            "環境変数 SHIORI_ALLOW_REBUILD=true を設定してください。"
+        )
     return _do_sync(repos=[repo] if repo else None, rebuild=rebuild, route="mcp")
 
 

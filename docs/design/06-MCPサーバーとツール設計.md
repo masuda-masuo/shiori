@@ -11,7 +11,7 @@
 - `shiori_list_tree(path?, source_type?, extension?)`: リポジトリ構造の閲覧。`source_type`（`doc` / `code`）と `extension`（`.py` / `.md` 等）での絞り込みが可能（issue #43）。
 - `shiori_read_file(path, range?)` / `shiori_read_issue(number, repo?, exclude_noise_bots?)`: 指定ファイル／スレッドを必要なら一部だけ取得。`read_issue` の `exclude_noise_bots=true` で allowlist（`SHIORI_INDEX_BOT_LOGINS`）外の bot 投稿を除外可能（issue #44）。
 - `shiori_pr_changes(number, repo?)`: PR の変更ファイルマップ（メタデータ）を返す（issue #54）。head_sha と変更ファイル一覧（path / status / additions / deletions / blob_url）。コンテンツ（patch）は GitHub MCP に委譲。
-- `shiori_ingest(rebuild?)`: docs／issue／PR／code を GitHub から同期し索引を更新する（オンデマンド。`rebuild=true` で全件再構築。issue #6）。
+- `shiori_ingest(rebuild?, repo?)`: docs／issue／PR／code を GitHub から同期し索引を更新する（オンデマンド。`rebuild=true` で全件再構築。issue #6）。**`repo` は `SHIORI_REPOS` に含まれるもののみ有効（issue #63）。`rebuild=true` は既定で無効化されており、環境変数 `SHIORI_ALLOW_REBUILD=true` 設定時のみ許可される。CLI 経路（`python -m shiori ingest --rebuild`）はこの制約を受けない。**
 - `shiori_status()`: 索引の鮮度と健全性を照会する（issue #22, #31）。`chunks` の source_type 別内訳・`issue_items` 全件数・差分同期カーソル・警告（warnings）を返す。
 
 検索系には `source_type`（doc / issue / pr_review / code）, `language`, `state` 等のフィルタを持たせる。bot 投稿は原則索引から除外されるが、`SHIORI_INDEX_BOT_LOGINS` 環境変数（GitHub App 名 + `[bot]` 形式のログイン名をカンマ区切りで指定）で allowlist 指定が可能（issue #25）。

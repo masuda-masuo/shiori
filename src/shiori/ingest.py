@@ -14,6 +14,9 @@
     リポジトリごとの同期完了時に sync_runs へ完了時刻と経路を記録する。
     経路は環境変数 SHIORI_INGEST_ROUTE（既定 'cli'）。reindex.yml（self-hosted
     runner）は 'runner' を設定して実行経路を識別できるようにする。
+
+セキュリティ（issue #63）:
+    指定された repo を SHIORI_REPOS（allowlist）と照合し、含まれないものは拒否する。
 """
 
 from __future__ import annotations
@@ -39,6 +42,17 @@ def run_ingest(
     rebuild: bool = False,
 ) -> None:
     settings = settings or load_settings()
+
+    # allowlist 検証: 明示的に指定された repo が settings.repos に含まれるか（issue #63）
+    if repos is not None:
+        allowed = set(settings.repos)
+        invalid = sorted(set(repos) - allowed)
+        if invalid:
+            raise SystemExit(
+                f"指定されたリポジトリは SHIORI_REPOS に含まれていません: "
+                f"{', '.join(invalid)}"
+            )
+
     targets = repos or settings.repos
     if not targets:
         raise SystemExit("SHIORI_REPOS が未設定です（例: SHIORI_REPOS=owner/name）")
