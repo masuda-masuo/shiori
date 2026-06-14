@@ -327,25 +327,6 @@ class TestListTreeEndToEnd:
         def _fake_conn():
             return mock_conn
 
-        patches = [
-            patch("shiori.mcp_server.settings") as mock_settings,
-            patch("shiori.mcp_server._conn", side_effect=_fake_conn),
-        ]
-
-        if mock_walk_return is not None:
-            patches.append(
-                patch(
-                    "shiori.mcp_server._walk_code_files",
-                    return_value=mock_walk_return,
-                )
-            )
-
-        with patches[0], patches[1], (patches[2] if len(patches) > 2 else patch("unused")):
-            mock_settings = patches[0].__enter__() if hasattr(patches[0], '__enter__') else None
-            # We need to handle the context managers properly
-            pass
-
-        # Re-implement with proper context manager nesting
         if mock_walk_return is not None:
             with (
                 patch("shiori.mcp_server.settings") as mock_settings,
