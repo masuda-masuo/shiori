@@ -468,6 +468,21 @@ def _issue_title_state(
     return (row[0], row[1]) if row else (None, None)
 
 
+def _propagate_issue_state(
+    conn: psycopg.Connection, repo: str, issue_no: int, state: str | None
+) -> None:
+    """issue_items の state 変更を chunks に伝播する（issue #56）。
+
+    _should_index の結果やコメント/レビューの再取得有無に関わらず、
+    親 issue/PR の state が変わったら全チャンクの state を一括更新する。
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE chunks SET state = %s WHERE repo = %s AND issue_no = %s",
+            (state, repo, issue_no),
+        )
+
+
 def _index_item(
     settings: Settings,
     conn: psycopg.Connection,
@@ -565,6 +580,7 @@ def sync_issues(
                 "updated_at": it.get("updated_at"),
             }
             _upsert_issue_item(conn, row)
+            _propagate_issue_state(conn, repo, no, it.get("state"))
             if _should_index(row["is_bot"], author, settings):
                 _index_item(
                     settings, conn, embedder,
