@@ -9,6 +9,9 @@
 - リランクモデルは v1 では不採用（RRF のみ）。
 - 返すのは常にポインタ＋スニペット（既定 400 字）。state / updated_at を結果に
   含め、鮮度の判断はエージェント側に委ねる。
+- sort_by / sort_order で結果のソート順を変更できる。既定は score 降順。
+  updated_at / created_at でのソートは RRF の関連度順を無視するため、
+  関連度を意図的に犠牲にしない限り既定（score）のまま使うことを推奨（issue #41）。
 """
 
 from __future__ import annotations
@@ -122,12 +125,35 @@ def _keyword_candidates(
         return cur.fetchall()
 
 
+def _sort_hits(
+    hits: list[dict[str, Any]], sort_by: str, sort_order: str
+) -> list[dict[str, Any]]:
+    """結果リストを指定されたキーと順序でソートする。
+
+    sort_by: "score" | "updated_at" | "created_at"
+    sort_order: "asc" | "desc"（既定）
+
+    注記: updated_at / created_at でのソートは、検索の関連度順（RRF スコア /
+    pgroonga スコア）を破棄する。鮮度が絶対条件でない限り、既定（score）のまま
+    使うことを推奨。
+    """
+    if sort_by == "score":
+        key = lambda h: h.get("score", 0.0)
+    elif sort_by in ("updated_at", "created_at"):
+        key = lambda h: h.get(sort_by, "")
+    else:
+        return hits
+    return sorted(hits, key=key, reverse=(sort_order != "asc"))
+
+
 def keyword_search(
     settings: Settings,
     conn: psycopg.Connection,
     query: str,
     filters: dict | None = None,
     top_k: int | None = None,
+    sort_by: str = "score",
+    sort_order: str = "desc",
 ) -> list[dict]:
     """キーワード検索（日本語対応トークナイズ）。関数名・API 名・エラーコード・設定キーなど
     固有の文字列の一致に強い。通常は shiori_search を使い、厳密一致が必要なときに
@@ -136,13 +162,19 @@ def keyword_search(
     code チャンクに対しては content（シグネチャ＋docstring）に加えて symbols
     （識別子分割済み文字列）も OR 検索するため、camelCase や snake_case の部分一致でも
     発見できる（詳細設計/10 決定 3）。
+
+    sort_by: "score"（既定）/ "updated_at" / "created_at"。
+      updated_at / created_at でのソートは pgroonga の関連度順を破棄する。
+      鮮度が絶対条件でない限り、既定（score）のまま使うことを推奨。
+    sort_order: "desc"（既定）/ "asc"。
     """
     k = top_k or settings.default_top_k
     rows = _keyword_candidates(conn, query, filters, k)
-    return [
+    hits = [
         _row_to_hit(r[:-1], settings.snippet_chars, float(r[-1])).to_dict()
         for r in rows
     ]
+    return _sort_hits(hits, sort_by, sort_order)
 
 
 def semantic_search(
@@ -152,6 +184,8 @@ def semantic_search(
     query: str,
     filters: dict | None = None,
     top_k: int | None = None,
+    sort_by: str = "score",
+    sort_order: str = "desc",
 ) -> list[dict]:
     """ハイブリッド検索。ベクトルとキーワードの順位を RRF で融合する。
     MCP ツール `shiori_search` の実体。エージェントの入口ツール。
@@ -159,6 +193,11 @@ def semantic_search(
     source_type='code' のチャンクも検索対象に含まれる。
     キーワード側は symbols カラムも OR 検索するため、関数名やクラス名の部分一致でも
     発見できる（詳細設計/10 決定 3）。
+
+    sort_by: "score"（既定）/ "updated_at" / "created_at"。
+      updated_at / created_at でのソートは RRF の関連度順を破棄する。
+      鮮度が絶対条件でない限り、既定（score）のまま使うことを推奨。
+    sort_order: "desc"（既定）/ "asc"。
     """
     k = top_k or settings.default_top_k
     pool = max(k * 4, 20)
@@ -182,7 +221,8 @@ def semantic_search(
         scores[rid] = scores.get(rid, 0.0) + 1.0 / (RRF_K + rank + 1)
 
     ranked = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)[:k]
-    return [
+    hits = [
         _row_to_hit(rows_by_id[rid], settings.snippet_chars, score).to_dict()
         for rid, score in ranked
     ]
+    return _sort_hits(hits, sort_by, sort_order)
