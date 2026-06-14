@@ -73,6 +73,22 @@ CREATE TABLE IF NOT EXISTS issue_items (
     PRIMARY KEY (repo, issue_no, comment_id)
 );
 
+-- PR 変更ファイルマップ（メタデータのみ。issue #54）
+-- コンテンツ（patch hunk 全文）は保持せず、GitHub MCP に委譲する。
+-- head_sha で force-push を追従し、変更があれば再取得する。
+CREATE TABLE IF NOT EXISTS pr_changes (
+    repo TEXT NOT NULL,
+    issue_no INTEGER NOT NULL,
+    head_sha TEXT,
+    path TEXT NOT NULL,
+    status TEXT,                  -- 'added' | 'modified' | 'removed' | 'renamed'
+    additions INTEGER,
+    deletions INTEGER,
+    changes INTEGER,
+    blob_url TEXT,                -- GitHub のファイル blob URL
+    PRIMARY KEY (repo, issue_no, path)
+);
+
 CREATE TABLE IF NOT EXISTS chunks (
     id BIGSERIAL PRIMARY KEY,
     chunk_key TEXT NOT NULL,       -- 由来を表す自然キー（doc:repo:path 等）
@@ -190,6 +206,10 @@ def migrate(conn: psycopg.Connection, settings: Settings) -> None:
         conn.commit()
         log.info("pgroonga index on symbols created with default tokenizer (TokenBigram)")
 
+    # --- Step 6: PR 変更ファイルマップ（issue #54） ---
+    # pr_changes テーブルは CREATE TABLE IF NOT EXISTS で自動生成されるため
+    # 追加の ALTER は不要。
+
 
 def get_cursor(conn: psycopg.Connection, repo: str, kind: str) -> str | None:
     with conn.cursor() as cur:
@@ -294,6 +314,100 @@ def get_issue_item_count(conn: psycopg.Connection, repo: str) -> int:
         )
         row = cur.fetchone()
         return row[0] if row else 0
+
+
+def get_pr_changes(
+    conn: psycopg.Connection, repo: str, issue_no: int
+) -> tuple[list[dict], str | None]:
+    """PR の変更ファイルマップを取得する（issue #54）。
+
+    Returns:
+        (files, head_sha) のタプル。
+        files: ファイル一覧（path / status / additions / deletions / changes / blob_url）
+        head_sha: PR の head_sha（全ファイル共通）
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT path, status, additions, deletions, changes, blob_url
+            FROM pr_changes
+            WHERE repo = %s AND issue_no = %s
+            ORDER BY path
+            """,
+            (repo, issue_no),
+        )
+        files = [
+            {
+                "path": r[0],
+                "status": r[1],
+                "additions": r[2],
+                "deletions": r[3],
+                "changes": r[4],
+                "blob_url": r[5],
+            }
+            for r in cur.fetchall()
+        ]
+        # head_sha を別途取得（全行共通のため 1 件だけ取る）
+        head_sha = None
+        if files:
+            cur.execute(
+                "SELECT head_sha FROM pr_changes WHERE repo = %s AND issue_no = %s LIMIT 1",
+                (repo, issue_no),
+            )
+            row = cur.fetchone()
+            if row:
+                head_sha = row[0]
+    return files, head_sha
+
+
+def upsert_pr_changes(
+    conn: psycopg.Connection,
+    repo: str,
+    issue_no: int,
+    head_sha: str,
+    files: list[dict],
+) -> None:
+    """PR の変更ファイルマップを upsert する（issue #54）。
+
+    既存行を全削除してから新しいファイル一覧を挿入する（force-push 等で
+    ファイル構成が変わるため、差分更新ではなく全置換）。
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "DELETE FROM pr_changes WHERE repo = %s AND issue_no = %s",
+            (repo, issue_no),
+        )
+        for f in files:
+            cur.execute(
+                """
+                INSERT INTO pr_changes (repo, issue_no, head_sha, path, status,
+                                        additions, deletions, changes, blob_url)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    repo, issue_no, head_sha,
+                    f["filename"],
+                    f.get("status"),
+                    f.get("additions"),
+                    f.get("deletions"),
+                    f.get("changes"),
+                    f.get("blob_url"),
+                ),
+            )
+    conn.commit()
+
+
+def get_pr_head_sha(
+    conn: psycopg.Connection, repo: str, issue_no: int
+) -> str | None:
+    """PR の保存済み head_sha を取得する（変更検知用。issue #54）。"""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT head_sha FROM pr_changes WHERE repo = %s AND issue_no = %s LIMIT 1",
+            (repo, issue_no),
+        )
+        row = cur.fetchone()
+        return row[0] if row else None
 
 
 def vec_literal(vec) -> str:
