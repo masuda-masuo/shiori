@@ -129,7 +129,6 @@ class _GitHubAuth(httpx.Auth):
         yield request
 
 
-
 def sync_docs(
     settings: Settings,
     conn: psycopg.Connection,
