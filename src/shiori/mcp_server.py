@@ -1,17 +1,17 @@
 """MCP サーバー（詳細設計/06）。
 
-ツール構成（決定: semantic / keyword は分離を維持。semantic が入口で内部ハイブリッド）:
-- semantic_search(query, filters?)  : 意味検索（内部で RRF ハイブリッド）。入口。
-- keyword_search(query, filters?)   : 完全一致寄りのキーワード検索（日本語対応）。
+ツール構成（決定: shiori_search が統合入口。keyword_search は厳密一致専用で分離維持）:
+- search(query, filters?)             : 意味＋キーワードのハイブリッド検索（入口ツール）。まずこれを使う。
+- keyword_search(query, filters?)     : 完全一致寄りのキーワード検索（日本語対応）。厳密一致が欲しいときに使う。
 - list_tree(path?, source_type?, extension?): 索引済みドキュメント＋コードファイルのツリー閲覧。
-- read_file(path, start?, end?)     : ローカルクローンからファイル（の一部）を取得。
+- read_file(path, start?, end?)       : ローカルクローンからファイル（の一部）を取得。
 - read_issue(number, repo?, exclude_noise_bots?) : issue/PR スレッド全体を取得。
-- pr_changes(number, repo?)         : PR の変更ファイルマップ（ポインタ）を返す（issue #54）。
-- ingest(rebuild?, repo?)           : docs / issue / PR / code の差分同期（索引更新）。
-- status()                          : 索引の鮮度と健全性（最終同期時刻・件数内訳・警告）。
+- pr_changes(number, repo?)           : PR の変更ファイルマップ（ポインタ）を返す（issue #54）。
+- ingest(rebuild?, repo?)             : docs / issue / PR / code の差分同期（索引更新）。
+- status()                            : 索引の鮮度と健全性（最終同期時刻・件数内訳・警告）。
 
 実際に MCP クライアントに公開されるツール名は shiori_ 接頭辞付き（issue #8）。
-filesystem 等の他 MCP サーバーとの名前衰突を避けるため。関数名は据え置き。
+filesystem 等の他 MCP サーバーとの名前衝突を避けるため。関数名は据え置き。
 
 検索結果は常にポインタ＋スニペット＋ GitHub URL。全文は read 系で取得する。
 
@@ -272,22 +272,22 @@ mcp = FastMCP(
     instructions=(
         "GitHub リポジトリの知識（Markdown ドキュメントと issue/PR の議論、"
         "およびソースコード）へのハイブリッド検索。"
-        "まず shiori_semantic_search で検索し、ポインタ＋スニペットを得て、"
-        "必要な範囲だけ shiori_read_file / shiori_read_issue で取得すること。固有名詞・API 名・"
-        "エラーコード・関数名等の厳密一致には shiori_keyword_search を使う。"
+        "まず shiori_search で検索し、ポインタ＋スニペットを得て、"
+        "必要な範囲だけ shiori_read_file / shiori_read_issue で取得すること。"
+        "固有名詞・API 名・エラーコード・関数名等の厳密一致には shiori_keyword_search を使う。"
         "索引が古い・未索引と思われる場合（直近の変更がヒットしない等）は"
         "shiori_ingest を呼んで差分同期する。索引が最新かどうかの確認は shiori_status。"
         "コードファイルは shiori_list_tree で発見し shiori_read_file で読める"
         "（path, start_line, end_line 指定可）。"
         "shiori_list_tree は source_type='doc'/'code' や extension='.py' で絞り込み可能。"
-        "コードの検索は shiori_semantic_search / shiori_keyword_search で可能"
+        "コードの検索は shiori_search / shiori_keyword_search で可能"
         "（source_type='code' で絞り込み可、prog_lang フィルタで言語指定も可）。"
         "PR の変更ファイルマップは shiori_pr_changes で取得できる。"
         "\n"
         "■ 二ストア・モデル（情報の出所）\n"
         "shiori は 2 つの独立したデータソースを持つ:\n"
         "1. 索引（Postgres/pgvector/pgroonga）\n"
-        "   - shiori_semantic_search / shiori_keyword_search: 埋め込み＋全文検索\n"
+        "   - shiori_search / shiori_keyword_search: 埋め込み＋全文検索\n"
         "   - shiori_read_issue: issue/PR スレッド（索引済みのもののみ）\n"
         "   - shiori_list_tree (source_type='doc'): 索引済み doc_files テーブル\n"
         "   - shiori_pr_changes: PR 変更ファイルマップ（索引済みメタデータ）\n"
@@ -301,7 +301,7 @@ mcp = FastMCP(
 )
 
 
-@mcp.tool(name="shiori_semantic_search")
+@mcp.tool(name="shiori_search")
 def semantic_search(
     query: str,
     source_type: str | None = None,
@@ -340,7 +340,8 @@ def keyword_search(
     top_k: int | None = None,
 ) -> list[dict[str, Any]]:
     """キーワード検索（日本語対応トークナイズ）。関数名・API 名・エラーコード・設定キーなど
-    固有の文字列の一致に強い。semantic_search で取りこぼした厳密な語に使う。
+    固有の文字列の厳密一致に強い。通常は shiori_search を使い、厳密一致が必要なときに
+    このツールを使うこと。
     code チャンクは content（シグネチャ＋docstring）と symbols（識別子分割済み文字列）の
     OR 検索になるため、camelCase/snake_case の部分一致でも発見できる。"""
     with _conn() as conn:
