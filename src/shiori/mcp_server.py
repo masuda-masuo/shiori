@@ -515,7 +515,7 @@ def pr_changes(number: int, repo: str | None = None) -> dict[str, Any]:
     target = _resolve_repo(repo)
     with _conn() as conn:
         files, head_sha = db.get_pr_changes(conn, target, number)
-    if not files:
+    if head_sha is None:
         raise ValueError(
             f"PR #{number} の変更ファイルマップが見つかりません。"
             "shiori_ingest で同期してください。"
