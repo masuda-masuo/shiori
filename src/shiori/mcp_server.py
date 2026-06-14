@@ -404,7 +404,8 @@ def list_tree(
         base = os.path.realpath(settings.repo_dir(target))
         prefix = path.rstrip("/") if path else ""
         code_paths = _walk_code_files(base, prefix, extension=extension)
-        for p in sorted(code_paths):
+        # 最終ソートがあるためコード側だけの事前ソートは不要
+        for p in code_paths:
             if p not in seen:
                 seen.add(p)
                 entries.append({"path": p, "source": "code"})

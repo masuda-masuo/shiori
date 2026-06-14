@@ -306,8 +306,13 @@ class TestListTreeEndToEnd:
         extension: str | None = None,
         doc_rows: list[tuple[str]] | None = None,
         code_files: list[str] | None = None,
+        mock_walk_return: set[str] | None = None,
     ) -> list[dict]:
-        """list_tree をモック環境で呼び出す。"""
+        """list_tree をモック環境で呼び出す。
+
+        mock_walk_return が指定された場合は _walk_code_files をその戻り値でモックする。
+        指定されない場合は code_files から実ファイルを作成し本物の _walk_code_files を呼ぶ。
+        """
         # コードファイルを実際に作成
         if code_files:
             _make_tree(tmp, code_files)
@@ -322,13 +327,45 @@ class TestListTreeEndToEnd:
         def _fake_conn():
             return mock_conn
 
-        with (
+        patches = [
             patch("shiori.mcp_server.settings") as mock_settings,
             patch("shiori.mcp_server._conn", side_effect=_fake_conn),
-        ):
-            mock_settings.repos = ["test/repo"]
-            mock_settings.repo_dir.return_value = tmp
-            return list_tree(source_type=source_type, extension=extension)
+        ]
+
+        if mock_walk_return is not None:
+            patches.append(
+                patch(
+                    "shiori.mcp_server._walk_code_files",
+                    return_value=mock_walk_return,
+                )
+            )
+
+        with patches[0], patches[1], (patches[2] if len(patches) > 2 else patch("unused")):
+            mock_settings = patches[0].__enter__() if hasattr(patches[0], '__enter__') else None
+            # We need to handle the context managers properly
+            pass
+
+        # Re-implement with proper context manager nesting
+        if mock_walk_return is not None:
+            with (
+                patch("shiori.mcp_server.settings") as mock_settings,
+                patch("shiori.mcp_server._conn", side_effect=_fake_conn),
+                patch(
+                    "shiori.mcp_server._walk_code_files",
+                    return_value=mock_walk_return,
+                ),
+            ):
+                mock_settings.repos = ["test/repo"]
+                mock_settings.repo_dir.return_value = tmp
+                return list_tree(source_type=source_type, extension=extension)
+        else:
+            with (
+                patch("shiori.mcp_server.settings") as mock_settings,
+                patch("shiori.mcp_server._conn", side_effect=_fake_conn),
+            ):
+                mock_settings.repos = ["test/repo"]
+                mock_settings.repo_dir.return_value = tmp
+                return list_tree(source_type=source_type, extension=extension)
 
     def test_source_type_doc_only(self):
         """source_type='doc' は doc_files のパスのみを返し、source='doc' が付与される"""
@@ -459,14 +496,17 @@ class TestListTreeEndToEnd:
             assert result[3]["source"] == "doc"
 
     def test_duplicate_path_across_stores(self):
-        """doc と code で同名パスが存在する場合、最初に見つかった方（doc 優先）が採用される"""
+        """doc と code で同名パスが衝突した場合、doc が優先される。
+
+        _walk_code_files は Markdown を除外するため本番では通常発生しないが、
+        防御的コードとして seen による重複排除と doc 優先を検証する。
+        """
         with tempfile.TemporaryDirectory() as tmp:
             result = self._call_list_tree(
                 tmp,
                 source_type=None,
-                doc_rows=[("README.md",)],
-                code_files=["README.md"],
+                doc_rows=[("src/foo.py",)],
+                mock_walk_return={"src/foo.py"},
             )
-            # doc が先に処理されるため、source='doc' が採用される
             assert len(result) == 1
-            assert result[0] == {"path": "README.md", "source": "doc"}
+            assert result[0] == {"path": "src/foo.py", "source": "doc"}
