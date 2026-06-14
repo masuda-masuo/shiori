@@ -106,11 +106,16 @@ class TestPropagateIssueState:
     issue_items.state 変更時に chunks.state を一括更新する。
     """
 
-    def test_propagate_state_to_chunks(self):
-        """指定した repo/issue_no の chunks.state を一括更新する。"""
+    def _mock_cursor(self, rowcount: int = 0):
         conn = MagicMock()
         cursor = MagicMock()
+        cursor.rowcount = rowcount
         conn.cursor.return_value.__enter__.return_value = cursor
+        return conn, cursor
+
+    def test_propagate_state_from_issue_items_to_all_chunks(self):
+        """issue_items の state を全 chunk に伝播する UPDATE が発行される。"""
+        conn, cursor = self._mock_cursor(rowcount=5)
 
         _propagate_issue_state(conn, "masuda-masuo/shiori", 50, "closed")
 
@@ -121,9 +126,7 @@ class TestPropagateIssueState:
 
     def test_propagate_state_none(self):
         """state=None も正しく伝播される（例: issue 本文が空のケース）。"""
-        conn = MagicMock()
-        cursor = MagicMock()
-        conn.cursor.return_value.__enter__.return_value = cursor
+        conn, cursor = self._mock_cursor(rowcount=0)
 
         _propagate_issue_state(conn, "masuda-masuo/shiori", 50, None)
 
@@ -134,9 +137,7 @@ class TestPropagateIssueState:
 
     def test_propagate_state_open_to_closed_transition(self):
         """open → closed の遷移が正しく伝播される。"""
-        conn = MagicMock()
-        cursor = MagicMock()
-        conn.cursor.return_value.__enter__.return_value = cursor
+        conn, cursor = self._mock_cursor(rowcount=3)
 
         _propagate_issue_state(conn, "masuda-masuo/shiori", 50, "open")
         _propagate_issue_state(conn, "masuda-masuo/shiori", 50, "closed")

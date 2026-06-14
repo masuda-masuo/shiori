@@ -129,6 +129,7 @@ class _GitHubAuth(httpx.Auth):
         yield request
 
 
+
 def sync_docs(
     settings: Settings,
     conn: psycopg.Connection,
@@ -481,6 +482,11 @@ def _propagate_issue_state(
             "UPDATE chunks SET state = %s WHERE repo = %s AND issue_no = %s",
             (state, repo, issue_no),
         )
+        if cur.rowcount:
+            log.debug(
+                "propagated state=%s to %d chunks (repo=%s, issue_no=%d)",
+                state, cur.rowcount, repo, issue_no,
+            )
 
 
 def _index_item(
