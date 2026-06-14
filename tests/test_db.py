@@ -133,12 +133,13 @@ class TestUpsertPrChanges:
         # DELETE + sentinel INSERT の 2 回
         assert cursor.execute.call_count == 2
 
-        # sentinel 行のパラメータを検証
+        # sentinel INSERT のパラメータを検証
+        # path='' は SQL に直書きのため、パラメータは (repo, issue_no, head_sha) の 3 要素
         sentinel_params = cursor.execute.call_args_list[1][0][1]
+        assert len(sentinel_params) == 3
         assert sentinel_params[0] == "o/r"       # repo
         assert sentinel_params[1] == 42           # issue_no
         assert sentinel_params[2] == "abc1234"    # head_sha
-        assert sentinel_params[3] == ""           # path (sentinel)
 
     def test_handles_none_fields(self):
         """blob_url 等が None でも正しく扱われる。"""
