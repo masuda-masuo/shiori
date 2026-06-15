@@ -7,42 +7,25 @@ from shiori.search import _rank_candidates, _sort_hits
 # _RESULT_COLS のインデックス（search.py の定数と一致）
 _COL_SOURCE_TYPE = 1
 _COL_STATE = 9
-_COL_CREATED_AT = 12
 _COL_UPDATED_AT = 13
 
 
 def _make_row(source_type, state=None, updated_at=None, created_at=None):
-    """_RESULT_COLS に合わせたモック row タプルを作る。
-
-    row = (id, source_type, repo, path, issue_no, comment_id, language,
-           heading_path, content, state, author, line, created_at, updated_at, url)
-    """
+    """_RESULT_COLS に合わせたモック row タプルを作る。"""
     from datetime import datetime, timezone
     return (
-        1,                           # id
-        source_type,                 # source_type
-        "test/repo",                 # repo
-        "dummy/path",                # path
-        None,                        # issue_no
-        None,                        # comment_id
-        "ja",                        # language
-        "heading",                   # heading_path
-        "content text",              # content
-        state,                       # state
-        "author",                    # author
-        None,                        # line
-        created_at,                  # created_at
-        updated_at,                  # updated_at
-        "https://example.com",       # url
+        1, source_type, "test/repo", "dummy/path", None, None,
+        "ja", "heading", "content text", state, "author", None,
+        created_at, updated_at, "https://example.com",
     )
 
 
-# _sort_hits tests
+# ── _sort_hits 後方互換テスト ──
 
 class TestSortHits:
-    """_sort_hits (backward compat)."""
+    """_sort_hits の振る舞い（後方互換）。"""
 
-    def _make_hits(self):
+    def _make_hits(self) -> list[dict]:
         return [
             {"source_type":"doc","repo":"test/repo","path":"docs/a.md","issue_no":None,"heading_path":"a","snippet":"aaa","language":"ja","state":"open","author":None,"line":None,"created_at":"2026-06-10T00:00:00+00:00","updated_at":"2026-06-12T00:00:00+00:00","url":"https://example.com/a","score":0.9},
             {"source_type":"issue","repo":"test/repo","path":None,"issue_no":1,"heading_path":None,"snippet":"bbb","language":"ja","state":"closed","author":"user1","line":None,"created_at":"2026-06-11T00:00:00+00:00","updated_at":"2026-06-13T00:00:00+00:00","url":"https://example.com/b","score":0.5},
@@ -100,10 +83,12 @@ class TestSortHits:
         assert result[1]["score"] == 0.9
 
 
-# _rank_candidates tests (issue #69)
+# ── _rank_candidates テスト（issue #69） ──
 
 class TestRankCandidates:
-    """source-aware pool-stage composite ranking."""
+    """source-aware な pool 段複合ランキングの振る舞い。"""
+
+    # ── 一次ソース（doc / code）: 関連度のみ ──
 
     def test_primary_sources_score_only(self):
         from datetime import datetime, timezone
@@ -116,6 +101,7 @@ class TestRankCandidates:
         assert method == "rrf"
 
     def test_primary_sources_ignore_date_sort_by(self):
+        """一次ソースでは sort_by=updated_at でもスコア順が維持される。"""
         from datetime import datetime, timezone
         ts_old = datetime(2026, 1, 1, tzinfo=timezone.utc)
         ts_new = datetime(2026, 6, 14, tzinfo=timezone.utc)
@@ -123,7 +109,9 @@ class TestRankCandidates:
         ranked = [(1, 0.9), (2, 0.5)]
         result, method = _rank_candidates(ranked, rows_by_id, sort_by="updated_at")
         assert [rid for rid, _ in result] == [1, 2]
-        assert method == "rrf+updated_at"
+        assert method == "rrf"
+
+    # ── 二次ソース（issue / pr_review）: 複合 tie-break ──
 
     def test_secondary_sources_score_primary(self):
         from datetime import datetime, timezone
@@ -159,6 +147,23 @@ class TestRankCandidates:
         result, _ = _rank_candidates(ranked, rows_by_id)
         assert [rid for rid, _ in result] == [1, 2]
 
+    # ── created_at は updated_at に集約（review #1） ──
+
+    def test_sort_by_created_at_same_as_updated_at(self):
+        """sort_by=created_at は updated_at と同じ tie-break を生成する。"""
+        from datetime import datetime, timezone
+        ts_old = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        ts_new = datetime(2026, 6, 14, tzinfo=timezone.utc)
+        rows_by_id = {1: _make_row("issue", state="open", updated_at=ts_old), 2: _make_row("issue", state="open", updated_at=ts_new)}
+        ranked = [(1, 0.5), (2, 0.5)]
+        result_ua, method_ua = _rank_candidates(ranked, rows_by_id, sort_by="updated_at")
+        result_ca, method_ca = _rank_candidates(ranked, rows_by_id, sort_by="created_at")
+        assert result_ua == result_ca
+        assert method_ua == "rrf"
+        assert method_ca == "rrf"
+
+    # ── 混合ソース ──
+
     def test_mixed_sources_score_primary(self):
         from datetime import datetime, timezone
         ts = datetime(2026, 6, 10, tzinfo=timezone.utc)
@@ -167,17 +172,16 @@ class TestRankCandidates:
         result, _ = _rank_candidates(ranked, rows_by_id)
         assert [rid for rid, _ in result] == [2, 3, 1]
 
-    def test_mixed_sources_tie_break_open_issue_beats_doc(self):
-        """At equal score, primary source comes before secondary (sentinel protection).
-        Primary sources (doc/code) use max sentinel values for tie-break elements,
-        preventing secondary state/updated_at from pushing them back unfairly.
-        """
+    def test_mixed_sources_primary_before_secondary_at_equal_score(self):
+        """同スコアでは一次ソースが sentinel により二次より前に来る。"""
         from datetime import datetime, timezone
         ts = datetime(2026, 6, 10, tzinfo=timezone.utc)
         rows_by_id = {1: _make_row("doc", state=None, updated_at=ts), 2: _make_row("issue", state="open", updated_at=ts)}
         ranked = [(1, 0.5), (2, 0.5)]
         result, _ = _rank_candidates(ranked, rows_by_id)
         assert [rid for rid, _ in result] == [1, 2]
+
+    # ── sort_order ──
 
     def test_sort_order_asc(self):
         from datetime import datetime, timezone
@@ -186,6 +190,19 @@ class TestRankCandidates:
         ranked = [(1, 0.3), (2, 0.8)]
         result, _ = _rank_candidates(ranked, rows_by_id, sort_order="asc")
         assert [rid for rid, _ in result] == [1, 2]
+
+    def test_sort_order_asc_secondary_reverses_composite(self):
+        """sort_order=asc 時は複合キー全体が反転し、closed→open・古い→新しい の順になる。"""
+        from datetime import datetime, timezone
+        ts_old = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        ts_new = datetime(2026, 6, 14, tzinfo=timezone.utc)
+        rows_by_id = {1: _make_row("issue", state="open", updated_at=ts_new), 2: _make_row("issue", state="closed", updated_at=ts_old)}
+        ranked = [(1, 0.5), (2, 0.5)]
+        result, _ = _rank_candidates(ranked, rows_by_id, sort_order="asc")
+        # asc: closed→open、古い→新しい
+        assert [rid for rid, _ in result] == [2, 1]
+
+    # ── 境界値・エッジケース ──
 
     def test_empty_candidates(self):
         result, method = _rank_candidates([], {})
@@ -201,10 +218,14 @@ class TestRankCandidates:
         assert result == [(1, 0.5)]
         assert method == "rrf"
 
-    def test_missing_row(self):
-        ranked = [(999, 0.5)]
-        result, _ = _rank_candidates(ranked, {})
-        assert result == [(999, 0.5)]
+    def test_missing_row_goes_last(self):
+        """rows_by_id に存在しない ID は最下位に沈む（防御的フォールバック）。"""
+        from datetime import datetime, timezone
+        ts = datetime(2026, 6, 10, tzinfo=timezone.utc)
+        rows_by_id = {1: _make_row("issue", state="open", updated_at=ts)}
+        ranked = [(999, 0.5), (1, 0.5)]
+        result, _ = _rank_candidates(ranked, rows_by_id)
+        assert [rid for rid, _ in result] == [1, 999]
 
     def test_state_none_secondary(self):
         from datetime import datetime, timezone
@@ -222,17 +243,15 @@ class TestRankCandidates:
         result, _ = _rank_candidates(ranked, rows_by_id)
         assert [rid for rid, _ in result] == [2, 1]
 
-    def test_ranking_method_score(self):
-        result, method = _rank_candidates([], {})
-        assert method == "rrf"
+    # ── ranking_method ──
 
-    def test_ranking_method_updated_at(self):
-        result, method = _rank_candidates([], {}, sort_by="updated_at")
-        assert method == "rrf+updated_at"
+    def test_ranking_method_always_rrf(self):
+        """sort_by に関わらず method は常に "rrf"。"""
+        for sb in ("score", "updated_at", "created_at"):
+            _, method = _rank_candidates([], {}, sort_by=sb)
+            assert method == "rrf", f"sort_by={sb} should return 'rrf'"
 
-    def test_ranking_method_created_at(self):
-        result, method = _rank_candidates([], {}, sort_by="created_at")
-        assert method == "rrf+created_at"
+    # ── pool 段適用の検証 ──
 
     def test_pool_stage_allows_newer_closed_to_enter_top_k(self):
         from datetime import datetime, timezone
