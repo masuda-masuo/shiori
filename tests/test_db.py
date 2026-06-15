@@ -216,7 +216,11 @@ class TestMigrateLight:
         return conn, cursor
 
     def test_creates_tables_and_btree_indexes_only(self):
-        """migrate_light は SCHEMA_SQL を実行するが、HNSW/pgroonga は作らない。"""
+        """migrate_light は SCHEMA_SQL を実行するが、HNSW 索引は作らない。
+
+        SCHEMA_SQL 自体には CREATE EXTENSION pgroonga が含まれるが、
+        それは拡張のロードであって索引作成ではない。
+        """
         from shiori.config import Settings
         conn, cursor = self._mock_conn()
 
@@ -233,8 +237,8 @@ class TestMigrateLight:
         assert "CREATE TABLE IF NOT EXISTS chunks" in joined
         # HNSW 索引は作らない
         assert "hnsw" not in joined.lower()
-        # pgroonga 索引は作らない
-        assert "pgroonga" not in joined.lower()
+        # pgroonga 索引（CREATE INDEX ... USING pgroonga）は作らない
+        assert "USING pgroonga" not in joined.upper()
 
     def test_runs_alter_statements(self):
         """migrate_light は ALTER 文も実行する。"""
@@ -277,10 +281,8 @@ class TestCreateHeavyIndexes:
         ]
         joined = " ".join(executed_sqls)
         assert "hnsw" in joined.lower()
-        assert "pgroonga" in joined.lower()
-        # content と symbols の両方に pgroonga 索引
-        pgroonga_calls = [s for s in executed_sqls if "pgroonga" in s.lower()]
-        assert len(pgroonga_calls) >= 2  # content + symbols (TokenMecab fallback 含む)
+        # pgroonga 索引（CREATE INDEX ... USING pgroonga）が含まれる
+        assert "USING pgroonga" in joined.upper()
 
 
 class TestDropHeavyIndexes:
@@ -406,6 +408,9 @@ class TestBulkInsertChunks:
         bulk_insert_chunks(conn, rows)
 
         params = cursor.executemany.call_args[0][1][0]
-        # embedding は 10 番目の要素（0-indexed: 9）
-        embedding_str = params[9]
+        # embedding は 11 番目の要素（0-indexed: 10）
+        # 0:chunk_key 1:chunk_index 2:source_type 3:repo 4:path
+        # 5:issue_no 6:comment_id 7:language 8:heading_path 9:content
+        # 10:embedding
+        embedding_str = params[10]
         assert embedding_str == "[0.100000,0.200000,0.300000]"
