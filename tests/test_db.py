@@ -238,7 +238,7 @@ class TestMigrateLight:
         # HNSW 索引は作らない
         assert "hnsw" not in joined.lower()
         # pgroonga 索引（CREATE INDEX ... USING pgroonga）は作らない
-        assert "USING pgroonga" not in joined.upper()
+        assert "create index" not in joined.lower() or "using pgroonga" not in joined.lower()
 
     def test_runs_alter_statements(self):
         """migrate_light は ALTER 文も実行する。"""
@@ -279,10 +279,10 @@ class TestCreateHeavyIndexes:
             for call_args in cursor.execute.call_args_list
             if call_args[0]
         ]
-        joined = " ".join(executed_sqls)
-        assert "hnsw" in joined.lower()
+        joined_lower = " ".join(executed_sqls).lower()
+        assert "hnsw" in joined_lower
         # pgroonga 索引（CREATE INDEX ... USING pgroonga）が含まれる
-        assert "USING pgroonga" in joined.upper()
+        assert "using pgroonga" in joined_lower
 
 
 class TestDropHeavyIndexes:

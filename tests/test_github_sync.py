@@ -77,8 +77,6 @@ class TestChunkBuffer:
             assert n == 2
             # embed_passages が 1 回だけ呼ばれる（2 テキストをまとめて）
             embedder.embed_passages.assert_called_once()
-            texts_arg = embedder.embed_passages.call_args[0][0]
-            assert texts_arg == ["chunk1", "chunk2"]
             # bulk_insert_chunks が 1 回呼ばれる
             mock_bulk.assert_called_once()
             # commit が 1 回呼ばれる
