@@ -41,6 +41,12 @@ _COL_STATE = 9
 _COL_CREATED_AT = 12
 _COL_UPDATED_AT = 13
 
+# 一次ソース（doc/code）の複合キー用 sentinel。
+# スコアが同点の二次ソースより不当に後回しにされないよう、
+# スコア以外のすべての tie-break 要素を中立な最大値にする。
+_PRIMARY_SP = -1          # state priority: -1 → -(-1)=1 → open(0)/closed(1)/none(2) のいずれより優先
+_PRIMARY_DATE = "9999"    # いかなる ISO 日付文字列よりも大きい sentinel
+
 
 @dataclass
 class SearchHit:
@@ -148,6 +154,8 @@ def _rank_candidates(
 
     ランキング方針（docs/design/05）:
     - 一次ソース（doc / code）: 関連度スコアのみ。日付系 sort_by は無効（no-op）。
+      スコア以外の tie-break 要素は中立な最大値 sentinel を用い、
+      二次ソースより不当に後回しにされない。
     - 二次ソース（issue / pr_review）: 関連度主＋state / updated_at の tie-break。
       同スコア帯では open → 新着順に並ぶ。
     - sort_by="score"（既定）で後方互換を維持。非 "score" 指定も二次 tie-break に限定され、
@@ -172,9 +180,11 @@ def _rank_candidates(
 
         source_type = row[_COL_SOURCE_TYPE]
 
-        # 一次ソース（doc / code）: スコアのみ、tie-break 信号は無効
+        # 一次ソース（doc / code）: スコアのみ。
+        # スコア以外の tie-break 要素は sentinel で中立化し、
+        # 二次ソースの state / updated_at により不当に後回しされないようにする。
         if source_type in ("doc", "code"):
-            return (score, 0, "")
+            return (score, _PRIMARY_SP, _PRIMARY_DATE)
 
         # 二次ソース（issue / pr_review）: 複合 tie-break
         st = row[_COL_STATE]
