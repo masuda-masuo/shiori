@@ -425,17 +425,16 @@ def sync_code(
 # ---------------------------------------------------------------------------
 
 
-def _api_pages(
-    client: httpx.Client, url: str, params: dict
-) -> "list[dict]":
+def _api_pages(client: httpx.Client, url: str, params: dict) -> "list[dict]":
     """Link ヘッダに従って全ページを集める。"""
     items: list[dict] = []
+    next_params: dict | None = params
     while url:
-        resp = client.get(url, params=params)
+        resp = client.get(url, params=next_params)
         resp.raise_for_status()
         items.extend(resp.json())
         url = resp.links.get("next", {}).get("url")
-        params = {}  # next URL に含まれる
+        next_params = None   # ← {} ではなく None。next URL の query をそのまま使う
     return items
 
 
