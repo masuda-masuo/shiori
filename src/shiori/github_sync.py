@@ -13,6 +13,8 @@
 - PR の diff 自体は索引しない。レビューコメントには diff_hunk を文脈として付与する。
 - code は sync_docs と同一クローンを共有し、sha デルタで変化ファイルのみ再索引する（issue #33）。
 - PR 変更ファイルマップはメタデータのみ同期・保持し、コンテンツ（patch）は GitHub MCP に委譲する（issue #54）。
+- 初回／rebuild のバルク経路では、ChunkBuffer により埋め込みをファイル横断でバッチ化し、
+  チャンク挿入をバルク化＋commit を粗くする（issue #72）。
 認証は TokenProvider 抽象経由（詳細設計/09）。git は http.extraHeader でトークンを注入し、
 API は httpx の Auth フックでリクエスト毎に注入する。
 """
@@ -39,6 +41,7 @@ from .chunking import (
 )
 from .config import Settings
 from .db import (
+    bulk_insert_chunks,
     delete_chunks_by_key,
     get_cursor,
     get_pr_head_sha,
@@ -68,6 +71,74 @@ def _should_index(is_bot: bool, author: str | None, settings: Settings) -> bool:
     if author and author.lower() in settings.index_bot_logins:
         return True
     return False
+
+
+# ---------------------------------------------------------------------------
+# ChunkBuffer: バルク経路用の埋め込み・挿入バッファ（issue #72）
+# ---------------------------------------------------------------------------
+
+class ChunkBuffer:
+    """チャンクを蓄積し、バッチ埋め込み＋バルク挿入＋粗粒度 commit で高速化する。
+
+    増分経路では使わず、初回／rebuild（バルク経路）でのみ使用する。
+    """
+
+    def __init__(
+        self,
+        conn: psycopg.Connection,
+        embedder: Embedder,
+        batch_size: int = 500,
+    ):
+        self._conn = conn
+        self._embedder = embedder
+        self._batch_size = batch_size
+        self._items: list[dict] = []
+        self._texts: list[str] = []
+
+    def add(self, *, chunk_key: str, chunk_index: int, source_type: str,
+            repo: str, content: str,
+            path: str | None = None, issue_no: int | None = None,
+            comment_id: int | None = None, language: str | None = None,
+            heading_path: str | None = None, state: str | None = None,
+            author: str | None = None, line: int | None = None,
+            end_line: int | None = None, commit_sha: str | None = None,
+            prog_lang: str | None = None, symbols: str | None = None,
+            created_at=None, updated_at=None, url: str | None = None,
+    ) -> None:
+        """チャンクをバッファに追加する。batch_size に達したら自動 flush。"""
+        self._items.append({
+            "chunk_key": chunk_key, "chunk_index": chunk_index,
+            "source_type": source_type, "repo": repo, "content": content,
+            "path": path, "issue_no": issue_no, "comment_id": comment_id,
+            "language": language, "heading_path": heading_path,
+            "state": state, "author": author, "line": line,
+            "end_line": end_line, "commit_sha": commit_sha,
+            "prog_lang": prog_lang, "symbols": symbols,
+            "created_at": created_at, "updated_at": updated_at,
+            "url": url,
+            # embedding プレースホルダ（flush 時に埋める）
+            "embedding": None,
+        })
+        self._texts.append(content)
+        if len(self._items) >= self._batch_size:
+            self.flush()
+
+    def flush(self) -> int:
+        """バッファをフラッシュ: 一括埋め込み → バルク挿入 → commit。返り値は挿入件数。"""
+        if not self._items:
+            return 0
+        n = len(self._items)
+        vectors = self._embedder.embed_passages(
+            self._texts, batch_size=min(len(self._texts), 256),
+        )
+        for item, vec in zip(self._items, vectors):
+            item["embedding"] = vec
+        bulk_insert_chunks(self._conn, self._items)
+        self._conn.commit()
+        log.info("ChunkBuffer flushed: %d chunks", n)
+        self._items.clear()
+        self._texts.clear()
+        return n
 
 
 # ---------------------------------------------------------------------------
@@ -143,8 +214,13 @@ def sync_docs(
     embedder: Embedder,
     repo: str,
     provider: TokenProvider,
+    buffer: ChunkBuffer | None = None,
 ) -> int:
-    """リポジトリの Markdown を同期し、変化分だけ索引する。返り値は更新ファイル数。"""
+    """リポジトリの Markdown を同期し、変化分だけ索引する。返り値は更新ファイル数。
+
+    buffer が指定された場合（バルク経路）、埋め込み・挿入をバッファに委譲し、
+    commit もバッファ側で行う。
+    """
     repo_dir = settings.repo_dir(repo)
     remote = f"https://github.com/{repo}.git"
     auth = _auth_args(provider)
@@ -196,25 +272,43 @@ def sync_docs(
         chunk_key = f"doc:{repo}:{path}"
         delete_chunks_by_key(conn, chunk_key)
         if chunks:
-            vectors = embedder.embed_passages([c.content for c in chunks])
-            for c, v in zip(chunks, vectors):
-                anchor = ""
-                if c.heading_path:
-                    last = c.heading_path.split(" > ")[-1]
-                    anchor = "#" + last.lower().replace(" ", "-")
-                insert_chunk(
-                    conn,
-                    chunk_key=chunk_key,
-                    chunk_index=c.chunk_index,
-                    source_type="doc",
-                    repo=repo,
-                    path=path,
-                    language=language,
-                    heading_path=c.heading_path,
-                    content=c.content,
-                    embedding=v,
-                    url=f"https://github.com/{repo}/blob/{default_branch}/{path}{anchor}",
-                )
+            if buffer is not None:
+                for c in chunks:
+                    anchor = ""
+                    if c.heading_path:
+                        last = c.heading_path.split(" > ")[-1]
+                        anchor = "#" + last.lower().replace(" ", "-")
+                    buffer.add(
+                        chunk_key=chunk_key,
+                        chunk_index=c.chunk_index,
+                        source_type="doc",
+                        repo=repo,
+                        path=path,
+                        language=language,
+                        heading_path=c.heading_path,
+                        content=c.content,
+                        url=f"https://github.com/{repo}/blob/{default_branch}/{path}{anchor}",
+                    )
+            else:
+                vectors = embedder.embed_passages([c.content for c in chunks])
+                for c, v in zip(chunks, vectors):
+                    anchor = ""
+                    if c.heading_path:
+                        last = c.heading_path.split(" > ")[-1]
+                        anchor = "#" + last.lower().replace(" ", "-")
+                    insert_chunk(
+                        conn,
+                        chunk_key=chunk_key,
+                        chunk_index=c.chunk_index,
+                        source_type="doc",
+                        repo=repo,
+                        path=path,
+                        language=language,
+                        heading_path=c.heading_path,
+                        content=c.content,
+                        embedding=v,
+                        url=f"https://github.com/{repo}/blob/{default_branch}/{path}{anchor}",
+                    )
         with conn.cursor() as cur:
             cur.execute(
                 """
@@ -225,10 +319,12 @@ def sync_docs(
                 """,
                 (repo, path, current[path], language),
             )
-        conn.commit()
+        if buffer is None:
+            conn.commit()
         log.info("indexed doc %s (%d chunks)", path, len(chunks))
 
-    conn.commit()
+    if buffer is None:
+        conn.commit()
     set_cursor(conn, repo, "docs", head)
     return len(changed) + len(removed)
 
@@ -293,6 +389,7 @@ def sync_code(
     embedder: Embedder,
     repo: str,
     provider: TokenProvider,
+    buffer: ChunkBuffer | None = None,
 ) -> int:
     """リポジトリのソースコードを同期し、変化分だけ索引する（詳細設計/10 Step 3）。
 
@@ -300,6 +397,8 @@ def sync_code(
     sha デルタで変化したファイルのみ再チャンク・再埋め込みする。
     HEAD sha を sync_state(kind='code') カーソルに保存し、HEAD 不変時は walk を
     スキップする（設計 10 決定 8 のカーソル管理）。
+
+    buffer が指定された場合（バルク経路）、埋め込み・挿入をバッファに委譲する。
 
     Returns
     -------
@@ -373,33 +472,59 @@ def sync_code(
 
         if chunks:
             prog_lang = _detect_prog_lang(path)
-            vectors = embedder.embed_passages([c.content for c in chunks])
-            for c, v in zip(chunks, vectors):
-                # permalink は commit_sha を使用（行ズレに強い。should-fix #5）
-                url = (
-                    f"https://github.com/{repo}/blob/{head}/{path}"
-                    f"#L{c.start_line}-L{c.end_line}"
-                    if c.start_line and c.end_line
-                    else f"https://github.com/{repo}/blob/{head}/{path}"
-                )
-                insert_chunk(
-                    conn,
-                    chunk_key=chunk_key,
-                    chunk_index=c.chunk_index,
-                    source_type="code",
-                    repo=repo,
-                    path=path,
-                    language=None,  # code は language=NULL（決定4）
-                    heading_path=c.heading_path,
-                    content=c.content,
-                    embedding=v,
-                    line=c.start_line,
-                    end_line=c.end_line,
-                    commit_sha=head,
-                    prog_lang=prog_lang,
-                    symbols=c.symbols,
-                    url=url,
-                )
+            if buffer is not None:
+                for c in chunks:
+                    # permalink は commit_sha を使用（行ズレに強い。should-fix #5）
+                    url = (
+                        f"https://github.com/{repo}/blob/{head}/{path}"
+                        f"#L{c.start_line}-L{c.end_line}"
+                        if c.start_line and c.end_line
+                        else f"https://github.com/{repo}/blob/{head}/{path}"
+                    )
+                    buffer.add(
+                        chunk_key=chunk_key,
+                        chunk_index=c.chunk_index,
+                        source_type="code",
+                        repo=repo,
+                        path=path,
+                        language=None,  # code は language=NULL（決定4）
+                        heading_path=c.heading_path,
+                        content=c.content,
+                        line=c.start_line,
+                        end_line=c.end_line,
+                        commit_sha=head,
+                        prog_lang=prog_lang,
+                        symbols=c.symbols,
+                        url=url,
+                    )
+            else:
+                vectors = embedder.embed_passages([c.content for c in chunks])
+                for c, v in zip(chunks, vectors):
+                    # permalink は commit_sha を使用（行ズレに強い。should-fix #5）
+                    url = (
+                        f"https://github.com/{repo}/blob/{head}/{path}"
+                        f"#L{c.start_line}-L{c.end_line}"
+                        if c.start_line and c.end_line
+                        else f"https://github.com/{repo}/blob/{head}/{path}"
+                    )
+                    insert_chunk(
+                        conn,
+                        chunk_key=chunk_key,
+                        chunk_index=c.chunk_index,
+                        source_type="code",
+                        repo=repo,
+                        path=path,
+                        language=None,  # code は language=NULL（決定4）
+                        heading_path=c.heading_path,
+                        content=c.content,
+                        embedding=v,
+                        line=c.start_line,
+                        end_line=c.end_line,
+                        commit_sha=head,
+                        prog_lang=prog_lang,
+                        symbols=c.symbols,
+                        url=url,
+                    )
 
         # doc_files に kind='code' で記録
         with conn.cursor() as cur:
@@ -412,10 +537,12 @@ def sync_code(
                 """,
                 (repo, path, current[path]),
             )
-        conn.commit()
+        if buffer is None:
+            conn.commit()
         log.info("indexed code %s (%d chunks, %s)", path, len(chunks), prog_lang or "?")
 
-    conn.commit()
+    if buffer is None:
+        conn.commit()
     set_cursor(conn, repo, "code", head)
     return len(changed) + len(removed)
 
@@ -423,7 +550,6 @@ def sync_code(
 # ---------------------------------------------------------------------------
 # issues / PR (GitHub API)
 # ---------------------------------------------------------------------------
-
 
 def _api_pages(client: httpx.Client, url: str, params: dict) -> "list[dict]":
     """Link ヘッダに従って全ページを集める。"""
@@ -514,33 +640,54 @@ def _index_item(
     created_at,
     updated_at,
     url: str | None,
+    buffer: ChunkBuffer | None = None,
 ) -> None:
     chunks = split_issue_text(title, body, settings.chunk_max_chars)
     delete_chunks_by_key(conn, chunk_key)
     if not chunks:
         return
     language = detect_language((title or "") + "\n" + (body or ""))
-    vectors = embedder.embed_passages([c.content for c in chunks])
-    for c, v in zip(chunks, vectors):
-        insert_chunk(
-            conn,
-            chunk_key=chunk_key,
-            chunk_index=c.chunk_index,
-            source_type=source_type,
-            repo=repo,
-            path=path,
-            issue_no=issue_no,
-            comment_id=comment_id,
-            language=language,
-            content=c.content,
-            embedding=v,
-            state=state,
-            author=author,
-            line=line,
-            created_at=created_at,
-            updated_at=updated_at,
-            url=url,
-        )
+    if buffer is not None:
+        for c in chunks:
+            buffer.add(
+                chunk_key=chunk_key,
+                chunk_index=c.chunk_index,
+                source_type=source_type,
+                repo=repo,
+                path=path,
+                issue_no=issue_no,
+                comment_id=comment_id,
+                language=language,
+                content=c.content,
+                state=state,
+                author=author,
+                line=line,
+                created_at=created_at,
+                updated_at=updated_at,
+                url=url,
+            )
+    else:
+        vectors = embedder.embed_passages([c.content for c in chunks])
+        for c, v in zip(chunks, vectors):
+            insert_chunk(
+                conn,
+                chunk_key=chunk_key,
+                chunk_index=c.chunk_index,
+                source_type=source_type,
+                repo=repo,
+                path=path,
+                issue_no=issue_no,
+                comment_id=comment_id,
+                language=language,
+                content=c.content,
+                embedding=v,
+                state=state,
+                author=author,
+                line=line,
+                created_at=created_at,
+                updated_at=updated_at,
+                url=url,
+            )
 
 
 def _sync_pr_changes(
@@ -600,8 +747,13 @@ def sync_issues(
     embedder: Embedder,
     repo: str,
     provider: TokenProvider,
+    buffer: ChunkBuffer | None = None,
 ) -> int:
-    """issue / PR / コメント / レビューコメントを差分同期し索引する。"""
+    """issue / PR / コメント / レビューコメントを差分同期し索引する。
+
+    buffer が指定された場合（バルク経路）、埋め込み・挿入をバッファに委譲し、
+    commit 粒度を粗くする。
+    """
     headers = {
         "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
@@ -656,12 +808,14 @@ def sync_issues(
                     created_at=it.get("created_at"),
                     updated_at=it.get("updated_at"),
                     url=it.get("html_url"),
+                    buffer=buffer,
                 )
                 n_indexed += 1
             # PR の場合は変更ファイルマップも同期
             if kind == "pr":
                 _sync_pr_changes(client, conn, repo, no)
-            conn.commit()
+            if buffer is None:
+                conn.commit()
         if items:
             set_cursor(conn, repo, "issues", items[-1]["updated_at"])
 
@@ -693,9 +847,11 @@ def sync_issues(
                     state=state, author=author, path=None, line=None,
                     created_at=c.get("created_at"), updated_at=c.get("updated_at"),
                     url=c.get("html_url"),
+                    buffer=buffer,
                 )
                 n_indexed += 1
-            conn.commit()
+            if buffer is None:
+                conn.commit()
         if comments:
             set_cursor(conn, repo, "issue_comments", comments[-1]["updated_at"])
 
@@ -734,9 +890,11 @@ def sync_issues(
                     path=c.get("path"), line=line,
                     created_at=c.get("created_at"), updated_at=c.get("updated_at"),
                     url=c.get("html_url"),
+                    buffer=buffer,
                 )
                 n_indexed += 1
-            conn.commit()
+            if buffer is None:
+                conn.commit()
         if reviews:
             set_cursor(conn, repo, "pr_review_comments", reviews[-1]["updated_at"])
 

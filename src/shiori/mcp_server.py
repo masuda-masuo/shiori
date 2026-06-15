@@ -31,6 +31,10 @@ code 索引（issue #33）は SHIORI_INDEX_CODE=true で有効化。sync_docs �
 セキュリティ（issue #63）:
 - _do_sync の repo 引数は settings.repos と照合し、allowlist 外は拒否。
 - shiori_ingest の rebuild=True は SHIORI_ALLOW_REBUILD=true 時のみ許可。
+
+バルク経路最適化（issue #72）:
+  初回または rebuild では、重い索引（HNSW／pgroonga）をロード後に一括作成し、
+  埋め込みをファイル横断バッチ化、チャンク挿入をバルク化する。
 """
 
 from __future__ import annotations
@@ -47,7 +51,7 @@ from . import db, search
 from .config import Settings, load_settings
 from .embedding import Embedder
 from .github_auth import build_token_provider
-from .github_sync import sync_code, sync_docs, sync_issues
+from .github_sync import ChunkBuffer, sync_code, sync_docs, sync_issues
 
 log = logging.getLogger(__name__)
 
@@ -59,6 +63,9 @@ _sync_lock = threading.Lock()
 # PostgreSQL advisory lock キー（プロセス横断排他。ingest.py と共有）
 # 'SHIO' の ASCII コード列を 32bit に詰めた値
 SYNC_LOCK_KEY = 0x5348494F
+
+# バルク経路の ChunkBuffer フラッシュ閾値（issue #72）
+_BULK_BUFFER_SIZE = 500
 
 
 def _get_embedder() -> Embedder:
@@ -103,6 +110,18 @@ def _make_filters(
     }
 
 
+def _is_bulk_path(conn, rebuild: bool) -> bool:
+    """バルク経路か判定する: rebuild=True または chunks テーブルが空／未存在（issue #72）。"""
+    if rebuild:
+        return True
+    with conn.cursor() as cur:
+        cur.execute("SELECT to_regclass('chunks')")
+        if cur.fetchone()[0] is None:
+            return True
+        cur.execute("SELECT count(*) FROM chunks")
+        return cur.fetchone()[0] == 0
+
+
 def _do_sync(
     repos: list[str] | None = None,
     rebuild: bool = False,
@@ -115,6 +134,8 @@ def _do_sync(
     runner ジョブ（別プロセス）との同時実行を防ぐ。
     どちらも非ブロッキング（取得失敗 = skip）。
     リポジトリごとの完了時に sync_runs へ完了時刻と経路を記録する（issue #22 / #33）。
+
+    初回／rebuild はバルク経路: 重量索引をロード後に一括作成し、埋め込みをバッチ化する（issue #72）。
     """
     # allowlist 検証: 明示的に指定された repo が settings.repos に含まれるか（issue #63）
     if repos is not None:
@@ -136,7 +157,16 @@ def _do_sync(
         embedder = _get_embedder()
         result: dict[str, Any] = {"status": "ok", "repos": {}}
         with _conn() as conn:
-            db.migrate(conn, settings)
+            # --- バルク経路判定（新規DB対応。issue #72） ---
+            is_bulk = _is_bulk_path(conn, rebuild)
+
+            # --- スキーマ準備: migrate_light は冪等なのでロック外でOK ---
+            if is_bulk:
+                log.info("bulk path detected (rebuild=%s), using light schema + deferred indexes", rebuild)
+                db.migrate_light(conn, settings)
+            else:
+                db.migrate(conn, settings)
+
             # --- プロセス横断排他: advisory lock ---
             with conn.cursor() as cur:
                 cur.execute("SELECT pg_try_advisory_lock(%s)", (SYNC_LOCK_KEY,))
@@ -144,17 +174,42 @@ def _do_sync(
             if not acquired:
                 return {"status": "skipped", "reason": "別プロセスで同期が実行中です"}
             try:
-                if rebuild:
-                    log.warning("rebuild: 既存の索引と同期カーソルを破棄します")
-                    with conn.cursor() as cur:
-                        cur.execute(
-                            "TRUNCATE chunks, doc_files, issue_items, sync_state"
-                        )
-                    conn.commit()
+                # --- バルク経路: 破壊的操作はロック内で（issue #72） ---
+                if is_bulk:
+                    if rebuild:
+                        log.warning("rebuild: 既存の索引と同期カーソルを破棄します")
+                        with conn.cursor() as cur:
+                            cur.execute(
+                                "TRUNCATE chunks, doc_files, issue_items, sync_state"
+                            )
+                        conn.commit()
+                    db.drop_heavy_indexes(conn)
+
+                if is_bulk:
+                    buffer = ChunkBuffer(conn, embedder, batch_size=_BULK_BUFFER_SIZE)
+
                 for repo in targets:
-                    n_docs = sync_docs(settings, conn, embedder, repo, provider)
-                    n_items = sync_issues(settings, conn, embedder, repo, provider)
-                    n_code = sync_code(settings, conn, embedder, repo, provider)
+                    n_docs = sync_docs(
+                        settings, conn, embedder, repo, provider,
+                        buffer=buffer if is_bulk else None,
+                    )
+                    if is_bulk:
+                        buffer.flush()
+                        conn.commit()  # メタデータをコミット
+                    n_items = sync_issues(
+                        settings, conn, embedder, repo, provider,
+                        buffer=buffer if is_bulk else None,
+                    )
+                    if is_bulk:
+                        buffer.flush()
+                        conn.commit()  # メタデータをコミット
+                    n_code = sync_code(
+                        settings, conn, embedder, repo, provider,
+                        buffer=buffer if is_bulk else None,
+                    )
+                    if is_bulk:
+                        buffer.flush()
+                        conn.commit()  # メタデータをコミット
                     finished_at = db.record_sync_run(
                         conn, repo, route, n_docs, n_items, n_code
                     )
@@ -168,6 +223,11 @@ def _do_sync(
                         "synced %s: docs=%d issues=%d code=%d (route=%s)",
                         repo, n_docs, n_items, n_code, route,
                     )
+
+                # --- バルク経路: 重量索引を一括作成（issue #72） ---
+                if is_bulk:
+                    db.create_heavy_indexes(conn)
+
             finally:
                 with conn.cursor() as cur:
                     cur.execute("SELECT pg_advisory_unlock(%s)", (SYNC_LOCK_KEY,))

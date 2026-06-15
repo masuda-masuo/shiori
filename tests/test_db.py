@@ -1,10 +1,18 @@
-"""db モジュールのユニットテスト（issue #54）。"""
+"""db モジュールのユニットテスト（issue #54, #72）。"""
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, call
 
-from shiori.db import get_pr_changes, get_pr_head_sha, upsert_pr_changes
+from shiori.db import (
+    bulk_insert_chunks,
+    create_heavy_indexes,
+    drop_heavy_indexes,
+    get_pr_changes,
+    get_pr_head_sha,
+    migrate_light,
+    upsert_pr_changes,
+)
 
 
 # ── get_pr_changes ──
@@ -193,3 +201,216 @@ class TestGetPrHeadSha:
         result = get_pr_head_sha(conn, "o/r", 42)
 
         assert result is None
+
+
+# ── migrate_light / create_heavy_indexes / drop_heavy_indexes（issue #72）──
+
+
+class TestMigrateLight:
+    """migrate_light: テーブル・btree 索引のみ作成し、重い索引は作らない。"""
+
+    def _mock_conn(self):
+        conn = MagicMock()
+        cursor = MagicMock()
+        conn.cursor.return_value.__enter__.return_value = cursor
+        return conn, cursor
+
+    def test_creates_tables_and_btree_indexes_only(self):
+        """migrate_light は SCHEMA_SQL を実行するが、HNSW 索引は作らない。
+
+        SCHEMA_SQL 自体には CREATE EXTENSION pgroonga が含まれるが、
+        それは拡張のロードであって索引作成ではない。
+        """
+        from shiori.config import Settings
+        conn, cursor = self._mock_conn()
+
+        settings = Settings()
+        migrate_light(conn, settings)
+
+        # SCHEMA_SQL が実行されている（CREATE TABLE 等を含む）
+        executed_sqls = [
+            str(call_args[0][0])
+            for call_args in cursor.execute.call_args_list
+            if call_args[0]
+        ]
+        joined = " ".join(executed_sqls)
+        assert "CREATE TABLE IF NOT EXISTS chunks" in joined
+        # HNSW 索引は作らない
+        assert "hnsw" not in joined.lower()
+        # pgroonga 索引（CREATE INDEX ... USING pgroonga）は作らない
+        assert "create index" not in joined.lower() or "using pgroonga" not in joined.lower()
+
+    def test_runs_alter_statements(self):
+        """migrate_light は ALTER 文も実行する。"""
+        from shiori.config import Settings
+        conn, cursor = self._mock_conn()
+
+        settings = Settings()
+        migrate_light(conn, settings)
+
+        # ALTER が実行されている
+        executed_sqls = [
+            str(call_args[0][0])
+            for call_args in cursor.execute.call_args_list
+            if call_args[0]
+        ]
+        joined = " ".join(executed_sqls)
+        assert "ALTER TABLE chunks" in joined
+        assert "ADD COLUMN IF NOT EXISTS" in joined
+
+
+class TestCreateHeavyIndexes:
+    """create_heavy_indexes: HNSW + pgroonga 索引を作成する。"""
+
+    def _mock_conn(self):
+        conn = MagicMock()
+        cursor = MagicMock()
+        conn.cursor.return_value.__enter__.return_value = cursor
+        return conn, cursor
+
+    def test_creates_hnsw_and_pgroonga_indexes(self):
+        """create_heavy_indexes は HNSW と pgroonga(content/symbols) を作成する。"""
+        conn, cursor = self._mock_conn()
+
+        create_heavy_indexes(conn)
+
+        executed_sqls = [
+            str(call_args[0][0])
+            for call_args in cursor.execute.call_args_list
+            if call_args[0]
+        ]
+        joined_lower = " ".join(executed_sqls).lower()
+        assert "hnsw" in joined_lower
+        # pgroonga 索引（CREATE INDEX ... USING pgroonga）が含まれる
+        assert "using pgroonga" in joined_lower
+
+
+class TestDropHeavyIndexes:
+    """drop_heavy_indexes: 3 つの重量索引を DROP する。"""
+
+    def _mock_conn(self):
+        conn = MagicMock()
+        cursor = MagicMock()
+        conn.cursor.return_value.__enter__.return_value = cursor
+        return conn, cursor
+
+    def test_drops_three_indexes(self):
+        """drop_heavy_indexes は 3 つの DROP INDEX IF EXISTS を実行する。"""
+        conn, cursor = self._mock_conn()
+
+        drop_heavy_indexes(conn)
+
+        executed_sqls = [
+            str(call_args[0][0])
+            for call_args in cursor.execute.call_args_list
+            if call_args[0]
+        ]
+        drop_calls = [s for s in executed_sqls if "DROP INDEX IF EXISTS" in s]
+        assert len(drop_calls) == 3
+
+        joined = " ".join(drop_calls)
+        assert "chunks_embedding_hnsw" in joined
+        assert "chunks_content_pgroonga" in joined
+        assert "chunks_symbols_pgroonga" in joined
+
+
+# ── bulk_insert_chunks（issue #72）──
+
+
+class TestBulkInsertChunks:
+    """bulk_insert_chunks: executemany によるバルク挿入。"""
+
+    def _mock_conn(self):
+        conn = MagicMock()
+        cursor = MagicMock()
+        conn.cursor.return_value.__enter__.return_value = cursor
+        return conn, cursor
+
+    def test_empty_list_noops(self):
+        """空リストは何もしない。"""
+        conn, cursor = self._mock_conn()
+
+        bulk_insert_chunks(conn, [])
+
+        cursor.executemany.assert_not_called()
+
+    def test_calls_executemany_with_correct_number_of_rows(self):
+        """executemany が正しい行数で呼ばれる。"""
+        conn, cursor = self._mock_conn()
+
+        rows = [
+            {
+                "chunk_key": f"doc:o/r:file{i}.md",
+                "chunk_index": 0,
+                "source_type": "doc",
+                "repo": "o/r",
+                "content": f"content {i}",
+                "embedding": [0.1, 0.2, 0.3],
+                "path": f"file{i}.md",
+                "issue_no": None,
+                "comment_id": None,
+                "language": "ja",
+                "heading_path": None,
+                "state": None,
+                "author": None,
+                "line": None,
+                "end_line": None,
+                "commit_sha": None,
+                "prog_lang": None,
+                "symbols": None,
+                "created_at": None,
+                "updated_at": None,
+                "url": None,
+            }
+            for i in range(3)
+        ]
+
+        bulk_insert_chunks(conn, rows)
+
+        cursor.executemany.assert_called_once()
+        args = cursor.executemany.call_args[0]
+        # 第一引数: SQL 文字列
+        assert "INSERT INTO chunks" in args[0]
+        assert "ON CONFLICT" in args[0]
+        # 第二引数: パラメータリスト（3 行）
+        assert len(args[1]) == 3
+
+    def test_embedding_is_vector_literal(self):
+        """embedding が vec_literal で '[x,y,z]' 形式に変換される。"""
+        conn, cursor = self._mock_conn()
+
+        rows = [
+            {
+                "chunk_key": "doc:o/r:f.md",
+                "chunk_index": 0,
+                "source_type": "doc",
+                "repo": "o/r",
+                "content": "hello",
+                "embedding": [0.1, 0.2, 0.3],
+                "path": "f.md",
+                "issue_no": None,
+                "comment_id": None,
+                "language": "en",
+                "heading_path": None,
+                "state": None,
+                "author": None,
+                "line": None,
+                "end_line": None,
+                "commit_sha": None,
+                "prog_lang": None,
+                "symbols": None,
+                "created_at": None,
+                "updated_at": None,
+                "url": None,
+            },
+        ]
+
+        bulk_insert_chunks(conn, rows)
+
+        params = cursor.executemany.call_args[0][1][0]
+        # embedding は 11 番目の要素（0-indexed: 10）
+        # 0:chunk_key 1:chunk_index 2:source_type 3:repo 4:path
+        # 5:issue_no 6:comment_id 7:language 8:heading_path 9:content
+        # 10:embedding
+        embedding_str = params[10]
+        assert embedding_str == "[0.100000,0.200000,0.300000]"

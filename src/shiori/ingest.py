@@ -17,23 +17,46 @@
 
 セキュリティ（issue #63）:
     指定された repo を SHIORI_REPOS（allowlist）と照合し、含まれないものは拒否する。
+
+バルク経路最適化（issue #72）:
+    初回または rebuild では、重い索引（HNSW／pgroonga）をロード後に一括作成し、
+    埋め込みをファイル横断バッチ化、チャンク挿入をバルク化する。
 """
 
 from __future__ import annotations
 
 import logging
 import os
+import time
 
 from . import db
 from .config import Settings, load_settings
 from .embedding import Embedder
 from .github_auth import build_token_provider
-from .github_sync import sync_code, sync_docs, sync_issues
+from .github_sync import ChunkBuffer, sync_code, sync_docs, sync_issues
 
 log = logging.getLogger(__name__)
 
 # PostgreSQL advisory lock キー（mcp_server.py と共有。'SHIO' の ASCII）
 SYNC_LOCK_KEY = 0x5348494F
+
+# バルク経路の ChunkBuffer フラッシュ閾値（issue #72）
+_BULK_BUFFER_SIZE = 500
+
+
+def _is_bulk_path(conn, rebuild: bool) -> bool:
+    """バルク経路か判定する: rebuild=True または chunks テーブルが空／未存在。
+
+    新規 DB（chunks テーブル未作成）もバルク扱いする（issue #72）。
+    """
+    if rebuild:
+        return True
+    with conn.cursor() as cur:
+        cur.execute("SELECT to_regclass('chunks')")
+        if cur.fetchone()[0] is None:
+            return True
+        cur.execute("SELECT count(*) FROM chunks")
+        return cur.fetchone()[0] == 0
 
 
 def run_ingest(
@@ -61,7 +84,16 @@ def run_ingest(
     route = os.environ.get("SHIORI_INGEST_ROUTE", "cli")
 
     conn = db.connect(settings)
-    db.migrate(conn, settings)
+
+    # --- バルク経路判定（ロック前に判定のみ。新規DB対応。issue #72） ---
+    is_bulk = _is_bulk_path(conn, rebuild)
+
+    # --- スキーマ準備: migrate_light は冪等なのでロック外でOK ---
+    if is_bulk:
+        log.info("bulk path detected (rebuild=%s), using light schema + deferred indexes", rebuild)
+        db.migrate_light(conn, settings)
+    else:
+        db.migrate(conn, settings)
 
     # --- プロセス横断排他: advisory lock ---
     # serve の自動同期や MCP ツール ingest と同時に走らないよう DB レベルで排他する。
@@ -74,27 +106,76 @@ def run_ingest(
         conn.close()
         return
 
+    t_total = time.monotonic()
+
     try:
-        if rebuild:
-            log.warning("rebuild: 既存の索引と同期カーソルを破棄します")
-            with conn.cursor() as cur:
-                cur.execute("TRUNCATE chunks, doc_files, issue_items, sync_state")
-            conn.commit()
+        # --- バルク経路: 破壊的操作はロック内で（issue #72） ---
+        if is_bulk:
+            if rebuild:
+                log.warning("rebuild: 既存の索引と同期カーソルを破棄します")
+                with conn.cursor() as cur:
+                    cur.execute("TRUNCATE chunks, doc_files, issue_items, sync_state")
+                conn.commit()
+            db.drop_heavy_indexes(conn)
 
         embedder = Embedder(settings.embedding_model, settings.embedding_dim)
 
+        if is_bulk:
+            buffer = ChunkBuffer(conn, embedder, batch_size=_BULK_BUFFER_SIZE)
+
         for repo in targets:
             log.info("=== %s ===", repo)
-            n_docs = sync_docs(settings, conn, embedder, repo, provider)
-            log.info("docs: %d files updated", n_docs)
-            n_items = sync_issues(settings, conn, embedder, repo, provider)
-            log.info("issues/PR: %d items indexed", n_items)
-            n_code = sync_code(settings, conn, embedder, repo, provider)
-            log.info("code: %d files updated", n_code)
+
+            # docs phase
+            t0 = time.monotonic()
+            n_docs = sync_docs(
+                settings, conn, embedder, repo, provider,
+                buffer=buffer if is_bulk else None,
+            )
+            if is_bulk:
+                n_flushed = buffer.flush()
+                conn.commit()  # メタデータ（doc_files, set_cursor）をコミット
+                log.info("docs flushed: %d chunks", n_flushed)
+            t_docs = time.monotonic() - t0
+            log.info("docs: %d files updated (%.1fs)", n_docs, t_docs)
+
+            # issues phase
+            t0 = time.monotonic()
+            n_items = sync_issues(
+                settings, conn, embedder, repo, provider,
+                buffer=buffer if is_bulk else None,
+            )
+            if is_bulk:
+                n_flushed = buffer.flush()
+                conn.commit()  # メタデータ（issue_items, set_cursor）をコミット
+                log.info("issues flushed: %d chunks", n_flushed)
+            t_issues = time.monotonic() - t0
+            log.info("issues/PR: %d items indexed (%.1fs)", n_items, t_issues)
+
+            # code phase
+            t0 = time.monotonic()
+            n_code = sync_code(
+                settings, conn, embedder, repo, provider,
+                buffer=buffer if is_bulk else None,
+            )
+            if is_bulk:
+                n_flushed = buffer.flush()
+                conn.commit()  # メタデータ（doc_files, set_cursor）をコミット
+                log.info("code flushed: %d chunks", n_flushed)
+            t_code = time.monotonic() - t0
+            log.info("code: %d files updated (%.1fs)", n_code, t_code)
+
             finished_at = db.record_sync_run(
                 conn, repo, route, n_docs, n_items, n_code
             )
             log.info("synced at %s (route=%s)", finished_at.isoformat(), route)
+
+        # --- バルク経路: 重量索引を一括作成 ---
+        if is_bulk:
+            t0 = time.monotonic()
+            db.create_heavy_indexes(conn)
+            t_idx = time.monotonic() - t0
+            log.info("heavy indexes created (%.1fs)", t_idx)
 
         with conn.cursor() as cur:
             cur.execute(
@@ -102,6 +183,10 @@ def run_ingest(
             )
             for st, n in cur.fetchall():
                 log.info("chunks[%s] = %d", st, n)
+
+        t_total_elapsed = time.monotonic() - t_total
+        log.info("total ingest time: %.1fs", t_total_elapsed)
+
     finally:
         with conn.cursor() as cur:
             cur.execute("SELECT pg_advisory_unlock(%s)", (SYNC_LOCK_KEY,))
