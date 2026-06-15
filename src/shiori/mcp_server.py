@@ -322,10 +322,11 @@ def semantic_search(
     state は open / closed、prog_lang は python / go / rust 等、
     updated_after は ISO8601 日付。
     sort_by: "score"（既定）/ "updated_at" / "created_at"。
-      ランキングは関連度主に固定（issue #69）。一次ソース（doc/code）は RRF スコア順、
+      後方互換のため受け付けるが、ランキングは常に関連度主に固定（issue #69）。
+      一次ソース（doc/code）は RRF スコア順、
       二次ソース（issue/pr_review）は RRF スコア＋state/updated_at tie-break。
       純粋な日付置換ソートは行わず、既定（score）のまま使うことを推奨。
-    sort_order: "desc"（既定）/ "asc"。"""
+    sort_order: "desc"（既定）/ "asc"（asc 時は複合キー全体が反転）。"""
     with _conn() as conn:
         return search.semantic_search(
             settings, conn, _get_embedder(), query,
@@ -356,10 +357,11 @@ def keyword_search(
     code チャンクは content（シグネチャ＋docstring）と symbols（識別子分割済み文字列）の
     OR 検索になるため、camelCase/snake_case の部分一致でも発見できる。
     sort_by: "score"（既定）/ "updated_at" / "created_at"。
-      ランキングは関連度主に固定（issue #69）。一次ソース（doc/code）はスコア順、
+      後方互換のため受け付けるが、ランキングは常に関連度主に固定（issue #69）。
+      一次ソース（doc/code）はスコア順、
       二次ソース（issue/pr_review）はスコア＋state/updated_at tie-break。
       純粋な日付置換ソートは行わず、既定（score）のまま使うことを推奨。
-    sort_order: "desc"（既定）/ "asc"。"""
+    sort_order: "desc"（既定）/ "asc"（asc 時は複合キー全体が反転）。"""
     with _conn() as conn:
         return search.keyword_search(
             settings, conn, query,
