@@ -13,8 +13,10 @@
   - 一次ソース（doc / code）: 関連度（RRF / pgroonga スコア）のみ。日付ソートは無効。
   - 二次ソース（issue / pr_review）: 関連度主＋state / updated_at の tie-break。
   - 純粋な日付置換ソート（sort_by=updated_at/created_at で関連度を丸ごと捨てる挙動）は撤去。
-  - sort_by は既定 "score" で後方互換維持。非 "score" 指定は二次ソースの tie-break に限定。
+  - sort_by は既定 "score" で後方互換維持。非 "score" 指定も二次ソースの tie-break に限定。
   - tie-break は pool 段（top-k 切り詰め前）で適用する。
+  - 同スコアでは一次ソース（doc/code）が sentinel により二次より前に来る。
+  - sort_order="asc" 時は複合キー全体が反転する（closed→open・古い→新しい）。
 """
 
 from __future__ import annotations
@@ -38,14 +40,18 @@ _RESULT_COLS = (
 # _RESULT_COLS のカラム位置（row タプルのインデックス）
 _COL_SOURCE_TYPE = 1
 _COL_STATE = 9
-_COL_CREATED_AT = 12
 _COL_UPDATED_AT = 13
 
 # 一次ソース（doc/code）の複合キー用 sentinel。
 # 二次ソースの -sp 最大値は 0（open の -0）。desc ソートで一次が前に来るには
-# sentinel > 0 が必要 → 1。日付 sentinel はいかなる ISO 日付文字列よりも大きい "9999"。
+# sentinel > 0 が必要 → 1。_PRIMARY_DATE（"9999"）は第2要素で決着するため
+# 実質到達しない保険（inert）。
 _PRIMARY_SP = 1
 _PRIMARY_DATE = "9999"
+
+# 欠損 row 用フォールバック。防御的に最下位へ沈める。
+_MISSING_SP = -999
+_MISSING_DATE = ""
 
 
 @dataclass
@@ -154,21 +160,22 @@ def _rank_candidates(
 
     ランキング方針（docs/design/05）:
     - 一次ソース（doc / code）: 関連度スコアのみ。日付系 sort_by は無効（no-op）。
-      スコア以外の tie-break 要素は中立な最大値 sentinel を用い、
-      二次ソースより不当に後回しにされない。
+      同スコアでは sentinel により二次ソースより前に来る。
     - 二次ソース（issue / pr_review）: 関連度主＋state / updated_at の tie-break。
       同スコア帯では open → 新着順に並ぶ。
-    - sort_by="score"（既定）で後方互換を維持。非 "score" 指定も二次 tie-break に限定され、
+    - sort_by は既定 "score" で後方互換を維持。非 "score" 指定も挙動は不変で、
       純粋な日付置換ソート（関連度を丸ごと捨てる挙動）は行わない。
+      tie-break は常に updated_at で行われ、created_at は updated_at に集約される。
+    - sort_order="asc" 時は複合キー全体が反転する（closed→open・古い→新しい）。
 
     Args:
         ranked: [(row_id, score), ...] — RRF または pgroonga スコア付き候補。
         rows_by_id: row_id → row tuple（スコア抜き）。
-        sort_by: "score" / "updated_at" / "created_at"。一次ソースでは "score" 以外は無視。
+        sort_by: "score" / "updated_at" / "created_at"。挙動はすべて同一。
         sort_order: "desc"（既定）/ "asc"。
 
     Returns:
-        (ranked_list, ranking_method_string)
+        (ranked_list, ranking_method_string) — 常に "rrf"。
     """
     reverse = sort_order != "asc"
 
@@ -176,7 +183,8 @@ def _rank_candidates(
         rid, score = item
         row = rows_by_id.get(rid)
         if row is None:
-            return (score, 2, "")
+            # 防御的フォールバック: 欠損行は最下位へ沈める
+            return (score, _MISSING_SP, _MISSING_DATE)
 
         source_type = row[_COL_SOURCE_TYPE]
 
@@ -200,13 +208,7 @@ def _rank_candidates(
         return (score, -sp, ua_str)
 
     result = sorted(ranked, key=_key, reverse=reverse)
-
-    if sort_by == "score":
-        method = "rrf"
-    else:
-        method = f"rrf+{sort_by}"
-
-    return result, method
+    return result, "rrf"
 
 
 # 後方互換用の薄いラッパー。_sort_hits は pool 段非対応のため、
@@ -249,7 +251,8 @@ def keyword_search(
     二次ソース（issue/pr_review）はスコア＋state/updated_at tie-break。
     sort_by: "score"（既定）/ "updated_at" / "created_at"。
       純粋な日付置換ソートは行わず、二次ソースの tie-break 指定に限定される。
-    sort_order: "desc"（既定）/ "asc"。
+      created_at は updated_at に集約される。
+    sort_order: "desc"（既定）/ "asc"（asc 時は複合キー全体が反転）。
     """
     k = top_k or settings.default_top_k
     pool = max(k * 4, 20)
@@ -293,10 +296,12 @@ def semantic_search(
 
     ランキングは関連度主に固定（issue #69）。一次ソース（doc/code）は RRF スコア順、
     二次ソース（issue/pr_review）は RRF スコア＋state/updated_at tie-break。
+    同スコアでは一次ソースが二次より前に来る。
     tie-break は pool 段（top-k 切り詰め前）で適用する。
     sort_by: "score"（既定）/ "updated_at" / "created_at"。
       純粋な日付置換ソートは行わず、二次ソースの tie-break 指定に限定される。
-    sort_order: "desc"（既定）/ "asc"。
+      created_at は updated_at に集約される。
+    sort_order: "desc"（既定）/ "asc"（asc 時は複合キー全体が反転）。
     """
     k = top_k or settings.default_top_k
     pool = max(k * 4, 20)
