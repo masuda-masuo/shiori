@@ -5,6 +5,8 @@
 - 全文検索は pgroonga。索引作成時に TokenMecab（形態素解析）を試み、
   プラグインが無ければ TokenBigram にフォールバックする。
 - read_issue 用に生のスレッドを `issue_items` に保持する（チャンクとは別）。
+- 初回／rebuild のバルク経路では、重い索引（HNSW／pgroonga）をロード後に一括作成し、
+  逐次構築コストを回避する（issue #72）。
 """
 
 from __future__ import annotations
@@ -122,42 +124,17 @@ CREATE INDEX IF NOT EXISTS chunks_updated_at_idx ON chunks (updated_at);
 CREATE INDEX IF NOT EXISTS chunks_repo_issue_no_idx ON chunks (repo, issue_no);
 """
 
+# 重い索引の名前（DROP / CREATE をバルク経路で制御するため定数化。issue #72）
+_HNSW_INDEX = "chunks_embedding_hnsw"
+_PGROONGA_CONTENT_INDEX = "chunks_content_pgroonga"
+_PGROONGA_SYMBOLS_INDEX = "chunks_symbols_pgroonga"
 
-def migrate(conn: psycopg.Connection, settings: Settings) -> None:
-    with conn.cursor() as cur:
-        cur.execute(SCHEMA_SQL.format(dim=settings.embedding_dim))
-    conn.commit()
 
-    # pgvector: HNSW (cosine)
-    with conn.cursor() as cur:
-        cur.execute(
-            "CREATE INDEX IF NOT EXISTS chunks_embedding_hnsw "
-            "ON chunks USING hnsw (embedding vector_cosine_ops)"
-        )
-    conn.commit()
+def _run_alter_statements(conn: psycopg.Connection) -> None:
+    """既存 DB に対する冪等な ALTER。CREATE TABLE IF NOT EXISTS では新カラムが追加されないため。
 
-    # pgroonga: TokenMecab があれば形態素解析、無ければ TokenBigram にフォールバック
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                "CREATE INDEX IF NOT EXISTS chunks_content_pgroonga "
-                "ON chunks USING pgroonga (content) WITH (tokenizer = 'TokenMecab')"
-            )
-        conn.commit()
-        log.info("pgroonga index created with TokenMecab")
-    except psycopg.Error:
-        conn.rollback()
-        with conn.cursor() as cur:
-            cur.execute(
-                "CREATE INDEX IF NOT EXISTS chunks_content_pgroonga "
-                "ON chunks USING pgroonga (content)"
-            )
-        conn.commit()
-        log.info("pgroonga index created with default tokenizer (TokenBigram)")
-
-    # --- Step 1: ソースコード索引用スキーマ変更（issue #33） ---
-    # 既存 DB に対する冪等な ALTER。CREATE TABLE IF NOT EXISTS では新カラムが追加されないため。
-
+    migrate_light / migrate の両方から呼ばれる。
+    """
     # 1. source_type CHECK 制約に 'code' を追加（既存制約を置き換え）
     with conn.cursor() as cur:
         cur.execute("ALTER TABLE chunks DROP CONSTRAINT IF EXISTS chunks_source_type_check")
@@ -188,28 +165,90 @@ def migrate(conn: psycopg.Connection, settings: Settings) -> None:
         cur.execute("ALTER TABLE sync_runs ADD COLUMN IF NOT EXISTS code_indexed INTEGER")
     conn.commit()
 
-    # 5. symbols カラム用 pgroonga 索引
+
+def migrate_light(conn: psycopg.Connection, settings: Settings) -> None:
+    """テーブル・制約・btree 索引のみ作成。HNSW・pgroonga は作成しない（issue #72）。
+
+    バルク経路（初回／rebuild）で使用。重い索引はデータロード後に create_heavy_indexes() で一括作成する。
+    """
+    with conn.cursor() as cur:
+        cur.execute(SCHEMA_SQL.format(dim=settings.embedding_dim))
+    conn.commit()
+    _run_alter_statements(conn)
+
+
+def create_heavy_indexes(conn: psycopg.Connection) -> None:
+    """HNSW と pgroonga 索引を作成する（issue #72）。
+
+    バルク経路で全データロード後に呼ぶ。既に存在する場合は何もしない（IF NOT EXISTS）。
+    """
+    # pgvector: HNSW (cosine)
+    with conn.cursor() as cur:
+        cur.execute(
+            f"CREATE INDEX IF NOT EXISTS {_HNSW_INDEX} "
+            "ON chunks USING hnsw (embedding vector_cosine_ops)"
+        )
+    conn.commit()
+    log.info("HNSW index created: %s", _HNSW_INDEX)
+
+    # pgroonga: TokenMecab があれば形態素解析、無ければ TokenBigram にフォールバック
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "CREATE INDEX IF NOT EXISTS chunks_symbols_pgroonga "
-                "ON chunks USING pgroonga (symbols) WITH (tokenizer = 'TokenMecab')"
+                f"CREATE INDEX IF NOT EXISTS {_PGROONGA_CONTENT_INDEX} "
+                "ON chunks USING pgroonga (content) WITH (tokenizer = 'TokenMecab')"
             )
         conn.commit()
-        log.info("pgroonga index on symbols created with TokenMecab")
+        log.info("pgroonga index created with TokenMecab: %s", _PGROONGA_CONTENT_INDEX)
     except psycopg.Error:
         conn.rollback()
         with conn.cursor() as cur:
             cur.execute(
-                "CREATE INDEX IF NOT EXISTS chunks_symbols_pgroonga "
+                f"CREATE INDEX IF NOT EXISTS {_PGROONGA_CONTENT_INDEX} "
+                "ON chunks USING pgroonga (content)"
+            )
+        conn.commit()
+        log.info("pgroonga index created with default tokenizer (TokenBigram): %s", _PGROONGA_CONTENT_INDEX)
+
+    # symbols 用 pgroonga 索引
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"CREATE INDEX IF NOT EXISTS {_PGROONGA_SYMBOLS_INDEX} "
+                "ON chunks USING pgroonga (symbols) WITH (tokenizer = 'TokenMecab')"
+            )
+        conn.commit()
+        log.info("pgroonga index on symbols created with TokenMecab: %s", _PGROONGA_SYMBOLS_INDEX)
+    except psycopg.Error:
+        conn.rollback()
+        with conn.cursor() as cur:
+            cur.execute(
+                f"CREATE INDEX IF NOT EXISTS {_PGROONGA_SYMBOLS_INDEX} "
                 "ON chunks USING pgroonga (symbols)"
             )
         conn.commit()
-        log.info("pgroonga index on symbols created with default tokenizer (TokenBigram)")
+        log.info("pgroonga index on symbols created with default tokenizer (TokenBigram): %s", _PGROONGA_SYMBOLS_INDEX)
 
-    # --- Step 6: PR 変更ファイルマップ（issue #54） ---
-    # pr_changes テーブルは CREATE TABLE IF NOT EXISTS で自動生成されるため
-    # 追加の ALTER は不要。
+
+def drop_heavy_indexes(conn: psycopg.Connection) -> None:
+    """HNSW と pgroonga 索引を削除する（issue #72）。
+
+    バルク経路でデータロード前に呼ぶ。存在しない場合は何もしない（IF EXISTS）。
+    """
+    for idx in (_HNSW_INDEX, _PGROONGA_CONTENT_INDEX, _PGROONGA_SYMBOLS_INDEX):
+        with conn.cursor() as cur:
+            cur.execute(f"DROP INDEX IF EXISTS {idx}")
+        conn.commit()
+        log.info("dropped index: %s", idx)
+
+
+def migrate(conn: psycopg.Connection, settings: Settings) -> None:
+    """完全なスキーマ作成（テーブル＋全索引）。増分経路で使用（issue #72）。
+
+    バルク経路では migrate_light() + ロード後 create_heavy_indexes() を使う。
+    """
+    migrate_light(conn, settings)
+    create_heavy_indexes(conn)
 
 
 def get_cursor(conn: psycopg.Connection, repo: str, kind: str) -> str | None:
@@ -485,3 +524,69 @@ def insert_chunk(
                 created_at, updated_at, url,
             ),
         )
+
+
+_BULK_INSERT_SQL = """
+    INSERT INTO chunks (
+        chunk_key, chunk_index, source_type, repo, path, issue_no,
+        comment_id, language, heading_path, content, embedding,
+        state, author, line, end_line, commit_sha, prog_lang, symbols,
+        created_at, updated_at, url
+    ) VALUES (
+        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::vector,
+        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+    )
+    ON CONFLICT (chunk_key, chunk_index) DO UPDATE SET
+        content = EXCLUDED.content,
+        embedding = EXCLUDED.embedding,
+        language = EXCLUDED.language,
+        heading_path = EXCLUDED.heading_path,
+        state = EXCLUDED.state,
+        author = EXCLUDED.author,
+        line = EXCLUDED.line,
+        end_line = EXCLUDED.end_line,
+        commit_sha = EXCLUDED.commit_sha,
+        prog_lang = EXCLUDED.prog_lang,
+        symbols = EXCLUDED.symbols,
+        created_at = EXCLUDED.created_at,
+        updated_at = EXCLUDED.updated_at,
+        url = EXCLUDED.url
+"""
+
+
+def bulk_insert_chunks(conn: psycopg.Connection, rows: list[dict]) -> None:
+    """チャンクをバルク挿入する（executemany。issue #72）。
+
+    呼び出し側が commit すること。各行は insert_chunk と同じキーを持つ dict。
+    embedding はリスト形式で渡す（vec_literal は内部で適用）。
+    """
+    if not rows:
+        return
+    with conn.cursor() as cur:
+        params = [
+            (
+                r["chunk_key"],
+                r["chunk_index"],
+                r["source_type"],
+                r["repo"],
+                r.get("path"),
+                r.get("issue_no"),
+                r.get("comment_id"),
+                r.get("language"),
+                r.get("heading_path"),
+                r["content"],
+                vec_literal(r["embedding"]),
+                r.get("state"),
+                r.get("author"),
+                r.get("line"),
+                r.get("end_line"),
+                r.get("commit_sha"),
+                r.get("prog_lang"),
+                r.get("symbols"),
+                r.get("created_at"),
+                r.get("updated_at"),
+                r.get("url"),
+            )
+            for r in rows
+        ]
+        cur.executemany(_BULK_INSERT_SQL, params)
