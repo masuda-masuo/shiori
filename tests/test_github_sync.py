@@ -29,15 +29,9 @@ from shiori.github_sync import (
 class TestChunkBuffer:
     """ChunkBuffer: チャンク蓄積→一括埋め込み→バルク挿入。"""
 
-    def _mock_embedder(self):
-        embedder = MagicMock()
-        embedder.embed_passages.return_value = [[0.1, 0.2, 0.3]]
-        return embedder
-
     def _mock_conn(self):
         conn = MagicMock()
-        cursor = MagicMock()
-        conn.cursor.return_value.__enter__.return_value = cursor
+        conn.cursor.return_value.__enter__.return_value = MagicMock()
         return conn
 
     def _chunk_kwargs(self, **overrides):
@@ -69,42 +63,51 @@ class TestChunkBuffer:
     def test_add_then_flush_batches_embedding_and_insert(self):
         """add で蓄積し、flush で一括埋め込み＋バルク挿入＋commit。"""
         conn = self._mock_conn()
-        embedder = self._mock_embedder()
-        buf = ChunkBuffer(conn, embedder, batch_size=500)
+        embedder = MagicMock()
+        embedder.embed_passages.return_value = [[0.1, 0.2], [0.3, 0.4]]
 
-        buf.add(**self._chunk_kwargs(content="chunk1"))
-        buf.add(**self._chunk_kwargs(chunk_key="doc:o/r:test2.md", content="chunk2"))
+        with patch("shiori.github_sync.bulk_insert_chunks") as mock_bulk:
+            buf = ChunkBuffer(conn, embedder, batch_size=500)
 
-        n = buf.flush()
+            buf.add(**self._chunk_kwargs(content="chunk1"))
+            buf.add(**self._chunk_kwargs(chunk_key="doc:o/r:test2.md", content="chunk2"))
 
-        assert n == 2
-        # embed_passages が 1 回だけ呼ばれる（2 テキストをまとめて）
-        embedder.embed_passages.assert_called_once()
-        texts_arg = embedder.embed_passages.call_args[0][0]
-        assert texts_arg == ["chunk1", "chunk2"]
-        # commit が 1 回呼ばれる
-        conn.commit.assert_called_once()
+            n = buf.flush()
+
+            assert n == 2
+            # embed_passages が 1 回だけ呼ばれる（2 テキストをまとめて）
+            embedder.embed_passages.assert_called_once()
+            texts_arg = embedder.embed_passages.call_args[0][0]
+            assert texts_arg == ["chunk1", "chunk2"]
+            # bulk_insert_chunks が 1 回呼ばれる
+            mock_bulk.assert_called_once()
+            # commit が 1 回呼ばれる
+            conn.commit.assert_called_once()
 
     def test_auto_flush_when_batch_size_reached(self):
         """batch_size に達すると自動で flush される。"""
         conn = self._mock_conn()
-        embedder = self._mock_embedder()
-        buf = ChunkBuffer(conn, embedder, batch_size=2)
+        embedder = MagicMock()
+        embedder.embed_passages.return_value = [[0.1, 0.2], [0.3, 0.4]]
 
-        buf.add(**self._chunk_kwargs(content="a"))
-        buf.add(**self._chunk_kwargs(chunk_key="k2", content="b"))
-        # batch_size=2 到達 → 自動 flush
-        assert embedder.embed_passages.call_count == 1
-        assert conn.commit.call_count == 1
+        with patch("shiori.github_sync.bulk_insert_chunks"):
+            buf = ChunkBuffer(conn, embedder, batch_size=2)
 
-        # バッファは空のはず
-        buf.add(**self._chunk_kwargs(chunk_key="k3", content="c"))
-        assert len(buf._items) == 1  # まだ flush されていない
+            buf.add(**self._chunk_kwargs(content="a"))
+            buf.add(**self._chunk_kwargs(chunk_key="k2", content="b"))
+            # batch_size=2 到達 → 自動 flush
+            assert embedder.embed_passages.call_count == 1
+            assert conn.commit.call_count == 1
+
+            # バッファは空のはず
+            buf.add(**self._chunk_kwargs(chunk_key="k3", content="c"))
+            assert len(buf._items) == 1  # まだ flush されていない
 
     def test_flush_empty_buffer_noops(self):
         """空バッファの flush は何もしない。"""
         conn = self._mock_conn()
-        embedder = self._mock_embedder()
+        embedder = MagicMock()
+
         buf = ChunkBuffer(conn, embedder)
 
         n = buf.flush()
@@ -116,21 +119,23 @@ class TestChunkBuffer:
     def test_flush_returns_inserted_count(self):
         """flush の返り値は挿入件数。"""
         conn = self._mock_conn()
-        embedder = self._mock_embedder()
+        embedder = MagicMock()
         embedder.embed_passages.return_value = [
             [0.1, 0.2], [0.3, 0.4], [0.5, 0.6],
         ]
-        buf = ChunkBuffer(conn, embedder, batch_size=500)
 
-        for i in range(3):
-            buf.add(**self._chunk_kwargs(
-                chunk_key=f"doc:o/r:file{i}.md",
-                chunk_index=i,
-                content=f"content {i}",
-            ))
+        with patch("shiori.github_sync.bulk_insert_chunks"):
+            buf = ChunkBuffer(conn, embedder, batch_size=500)
 
-        n = buf.flush()
-        assert n == 3
+            for i in range(3):
+                buf.add(**self._chunk_kwargs(
+                    chunk_key=f"doc:o/r:file{i}.md",
+                    chunk_index=i,
+                    content=f"content {i}",
+                ))
+
+            n = buf.flush()
+            assert n == 3
 
 
 # ===================================================================
