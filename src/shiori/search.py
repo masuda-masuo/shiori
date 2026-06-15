@@ -9,9 +9,14 @@
 - リランクモデルは v1 では不採用（RRF のみ）。
 - 返すのは常にポインタ＋スニペット（既定 400 字）。state / updated_at を結果に
   含め、鮮度の判断はエージェント側に委ねる。
-- sort_by / sort_order で結果のソート順を変更できる。既定は score 降順。
-  updated_at / created_at でのソートは RRF の関連度順を無視するため、
-  関連度を意図的に犠牲にしない限り既定（score）のまま使うことを推奨（issue #41）。
+- ランキング方針（issue #69, docs/design/05）:
+  - 一次ソース（doc / code）: 関連度（RRF / pgroonga スコア）のみ。日付ソートは無効。
+  - 二次ソース（issue / pr_review）: 関連度主＋state / updated_at の tie-break。
+  - 純粋な日付置換ソート（sort_by=updated_at/created_at で関連度を丸ごと捨てる挙動）は撤去。
+  - sort_by は既定 "score" で後方互換維持。非 "score" 指定も二次ソースの tie-break に限定。
+  - tie-break は pool 段（top-k 切り詰め前）で適用する。
+  - 同スコアでは一次ソース（doc/code）が sentinel により二次より前に来る。
+  - sort_order="asc" 時は複合キー全体が反転する（closed→open・古い→新しい）。
 """
 
 from __future__ import annotations
@@ -31,6 +36,22 @@ _RESULT_COLS = (
     "id, source_type, repo, path, issue_no, comment_id, language, "
     "heading_path, content, state, author, line, created_at, updated_at, url"
 )
+
+# _RESULT_COLS のカラム位置（row タプルのインデックス）
+_COL_SOURCE_TYPE = 1
+_COL_STATE = 9
+_COL_UPDATED_AT = 13
+
+# 一次ソース（doc/code）の複合キー用 sentinel。
+# 二次ソースの -sp 最大値は 0（open の -0）。desc ソートで一次が前に来るには
+# sentinel > 0 が必要 → 1。_PRIMARY_DATE（"9999"）は第2要素で決着するため
+# 実質到達しない保険（inert）。
+_PRIMARY_SP = 1
+_PRIMARY_DATE = "9999"
+
+# 欠損 row 用フォールバック。防御的に最下位へ沈める。
+_MISSING_SP = -999
+_MISSING_DATE = ""
 
 
 @dataclass
@@ -71,12 +92,16 @@ def _filter_sql(filters: dict | None) -> tuple[str, list]:
     return sql, params
 
 
-def _row_to_hit(row, snippet_chars: int, score: float) -> SearchHit:
+def _row_to_hit(
+    row, snippet_chars: int, score: float
+) -> SearchHit:
     (
         _id, source_type, repo, path, issue_no, _comment_id, language,
         heading_path, content, state, author, line, created_at, updated_at, url,
     ) = row
-    snippet = content if len(content) <= snippet_chars else content[:snippet_chars] + "…"
+    snippet = (
+        content if len(content) <= snippet_chars else content[:snippet_chars] + "…"
+    )
     return SearchHit(
         source_type=source_type, repo=repo, path=path, issue_no=issue_no,
         heading_path=heading_path, snippet=snippet, language=language,
@@ -125,17 +150,76 @@ def _keyword_candidates(
         return cur.fetchall()
 
 
+def _rank_candidates(
+    ranked: list[tuple[int, float]],
+    rows_by_id: dict[int, tuple],
+    sort_by: str = "score",
+    sort_order: str = "desc",
+) -> tuple[list[tuple[int, float]], str]:
+    """候補プールに source-aware な複合ランキングを適用する（issue #69）。
+
+    ランキング方針（docs/design/05）:
+    - 一次ソース（doc / code）: 関連度スコアのみ。日付系 sort_by は無効（no-op）。
+      同スコアでは sentinel により二次ソースより前に来る。
+    - 二次ソース（issue / pr_review）: 関連度主＋state / updated_at の tie-break。
+      同スコア帯では open → 新着順に並ぶ。
+    - sort_by は既定 "score" で後方互換を維持。非 "score" 指定も挙動は不変で、
+      純粋な日付置換ソート（関連度を丸ごと捨てる挙動）は行わない。
+      tie-break は常に updated_at で行われ、created_at は updated_at に集約される。
+    - sort_order="asc" 時は複合キー全体が反転する（closed→open・古い→新しい）。
+
+    Args:
+        ranked: [(row_id, score), ...] — RRF または pgroonga スコア付き候補。
+        rows_by_id: row_id → row tuple（スコア抜き）。
+        sort_by: "score" / "updated_at" / "created_at"。挙動はすべて同一。
+        sort_order: "desc"（既定）/ "asc"。
+
+    Returns:
+        (ranked_list, ranking_method_string) — 常に "rrf"。
+    """
+    reverse = sort_order != "asc"
+
+    def _key(item: tuple[int, float]) -> tuple[float, int, str]:
+        rid, score = item
+        row = rows_by_id.get(rid)
+        if row is None:
+            # 防御的フォールバック: 欠損行は最下位へ沈める
+            return (score, _MISSING_SP, _MISSING_DATE)
+
+        source_type = row[_COL_SOURCE_TYPE]
+
+        # 一次ソース（doc / code）: スコアのみ。
+        # スコア以外の tie-break 要素は sentinel で中立化し、
+        # 二次ソースの state / updated_at により不当に後回しされないようにする。
+        if source_type in ("doc", "code"):
+            return (score, _PRIMARY_SP, _PRIMARY_DATE)
+
+        # 二次ソース（issue / pr_review）: 複合 tie-break
+        st = row[_COL_STATE]
+        if st == "open":
+            sp = 0
+        elif st == "closed":
+            sp = 1
+        else:
+            sp = 2
+
+        ua = row[_COL_UPDATED_AT]
+        ua_str = ua.isoformat() if ua else ""
+        return (score, -sp, ua_str)
+
+    result = sorted(ranked, key=_key, reverse=reverse)
+    return result, "rrf"
+
+
+# 後方互換用の薄いラッパー。_sort_hits は pool 段非対応のため、
+# 新コードでは _rank_candidates を使うこと。
 def _sort_hits(
     hits: list[dict[str, Any]], sort_by: str, sort_order: str
 ) -> list[dict[str, Any]]:
-    """結果リストを指定されたキーと順序でソートする。
+    """結果リストを指定されたキーと順序でソートする（後方互換ラッパー）。
 
-    sort_by: "score" | "updated_at" | "created_at"
-    sort_order: "asc" | "desc"（既定）
-
-    注記: updated_at / created_at でのソートは、検索の関連度順（RRF スコア /
-    pgroonga スコア）を破棄する。鮮度が絶対条件でない限り、既定（score）のまま
-    使うことを推奨。
+    deprecated: 新規コードでは _rank_candidates を使用すること。
+    sort_by="score" 以外は関連度を丸ごと破棄する旧挙動を維持。
     """
     if sort_by == "score":
         key = lambda h: h.get("score", 0.0)
@@ -163,18 +247,34 @@ def keyword_search(
     （識別子分割済み文字列）も OR 検索するため、camelCase や snake_case の部分一致でも
     発見できる（詳細設計/10 決定 3）。
 
+    ランキングは関連度主に固定（issue #69）。一次ソース（doc/code）はスコア順、
+    二次ソース（issue/pr_review）はスコア＋state/updated_at tie-break。
     sort_by: "score"（既定）/ "updated_at" / "created_at"。
-      updated_at / created_at でのソートは pgroonga の関連度順を破棄する。
-      鮮度が絶対条件でない限り、既定（score）のまま使うことを推奨。
-    sort_order: "desc"（既定）/ "asc"。
+      純粋な日付置換ソートは行わず、二次ソースの tie-break 指定に限定される。
+      created_at は updated_at に集約される。
+    sort_order: "desc"（既定）/ "asc"（asc 時は複合キー全体が反転）。
     """
     k = top_k or settings.default_top_k
-    rows = _keyword_candidates(conn, query, filters, k)
-    hits = [
-        _row_to_hit(r[:-1], settings.snippet_chars, float(r[-1])).to_dict()
-        for r in rows
-    ]
-    return _sort_hits(hits, sort_by, sort_order)
+    pool = max(k * 4, 20)
+    rows = _keyword_candidates(conn, query, filters, pool)
+
+    # 候補を (row_id, score) に分解
+    rows_by_id: dict[int, tuple] = {}
+    scored: list[tuple[int, float]] = []
+    for r in rows:
+        rid = r[0]
+        rows_by_id[rid] = r[:-1]
+        scored.append((rid, float(r[-1])))
+
+    ranked, method = _rank_candidates(scored, rows_by_id, sort_by, sort_order)
+
+    hits = []
+    for rid, score in ranked[:k]:
+        h = _row_to_hit(rows_by_id[rid], settings.snippet_chars, score)
+        d = h.to_dict()
+        d["_ranking"] = method
+        hits.append(d)
+    return hits
 
 
 def semantic_search(
@@ -194,10 +294,14 @@ def semantic_search(
     キーワード側は symbols カラムも OR 検索するため、関数名やクラス名の部分一致でも
     発見できる（詳細設計/10 決定 3）。
 
+    ランキングは関連度主に固定（issue #69）。一次ソース（doc/code）は RRF スコア順、
+    二次ソース（issue/pr_review）は RRF スコア＋state/updated_at tie-break。
+    同スコアでは一次ソースが二次より前に来る。
+    tie-break は pool 段（top-k 切り詰め前）で適用する。
     sort_by: "score"（既定）/ "updated_at" / "created_at"。
-      updated_at / created_at でのソートは RRF の関連度順を破棄する。
-      鮮度が絶対条件でない限り、既定（score）のまま使うことを推奨。
-    sort_order: "desc"（既定）/ "asc"。
+      純粋な日付置換ソートは行わず、二次ソースの tie-break 指定に限定される。
+      created_at は updated_at に集約される。
+    sort_order: "desc"（既定）/ "asc"（asc 時は複合キー全体が反転）。
     """
     k = top_k or settings.default_top_k
     pool = max(k * 4, 20)
@@ -220,9 +324,17 @@ def semantic_search(
         rows_by_id.setdefault(rid, row[:-1])
         scores[rid] = scores.get(rid, 0.0) + 1.0 / (RRF_K + rank + 1)
 
-    ranked = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)[:k]
-    hits = [
-        _row_to_hit(rows_by_id[rid], settings.snippet_chars, score).to_dict()
-        for rid, score in ranked
-    ]
-    return _sort_hits(hits, sort_by, sort_order)
+    # RRF スコアで候補を並べる
+    ranked = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
+
+    # pool 段で source-aware な複合 tie-break を適用（issue #69）
+    ranked, method = _rank_candidates(ranked, rows_by_id, sort_by, sort_order)
+
+    # tie-break 後に top-k 切り詰め
+    hits = []
+    for rid, score in ranked[:k]:
+        h = _row_to_hit(rows_by_id[rid], settings.snippet_chars, score)
+        d = h.to_dict()
+        d["_ranking"] = method
+        hits.append(d)
+    return hits
