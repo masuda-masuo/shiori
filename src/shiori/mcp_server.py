@@ -374,7 +374,8 @@ def semantic_search(
     sort_by: "score"（既定）/ "updated_at" / "created_at"。
       updated_at / created_at でのソートは RRF の関連度順を破棄する。
       鮮度が絶対条件でない限り、既定（score）のまま使うことを推奨。
-    sort_order: "desc"（既定）/ "asc"。"\""
+    sort_order: "desc"（既定）/ "asc"。
+    """
     with _conn() as conn:
         return search.semantic_search(
             settings, conn, _get_embedder(), query,
@@ -407,7 +408,8 @@ def keyword_search(
     sort_by: "score"（既定）/ "updated_at" / "created_at"。
       updated_at / created_at でのソートは pgroonga の関連度順を破棄する。
       鮮度が絶対条件でない限り、既定（score）のまま使うことを推奨。
-    sort_order: "desc"（既定）/ "asc"。"\""
+    sort_order: "desc"（既定）/ "asc"。
+    """
     with _conn() as conn:
         return search.keyword_search(
             settings, conn, query,
