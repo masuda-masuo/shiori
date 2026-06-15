@@ -42,10 +42,10 @@ _COL_CREATED_AT = 12
 _COL_UPDATED_AT = 13
 
 # 一次ソース（doc/code）の複合キー用 sentinel。
-# スコアが同点の二次ソースより不当に後回しにされないよう、
-# スコア以外のすべての tie-break 要素を中立な最大値にする。
-_PRIMARY_SP = -1          # state priority: -1 → -(-1)=1 → open(0)/closed(1)/none(2) のいずれより優先
-_PRIMARY_DATE = "9999"    # いかなる ISO 日付文字列よりも大きい sentinel
+# 二次ソースの -sp 最大値は 0（open の -0）。desc ソートで一次が前に来るには
+# sentinel > 0 が必要 → 1。日付 sentinel はいかなる ISO 日付文字列よりも大きい "9999"。
+_PRIMARY_SP = 1
+_PRIMARY_DATE = "9999"
 
 
 @dataclass
