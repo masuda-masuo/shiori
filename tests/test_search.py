@@ -305,7 +305,12 @@ class TestRankCandidates:
         assert [rid for rid, _ in result] == [2, 3, 1]
 
     def test_mixed_sources_tie_break_open_issue_beats_doc(self):
-        """同スコア時、二次ソースの open は一次より前（tie-break としては open が勝つ）。"""
+        """同スコア時、一次ソースが二次より前に来る（sentinel で保護）。
+
+        一次ソース（doc/code）はスコア以外の tie-break 要素に最大値 sentinel を
+        持つため、同スコアの二次ソースよりも前に並ぶ。これにより一次ソースが
+        state / updated_at 欠落により不当に後回しにされない。
+        """
         from datetime import datetime, timezone
         ts = datetime(2026, 6, 10, tzinfo=timezone.utc)
 
@@ -315,10 +320,7 @@ class TestRankCandidates:
         }
         ranked = [(1, 0.5), (2, 0.5)]
         result, _ = _rank_candidates(ranked, rows_by_id)
-        # open(0) < doc(0) だが -sp で open が -0、doc が 0 なので open が先
-        # 実際には doc の sp 代用値は 0、open の -sp は -0 = 0。つまり tie。
-        # score が同じで tie-break 値も同じ→元の順序が維持される
-        # これは意図した挙動（一次ソースが不当に後回しにならない）
+        # doc の sentinel (-1 state priority, "9999" date) が issue の tie-break 値より大きい
         assert [rid for rid, _ in result] == [1, 2]
 
     # ── sort_order ──
