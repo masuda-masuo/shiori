@@ -177,6 +177,27 @@ def migrate_light(conn: psycopg.Connection, settings: Settings) -> None:
     _run_alter_statements(conn)
 
 
+def _create_pgroonga_index(conn: psycopg.Connection, index_name: str, column: str) -> None:
+    """pgroonga 索引を作成する。TokenMecab 優先、無ければ TokenBigram にフォールバック。"""
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"CREATE INDEX IF NOT EXISTS {index_name} "
+                f"ON chunks USING pgroonga ({column}) WITH (tokenizer = 'TokenMecab')"
+            )
+        conn.commit()
+        log.info("pgroonga index created with TokenMecab: %s", index_name)
+    except psycopg.Error:
+        conn.rollback()
+        with conn.cursor() as cur:
+            cur.execute(
+                f"CREATE INDEX IF NOT EXISTS {index_name} "
+                f"ON chunks USING pgroonga ({column})"
+            )
+        conn.commit()
+        log.info("pgroonga index created with default tokenizer (TokenBigram): %s", index_name)
+
+
 def create_heavy_indexes(conn: psycopg.Connection) -> None:
     """HNSW と pgroonga 索引を作成する（issue #72）。
 
@@ -191,43 +212,8 @@ def create_heavy_indexes(conn: psycopg.Connection) -> None:
     conn.commit()
     log.info("HNSW index created: %s", _HNSW_INDEX)
 
-    # pgroonga: TokenMecab があれば形態素解析、無ければ TokenBigram にフォールバック
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                f"CREATE INDEX IF NOT EXISTS {_PGROONGA_CONTENT_INDEX} "
-                "ON chunks USING pgroonga (content) WITH (tokenizer = 'TokenMecab')"
-            )
-        conn.commit()
-        log.info("pgroonga index created with TokenMecab: %s", _PGROONGA_CONTENT_INDEX)
-    except psycopg.Error:
-        conn.rollback()
-        with conn.cursor() as cur:
-            cur.execute(
-                f"CREATE INDEX IF NOT EXISTS {_PGROONGA_CONTENT_INDEX} "
-                "ON chunks USING pgroonga (content)"
-            )
-        conn.commit()
-        log.info("pgroonga index created with default tokenizer (TokenBigram): %s", _PGROONGA_CONTENT_INDEX)
-
-    # symbols 用 pgroonga 索引
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                f"CREATE INDEX IF NOT EXISTS {_PGROONGA_SYMBOLS_INDEX} "
-                "ON chunks USING pgroonga (symbols) WITH (tokenizer = 'TokenMecab')"
-            )
-        conn.commit()
-        log.info("pgroonga index on symbols created with TokenMecab: %s", _PGROONGA_SYMBOLS_INDEX)
-    except psycopg.Error:
-        conn.rollback()
-        with conn.cursor() as cur:
-            cur.execute(
-                f"CREATE INDEX IF NOT EXISTS {_PGROONGA_SYMBOLS_INDEX} "
-                "ON chunks USING pgroonga (symbols)"
-            )
-        conn.commit()
-        log.info("pgroonga index on symbols created with default tokenizer (TokenBigram): %s", _PGROONGA_SYMBOLS_INDEX)
+    _create_pgroonga_index(conn, _PGROONGA_CONTENT_INDEX, "content")
+    _create_pgroonga_index(conn, _PGROONGA_SYMBOLS_INDEX, "symbols")
 
 
 def drop_heavy_indexes(conn: psycopg.Connection) -> None:

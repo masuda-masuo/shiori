@@ -45,10 +45,16 @@ _BULK_BUFFER_SIZE = 500
 
 
 def _is_bulk_path(conn, rebuild: bool) -> bool:
-    """バルク経路か判定する: rebuild=True または chunks が空。"""
+    """バルク経路か判定する: rebuild=True または chunks テーブルが空／未存在。
+
+    新規 DB（chunks テーブル未作成）もバルク扱いする（issue #72）。
+    """
     if rebuild:
         return True
     with conn.cursor() as cur:
+        cur.execute("SELECT to_regclass('chunks')")
+        if cur.fetchone()[0] is None:
+            return True
         cur.execute("SELECT count(*) FROM chunks")
         return cur.fetchone()[0] == 0
 
@@ -79,18 +85,13 @@ def run_ingest(
 
     conn = db.connect(settings)
 
-    # --- バルク経路判定とスキーマ準備 ---
+    # --- バルク経路判定（ロック前に判定のみ。新規DB対応。issue #72） ---
     is_bulk = _is_bulk_path(conn, rebuild)
 
+    # --- スキーマ準備: migrate_light は冪等なのでロック外でOK ---
     if is_bulk:
         log.info("bulk path detected (rebuild=%s), using light schema + deferred indexes", rebuild)
         db.migrate_light(conn, settings)
-        if rebuild:
-            log.warning("rebuild: 既存の索引と同期カーソルを破棄します")
-            with conn.cursor() as cur:
-                cur.execute("TRUNCATE chunks, doc_files, issue_items, sync_state")
-            conn.commit()
-        db.drop_heavy_indexes(conn)
     else:
         db.migrate(conn, settings)
 
@@ -108,6 +109,15 @@ def run_ingest(
     t_total = time.monotonic()
 
     try:
+        # --- バルク経路: 破壊的操作はロック内で（issue #72） ---
+        if is_bulk:
+            if rebuild:
+                log.warning("rebuild: 既存の索引と同期カーソルを破棄します")
+                with conn.cursor() as cur:
+                    cur.execute("TRUNCATE chunks, doc_files, issue_items, sync_state")
+                conn.commit()
+            db.drop_heavy_indexes(conn)
+
         embedder = Embedder(settings.embedding_model, settings.embedding_dim)
 
         if is_bulk:
@@ -124,6 +134,7 @@ def run_ingest(
             )
             if is_bulk:
                 n_flushed = buffer.flush()
+                conn.commit()  # メタデータ（doc_files, set_cursor）をコミット
                 log.info("docs flushed: %d chunks", n_flushed)
             t_docs = time.monotonic() - t0
             log.info("docs: %d files updated (%.1fs)", n_docs, t_docs)
@@ -136,6 +147,7 @@ def run_ingest(
             )
             if is_bulk:
                 n_flushed = buffer.flush()
+                conn.commit()  # メタデータ（issue_items, set_cursor）をコミット
                 log.info("issues flushed: %d chunks", n_flushed)
             t_issues = time.monotonic() - t0
             log.info("issues/PR: %d items indexed (%.1fs)", n_items, t_issues)
@@ -148,6 +160,7 @@ def run_ingest(
             )
             if is_bulk:
                 n_flushed = buffer.flush()
+                conn.commit()  # メタデータ（doc_files, set_cursor）をコミット
                 log.info("code flushed: %d chunks", n_flushed)
             t_code = time.monotonic() - t0
             log.info("code: %d files updated (%.1fs)", n_code, t_code)

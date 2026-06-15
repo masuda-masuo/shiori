@@ -111,10 +111,13 @@ def _make_filters(
 
 
 def _is_bulk_path(conn, rebuild: bool) -> bool:
-    """バルク経路か判定する: rebuild=True または chunks が空（issue #72）。"""
+    """バルク経路か判定する: rebuild=True または chunks テーブルが空／未存在（issue #72）。"""
     if rebuild:
         return True
     with conn.cursor() as cur:
+        cur.execute("SELECT to_regclass('chunks')")
+        if cur.fetchone()[0] is None:
+            return True
         cur.execute("SELECT count(*) FROM chunks")
         return cur.fetchone()[0] == 0
 
@@ -154,20 +157,13 @@ def _do_sync(
         embedder = _get_embedder()
         result: dict[str, Any] = {"status": "ok", "repos": {}}
         with _conn() as conn:
-            # --- バルク経路判定とスキーマ準備（issue #72） ---
+            # --- バルク経路判定（新規DB対応。issue #72） ---
             is_bulk = _is_bulk_path(conn, rebuild)
 
+            # --- スキーマ準備: migrate_light は冪等なのでロック外でOK ---
             if is_bulk:
                 log.info("bulk path detected (rebuild=%s), using light schema + deferred indexes", rebuild)
                 db.migrate_light(conn, settings)
-                if rebuild:
-                    log.warning("rebuild: 既存の索引と同期カーソルを破棄します")
-                    with conn.cursor() as cur:
-                        cur.execute(
-                            "TRUNCATE chunks, doc_files, issue_items, sync_state"
-                        )
-                    conn.commit()
-                db.drop_heavy_indexes(conn)
             else:
                 db.migrate(conn, settings)
 
@@ -178,6 +174,17 @@ def _do_sync(
             if not acquired:
                 return {"status": "skipped", "reason": "別プロセスで同期が実行中です"}
             try:
+                # --- バルク経路: 破壊的操作はロック内で（issue #72） ---
+                if is_bulk:
+                    if rebuild:
+                        log.warning("rebuild: 既存の索引と同期カーソルを破棄します")
+                        with conn.cursor() as cur:
+                            cur.execute(
+                                "TRUNCATE chunks, doc_files, issue_items, sync_state"
+                            )
+                        conn.commit()
+                    db.drop_heavy_indexes(conn)
+
                 if is_bulk:
                     buffer = ChunkBuffer(conn, embedder, batch_size=_BULK_BUFFER_SIZE)
 
@@ -188,18 +195,21 @@ def _do_sync(
                     )
                     if is_bulk:
                         buffer.flush()
+                        conn.commit()  # メタデータをコミット
                     n_items = sync_issues(
                         settings, conn, embedder, repo, provider,
                         buffer=buffer if is_bulk else None,
                     )
                     if is_bulk:
                         buffer.flush()
+                        conn.commit()  # メタデータをコミット
                     n_code = sync_code(
                         settings, conn, embedder, repo, provider,
                         buffer=buffer if is_bulk else None,
                     )
                     if is_bulk:
                         buffer.flush()
+                        conn.commit()  # メタデータをコミット
                     finished_at = db.record_sync_run(
                         conn, repo, route, n_docs, n_items, n_code
                     )
