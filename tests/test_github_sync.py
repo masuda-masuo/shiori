@@ -1,8 +1,8 @@
-"""github_sync のユニットテスト（issue #25, #54, #72, #73）。
+"""github_sync のユニットテスト（issue #25, #54, #72, #73, #81）。
 
 _should_index の allowlist 判定ロジック、_sync_pr_changes の head_sha 比較による
 スキップ／再取得ロジック、ChunkBuffer のバッチ蓄積・フラッシュ、
-_clean_text の制御文字除去を検証する。
+_clean_text の制御文字除去、_git_fetch_ref / _git_delete_ref を検証する。
 """
 
 from __future__ import annotations
@@ -16,6 +16,8 @@ from shiori.github_sync import (
     ChunkBuffer,
     _clean_text,
     _git,
+    _git_delete_ref,
+    _git_fetch_ref,
     _is_bot,
     _propagate_issue_state,
     _should_index,
@@ -386,3 +388,98 @@ class TestCleanText:
     def test_only_control_chars(self):
         """制御文字だけの文字列は空になる。"""
         assert _clean_text("\x00\x01\x08\x0B\x1F") == ""
+
+
+# ---------------------------------------------------------------------------
+# _git_fetch_ref / _git_delete_ref（issue #81）
+# ---------------------------------------------------------------------------
+
+
+class TestGitFetchRef:
+    """_git_fetch_ref / _git_delete_ref: PR head 取得の共通プリミティブ。"""
+
+    @patch("shiori.github_sync._git")
+    def test_auto_generates_tmp_ref(self, mock_git):
+        """tmp_ref 未指定時は refs/shiori/tmp-{uuid} を自動生成する。"""
+        with patch("shiori.github_sync.uuid.uuid4") as mock_uuid:
+            mock_uuid.return_value.hex = "deadbeef1234"
+            result = _git_fetch_ref("pull/42/head", cwd="/data/repos/o/r")
+
+        assert result == "refs/shiori/tmp-deadbeef1234"
+        # fetch が呼ばれたこと
+        called_args = mock_git.call_args[0][0]
+        assert called_args == [
+            "fetch", "origin", "pull/42/head:refs/shiori/tmp-deadbeef1234", "--depth=1",
+        ]
+
+    @patch("shiori.github_sync._git")
+    def test_uses_custom_tmp_ref(self, mock_git):
+        """tmp_ref 指定時はその値を使う。"""
+        result = _git_fetch_ref(
+            "pull/42/head",
+            cwd="/data/repos/o/r",
+            tmp_ref="refs/shiori/my-temp",
+        )
+
+        assert result == "refs/shiori/my-temp"
+        called_args = mock_git.call_args[0][0]
+        assert called_args == [
+            "fetch", "origin", "pull/42/head:refs/shiori/my-temp", "--depth=1",
+        ]
+
+    @patch("shiori.github_sync._auth_args")
+    @patch("shiori.github_sync._git")
+    def test_forwards_provider_auth(self, mock_git, mock_auth):
+        """provider が指定された場合、_auth_args の結果を git 引数に含める。"""
+        mock_auth.return_value = ["-c", "http.extraHeader=Authorization: Basic xxx"]
+        provider = MagicMock()
+
+        with patch("shiori.github_sync.uuid.uuid4") as mock_uuid:
+            mock_uuid.return_value.hex = "abc"
+            _git_fetch_ref("pull/1/head", cwd="/r", provider=provider)
+
+        called_args = mock_git.call_args[0][0]
+        assert called_args[:2] == ["-c", "http.extraHeader=Authorization: Basic xxx"]
+        assert "fetch" in called_args
+        mock_auth.assert_called_once_with(provider)
+
+    @patch("shiori.github_sync._auth_args")
+    @patch("shiori.github_sync._git")
+    def test_no_auth_when_provider_none(self, mock_git, mock_auth):
+        """provider=None なら認証引数は付与されない。"""
+        mock_auth.return_value = []
+
+        with patch("shiori.github_sync.uuid.uuid4") as mock_uuid:
+            mock_uuid.return_value.hex = "abc"
+            _git_fetch_ref("pull/1/head", cwd="/r", provider=None)
+
+        called_args = mock_git.call_args[0][0]
+        assert called_args[0] == "fetch"
+        # _auth_args が呼ばれないことを確認
+        mock_auth.assert_not_called()
+
+    @patch("shiori.github_sync._git")
+    def test_fetch_failure_propagated(self, mock_git):
+        """git fetch の失敗はそのまま伝播する。"""
+        mock_git.side_effect = RuntimeError("fetch failed")
+
+        with pytest.raises(RuntimeError, match="fetch failed"):
+            _git_fetch_ref("pull/999/head", cwd="/r")
+
+    @patch("shiori.github_sync._git")
+    def test_delete_ref_exists(self, mock_git):
+        """_git_delete_ref は update-ref -d を呼ぶ。"""
+        _git_delete_ref("refs/shiori/tmp-abc", cwd="/r")
+
+        mock_git.assert_called_once_with(
+            ["update-ref", "-d", "refs/shiori/tmp-abc"],
+            cwd="/r",
+        )
+
+    @patch("shiori.github_sync._git")
+    def test_delete_ref_nonexistent_ignored(self, mock_git):
+        """存在しない ref の削除は RuntimeError を握りつぶす。"""
+        mock_git.side_effect = RuntimeError("fatal: ...")
+
+        # 例外を出さない
+        _git_delete_ref("refs/shiori/nonexistent", cwd="/r")

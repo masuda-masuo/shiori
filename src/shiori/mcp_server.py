@@ -7,6 +7,7 @@
 - read_file(path, start?, end?)       : ローカルクローンからファイル（の一部）を取得。
 - read_issue(number, repo?, exclude_noise_bots?) : issue/PR スレッド全体を取得。
 - pr_changes(number, repo?)           : PR の変更ファイルマップ（ポインタ）を返す（issue #54）。
+- read_pr_file(number, path, start?, end?, repo?) : PR head のファイル内容を透過的に取得（issue #81）。
 - ingest(rebuild?, repo?)             : docs / issue / PR / code の差分同期（索引更新）。
 - status()                            : 索引の鮮度と健全性（最終同期時刻・件数内訳・警告）。
 
@@ -51,7 +52,15 @@ from . import db, search
 from .config import Settings, load_settings
 from .embedding import Embedder
 from .github_auth import build_token_provider
-from .github_sync import ChunkBuffer, sync_code, sync_docs, sync_issues
+from .github_sync import (
+    ChunkBuffer,
+    _git,
+    _git_delete_ref,
+    _git_fetch_ref,
+    sync_code,
+    sync_docs,
+    sync_issues,
+)
 
 log = logging.getLogger(__name__)
 
@@ -343,6 +352,7 @@ mcp = FastMCP(
         "コードの検索は shiori_search / shiori_keyword_search で可能"
         "（source_type='code' で絞り込み可、prog_lang フィルタで言語指定も可）。"
         "PR の変更ファイルマップは shiori_pr_changes で取得できる。"
+        "PR head のファイル内容は shiori_read_pr_file で透過的に取得できる（issue #81）。"
         "\n"
         "■ 二ストア・モデル（情報の出所）\n"
         "shiori は 2 つの独立したデータソースを持つ:\n"
@@ -354,9 +364,10 @@ mcp = FastMCP(
         "   - 鮮度は shiori_ingest / 自動同期に依存\n"
         "2. クローン（ディスク、main ブランチ固定）\n"
         "   - shiori_read_file: 実ファイルを直接読み取り（索引不要、クローンがあれば読める）\n"
+        "   - shiori_read_pr_file: PR head のファイルを git 経由で取得（ワーキングツリー非破壊）\n"
         "   - shiori_list_tree (source_type='code'): os.walk で物理的に存在するコードファイル\n"
         "   - クローンは sync_docs が clone --depth=1 + reset --hard origin/HEAD で維持\n"
-        "   - 常に main ブランチ時点。PR head / 別 ref / diff は GitHub MCP に委譲"
+        "   - shiori_read_pr_file はクローンを起点に git fetch で PR head を取得して読む"
     ),
 )
 
@@ -526,7 +537,7 @@ def read_file(
 
     このツールは索引（Postgres）ではなく、ローカルクローン（main ブランチ固定）の
     実ファイルを直接読み取る。索引が存在しなくても、クローンがあれば読める。
-    PR head / 別 ref / diff の取得は GitHub MCP に委譲すること。"""
+    PR head / 別 ref / diff の取得は GitHub MCP または shiori_read_pr_file に委譲すること。"""
     target = _resolve_repo(repo)
     base = os.path.realpath(settings.repo_dir(target))
     full = os.path.realpath(os.path.join(base, path))
@@ -616,11 +627,11 @@ def pr_changes(number: int, repo: str | None = None) -> dict[str, Any]:
 
     保持しないもの（コンテンツ）:
       - patch hunk 全文 → GitHub MCP の pull_request_read(method='get_diff') で取得
-      - PR head のファイル全文 → GitHub MCP の get_file_contents(sha=head_sha, ...) で取得
+      - PR head のファイル全文 → shiori_read_pr_file で取得（推奨）、または
+        GitHub MCP の get_file_contents(sha=head_sha, ...) で取得
 
-    このツールは索引（DB）からメタデータを返す。shiori_read_file は main ブランチ固定のため、
-    PR head のファイル内容が必要な場合は必ず GitHub MCP を使うこと。
-    """
+    このツールは索引（DB）からメタデータを返す。PR head のファイル内容は
+    shiori_read_pr_file（ShioriMCP）または GitHub MCP で取得すること。"""
     target = _resolve_repo(repo)
     with _conn() as conn:
         files, head_sha = db.get_pr_changes(conn, target, number)
@@ -635,6 +646,67 @@ def pr_changes(number: int, repo: str | None = None) -> dict[str, Any]:
         "head_sha": head_sha,
         "files": files,
     }
+
+
+@mcp.tool(name="shiori_read_pr_file")
+def read_pr_file(
+    number: int,
+    path: str,
+    start_line: int | None = None,
+    end_line: int | None = None,
+    repo: str | None = None,
+) -> dict[str, Any]:
+    """PR head のファイル内容（または start_line〜end_line の範囲）を取得する。
+    shiori_pr_changes で変更ファイル一覧を取得した後、このツールで各ファイルの中身を読む。
+    shiori_read_file と違い、PR の head ブランチのファイルを透過的に読める。
+    GitHub の refs/pull/{N}/head から git fetch し、ワーキングツリーを変更せずに
+    ファイル内容を取り出す。一時 ref は自動クリーンアップされる。
+
+    number: PR 番号
+    path: ファイルパス（例: "src/main.py"）
+    repo: リポジトリ名（"owner/name"）。省略時は SHIORI_REPOS の最初のリポジトリ。
+    start_line: 開始行（1-indexed）
+    end_line: 終了行（1-indexed、省略時は最終行）"""
+    target = _resolve_repo(repo)
+    base = os.path.realpath(settings.repo_dir(target))
+
+    if not os.path.isdir(os.path.join(base, ".git")):
+        raise FileNotFoundError(
+            f"{target} のクローンが存在しません。shiori_ingest で同期してください。"
+        )
+
+    ref = f"pull/{number}/head"
+    tmp_ref = None
+    try:
+        provider = build_token_provider(settings)
+        tmp_ref = _git_fetch_ref(ref, cwd=base, provider=provider)
+
+        # git show でファイル内容を取得
+        try:
+            content = _git(["show", f"{tmp_ref}:{path}"], cwd=base)
+        except RuntimeError as exc:
+            raise FileNotFoundError(
+                f"PR #{number} に {path} が見つかりません: {exc}"
+            )
+
+        lines = content.splitlines()
+        total = len(lines)
+        s = max((start_line or 1) - 1, 0)
+        e = min(end_line or total, total)
+        body = "\n".join(lines[s:e])
+
+        return {
+            "repo": target,
+            "number": number,
+            "path": path,
+            "start_line": s + 1,
+            "end_line": e,
+            "total_lines": total,
+            "content": body,
+        }
+    finally:
+        if tmp_ref:
+            _git_delete_ref(tmp_ref, cwd=base)
 
 
 @mcp.tool(name="shiori_ingest")
