@@ -1,7 +1,8 @@
-"""github_sync のユニットテスト（issue #25, #54, #72）。
+"""github_sync のユニットテスト（issue #25, #54, #72, #73）。
 
 _should_index の allowlist 判定ロジック、_sync_pr_changes の head_sha 比較による
-スキップ／再取得ロジック、ChunkBuffer のバッチ蓄積・フラッシュを検証する。
+スキップ／再取得ロジック、ChunkBuffer のバッチ蓄積・フラッシュ、
+_clean_text の制御文字除去を検証する。
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ import pytest
 from shiori.config import Settings
 from shiori.github_sync import (
     ChunkBuffer,
+    _clean_text,
     _git,
     _is_bot,
     _propagate_issue_state,
@@ -336,3 +338,51 @@ class TestGit:
         _git(["clone", "url", "dest"])
         called_cmd = mock_run.call_args[0][0]
         assert "-c" not in called_cmd
+
+
+# ---------------------------------------------------------------------------
+# _clean_text（issue #73）
+# ---------------------------------------------------------------------------
+
+
+class TestCleanText:
+    """_clean_text: 制御文字除去（改行・タブは保持）。"""
+
+    def test_remove_nul(self):
+        """NUL (0x00) が除去される。"""
+        assert _clean_text("hello\x00world") == "helloworld"
+
+    def test_remove_control_chars(self):
+        """改行・タブ以外の制御文字 (0x01-0x08, 0x0B-0x1F) が除去される。"""
+        assert _clean_text("a\x01b\x08c\x0Bd\x1Fe") == "abcde"
+
+    def test_preserve_newline(self):
+        """改行 (\n, 0x0A) は保持される。"""
+        assert _clean_text("line1\nline2\nline3") == "line1\nline2\nline3"
+
+    def test_preserve_tab(self):
+        """タブ (\t, 0x09) は保持される。"""
+        assert _clean_text("col1\tcol2\tcol3") == "col1\tcol2\tcol3"
+
+    def test_preserve_normal_text(self):
+        """通常のテキストはそのまま。"""
+        text = "Hello, 世界! This is a test \U0001f60a"
+        assert _clean_text(text) == text
+
+    def test_none_returns_empty(self):
+        """None は空文字列になる。"""
+        assert _clean_text(None) == ""
+
+    def test_empty_string(self):
+        """空文字列はそのまま。"""
+        assert _clean_text("") == ""
+
+    def test_mixed_control_and_valid(self):
+        """制御文字・改行・タブ・通常テキストの混合。"""
+        mixed = "a\x00b\x01c\nd\te\x1Ff\x09g\nh"
+        expected = "abc\nd\tef\tg\nh"
+        assert _clean_text(mixed) == expected
+
+    def test_only_control_chars(self):
+        """制御文字だけの文字列は空になる。"""
+        assert _clean_text("\x00\x01\x08\x0B\x1F") == ""

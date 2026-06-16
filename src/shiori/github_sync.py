@@ -1,4 +1,4 @@
-"""データ取り込みと同期（詳細設計/01）。
+'''データ取り込みと同期（詳細設計/01）。
 
 決定事項:
 - docs は git clone / pull。ファイル単位の content ハッシュを doc_files に保持し、
@@ -17,7 +17,7 @@
   チャンク挿入をバルク化＋commit を粗くする（issue #72）。
 認証は TokenProvider 抽象経由（詳細設計/09）。git は http.extraHeader でトークンを注入し、
 API は httpx の Auth フックでリクエスト毎に注入する。
-"""
+'''
 
 from __future__ import annotations
 
@@ -71,6 +71,21 @@ def _should_index(is_bot: bool, author: str | None, settings: Settings) -> bool:
     if author and author.lower() in settings.index_bot_logins:
         return True
     return False
+
+
+# 制御文字除去用の正規表現: 改行(\n=0x0A)とタブ(\t=0x09)以外の制御文字(0x00-0x1F)にマッチ
+_CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0B-\x1F]")
+
+
+def _clean_text(s: str | None) -> str:
+    """GitHub API から取得したテキストの制御文字を正規化する（issue #73）。
+
+    PostgreSQL の text 型は NUL (0x00) を格納できず、埋め込みモデルの
+    入力としても制御文字はノイズとなるため、改行・タブ以外の制御文字を除去する。
+    """
+    if not s:
+        return ""
+    return _CONTROL_CHARS_RE.sub("", s)
 
 
 # ---------------------------------------------------------------------------
@@ -778,18 +793,20 @@ def sync_issues(
             no = it["number"]
             kind = "pr" if "pull_request" in it else "issue"
             author = (it.get("user") or {}).get("login")
+            title = _clean_text(it.get("title"))
+            body = _clean_text(it.get("body") or "")
             row = {
                 "repo": repo,
                 "issue_no": no,
                 "comment_id": 0,
                 "kind": kind,
-                "title": it.get("title"),
+                "title": title,
                 "author": author,
                 "is_bot": _is_bot(it.get("user")),
                 "state": it.get("state"),
                 "path": None,
                 "line": None,
-                "body": it.get("body") or "",
+                "body": body,
                 "url": it.get("html_url"),
                 "created_at": it.get("created_at"),
                 "updated_at": it.get("updated_at"),
@@ -802,7 +819,7 @@ def sync_issues(
                     chunk_key=f"issue:{repo}:{no}:body",
                     source_type="issue",
                     repo=repo, issue_no=no, comment_id=None,
-                    title=it.get("title"), body=it.get("body") or "",
+                    title=title, body=body,
                     state=it.get("state"), author=author,
                     path=None, line=None,
                     created_at=it.get("created_at"),
@@ -830,11 +847,12 @@ def sync_issues(
             title, state = _issue_title_state(conn, repo, no)
             author = (c.get("user") or {}).get("login")
             is_bot = _is_bot(c.get("user"))
+            body = _clean_text(c.get("body") or "")
             _upsert_issue_item(conn, {
                 "repo": repo, "issue_no": no, "comment_id": c["id"],
                 "kind": "comment", "title": None, "author": author,
                 "is_bot": is_bot, "state": state, "path": None, "line": None,
-                "body": c.get("body") or "", "url": c.get("html_url"),
+                "body": body, "url": c.get("html_url"),
                 "created_at": c.get("created_at"), "updated_at": c.get("updated_at"),
             })
             if _should_index(is_bot, author, settings):
@@ -843,7 +861,7 @@ def sync_issues(
                     chunk_key=f"issue:{repo}:{no}:c{c['id']}",
                     source_type="issue",
                     repo=repo, issue_no=no, comment_id=c["id"],
-                    title=title, body=c.get("body") or "",
+                    title=title, body=body,
                     state=state, author=author, path=None, line=None,
                     created_at=c.get("created_at"), updated_at=c.get("updated_at"),
                     url=c.get("html_url"),
@@ -868,9 +886,10 @@ def sync_issues(
             is_bot = _is_bot(c.get("user"))
             line = c.get("line") or c.get("original_line")
             # diff_hunk を文脈として本文に付与する（diff 自体は索引しない決定の範囲内）
-            body = c.get("body") or ""
-            if c.get("diff_hunk"):
-                body = f"{body}\n\n```diff\n{c['diff_hunk']}\n```"
+            body = _clean_text(c.get("body") or "")
+            diff_hunk = c.get("diff_hunk")
+            if diff_hunk:
+                body = f"{body}\n\n```diff\n{_clean_text(diff_hunk)}\n```"
             _upsert_issue_item(conn, {
                 "repo": repo, "issue_no": no, "comment_id": c["id"],
                 "kind": "pr_review_comment", "title": None, "author": author,
