@@ -15,6 +15,8 @@
 - PR 変更ファイルマップはメタデータのみ同期・保持し、コンテンツ（patch）は GitHub MCP に委譲する（issue #54）。
 - 初回／rebuild のバルク経路では、ChunkBuffer により埋め込みをファイル横断でバッチ化し、
   チャンク挿入をバルク化＋commit を粗くする（issue #72）。
+- _git_fetch_ref / _git_delete_ref は PR head ファイル取得のための共通プリミティブ（issue #81）。
+  ワーキングツリーを変更せずに任意の ref からファイルを読み取るために使う。
 認証は TokenProvider 抽象経由（詳細設計/09）。git は http.extraHeader でトークンを注入し、
 API は httpx の Auth フックでリクエスト毎に注入する。
 '''
@@ -28,6 +30,7 @@ import logging
 import os
 import re
 import subprocess
+import uuid
 
 import httpx
 import psycopg
@@ -205,6 +208,35 @@ def _auth_args(provider: TokenProvider) -> list[str]:
         return []
     b64 = base64.b64encode(f"x-access-token:{token}".encode()).decode()
     return ["-c", f"http.extraHeader=Authorization: Basic {b64}"]
+
+
+def _git_fetch_ref(
+    ref: str,
+    cwd: str | None = None,
+    provider: TokenProvider | None = None,
+    tmp_ref: str | None = None,
+) -> str:
+    """指定 ref を shallow fetch し、一時 ref 名を返す（issue #81）。
+
+    tmp_ref が None の場合は ``refs/shiori/tmp-{uuid}`` を自動生成。
+    呼び出し元は使用後に _git_delete_ref(tmp_ref) を呼ぶこと。
+    ワーキングツリーを変更しないため checkout 不要。
+
+    並行リクエストで FETCH_HEAD が上書きされる問題を避けるため、
+    固定名ではなく UUID を含む一時 ref に fetch する。
+    """
+    resolved = tmp_ref or f"refs/shiori/tmp-{uuid.uuid4().hex}"
+    auth = _auth_args(provider) if provider else []
+    _git(auth + ["fetch", "origin", f"{ref}:{resolved}", "--depth=1"], cwd=cwd)
+    return resolved
+
+
+def _git_delete_ref(tmp_ref: str, cwd: str | None = None) -> None:
+    """一時 ref を削除する。存在しない場合は無視（issue #81）。"""
+    try:
+        _git(["update-ref", "-d", tmp_ref], cwd=cwd)
+    except RuntimeError:
+        pass  # 既に削除済み等
 
 
 class _GitHubAuth(httpx.Auth):
