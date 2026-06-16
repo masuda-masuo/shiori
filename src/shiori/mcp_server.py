@@ -54,6 +54,7 @@ from .embedding import Embedder
 from .github_auth import build_token_provider
 from .github_sync import (
     ChunkBuffer,
+    _git,
     _git_delete_ref,
     _git_fetch_ref,
     sync_code,
