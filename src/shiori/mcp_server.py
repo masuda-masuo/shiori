@@ -309,7 +309,7 @@ def _walk_code_files(base: str, prefix: str, extension: str | None = None) -> se
     - .md / .mdx / .markdown は doc_files テーブルが担当するため除外
     - バイナリ・アセット・ロックファイル等の非テキスト拡張子も除外
     - prefix が指定された場合はそのパス自身またはその配下のファイルのみを返す
-      （例: prefix="src" は "src/main.py" にマッチ、""src2/main.py" にはマッチしない）
+      （例: prefix="src" は "src/main.py" にマッチ、"src2/main.py" にはマッチしない）
     - extension が指定された場合はウォーク中に拡張子フィルタを適用（大文字小文字無視）
     """
     paths: set[str] = set()
