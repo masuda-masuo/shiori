@@ -130,8 +130,9 @@ def _split_long_text(text: str, max_chars: int) -> list[str]:
             if buf:
                 parts.append(buf)
                 buf = ""
-            parts.append(s[:max_chars])
-            s = s[max_chars:]
+            cut = _find_breakpoint(s, max_chars)
+            parts.append(s[:cut])
+            s = s[cut:].lstrip()
         if buf and len(buf) + len(s) + 1 > max_chars:
             parts.append(buf)
             buf = s
@@ -140,6 +141,22 @@ def _split_long_text(text: str, max_chars: int) -> list[str]:
     if buf:
         parts.append(buf)
     return parts
+
+
+def _find_breakpoint(s: str, max_chars: int) -> int:
+    """max_chars を超えない最も近い意味的境界を探す。
+
+    優先順:
+    1. 句点・終端記号（。．！？!?.）: 文の終わり
+    2. 読点（、，,）: 節の境界
+    3. 見つからなければ max_chars でハードカット
+    """
+    search_start = max(1, max_chars // 2)
+    for terminal in ("。．！？!?.", "、，,"):
+        for i in range(max_chars - 1, search_start - 1, -1):
+            if s[i] in terminal:
+                return i + 1
+    return max_chars
 
 
 def split_markdown(text: str, max_chars: int = 1200) -> list[Chunk]:

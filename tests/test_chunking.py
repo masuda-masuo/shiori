@@ -1,12 +1,14 @@
 from shiori.chunking import (
     Chunk,
     _TS_AVAILABLE,
+    _find_breakpoint,
+    _split_long_text,
+    _split_symbols,
     _ts_get_parser,
     detect_language,
     split_code,
     split_issue_text,
     split_markdown,
-    _split_symbols,
 )
 
 
@@ -227,3 +229,51 @@ def test_split_code_ts_python_symbols():
     assert "parse" in sym
     assert "config" in sym
     assert "file" in sym
+
+
+# ---------------------------------------------------------------------------
+# _find_breakpoint / _split_long_text: チャンク境界で単語が分断されないこと（issue #85）
+# ---------------------------------------------------------------------------
+
+
+def test_find_breakpoint_at_period():
+    """句点で分割される（max_chars より手前の最終句点を探す）。"""
+    s = "あ" * 800 + "。文章の続きです。" + "B" * 500
+    bp = _find_breakpoint(s, 1200)
+    assert bp == 809  # s[808]="。", その直後 index 809
+
+
+def test_find_breakpoint_at_comma_fallback():
+    """句点がない場合、読点で分割される。"""
+    s = "A" * 1195 + "、" + "B" * 500
+    bp = _find_breakpoint(s, 1200)
+    assert bp == 1196
+
+
+def test_find_breakpoint_hard_cut_when_no_boundary():
+    """文境界が見つからない場合は max_chars でハードカット。"""
+    s = "A" * 2000  # 句読点なし
+    bp = _find_breakpoint(s, 1200)
+    assert bp == 1200
+
+
+def test_split_long_text_preserves_katakana_word():
+    """max_chars 境界にカタカナ語があっても分断されない（issue #85）。"""
+    prefix = "あ" * 1190
+    s = prefix + "ダッシュボード" + "が重要な機能です。さらに続きます。" + "い" * 100
+    parts = _split_long_text(s, 1200)
+    assert len(parts) >= 2
+    # 最初のチャンクは句点まで含む
+    combined = "".join(parts)
+    assert "ダッシュボード" in combined
+    # 各チャンクが max_chars を超えていない
+    for p in parts:
+        assert len(p) <= 1200
+
+
+def test_split_long_text_short_text_unchanged():
+    """短いテキストはそのまま返る。"""
+    short = "これは短いテキストです。分割不要。"
+    parts = _split_long_text(short, 1200)
+    assert len(parts) == 1
+    assert parts[0] == short
