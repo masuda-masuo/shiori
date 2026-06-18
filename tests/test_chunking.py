@@ -1,12 +1,14 @@
 from shiori.chunking import (
     Chunk,
     _TS_AVAILABLE,
+    _find_breakpoint,
+    _split_long_text,
+    _split_symbols,
     _ts_get_parser,
     detect_language,
     split_code,
     split_issue_text,
     split_markdown,
-    _split_symbols,
 )
 
 
@@ -227,3 +229,82 @@ def test_split_code_ts_python_symbols():
     assert "parse" in sym
     assert "config" in sym
     assert "file" in sym
+
+
+# ---------------------------------------------------------------------------
+# _find_breakpoint / _split_long_text: チャンク境界で単語が分断されないこと（issue #85）
+# ---------------------------------------------------------------------------
+
+
+def test_find_breakpoint_at_period():
+    """句点で分割される（max_chars より手前の最終句点を探す）。"""
+    s = "あ" * 800 + "。文章の続きです。" + "B" * 500
+    bp = _find_breakpoint(s, 1200)
+    assert bp == 809  # s[808]="。", その直後 index 809
+
+
+def test_find_breakpoint_at_comma_fallback():
+    """句点がない場合、読点で分割される。"""
+    s = "A" * 1195 + "、" + "B" * 500
+    bp = _find_breakpoint(s, 1200)
+    assert bp == 1196
+
+
+def test_find_breakpoint_hard_cut_when_no_boundary():
+    """文境界が見つからない場合は max_chars でハードカット。"""
+    s = "A" * 2000  # 句読点なし
+    bp = _find_breakpoint(s, 1200)
+    assert bp == 1200
+
+
+def test_split_long_text_preserves_katakana_word():
+    """max_chars 境界にカタカナ語があっても分断されない（issue #85）。
+    読点での分割により、カタカナ語が 1 つのチャンクに完全に収まる。"""
+    prefix = "あ" * 1194
+    s = prefix + "、" + "ダッシュボード" + "重要な機能です" + "B" * 100
+    # "ダッシュボード" (7 chars) starts at position 1195, spans 1195-1201.
+    # Without _find_breakpoint, hard cut at 1200 splits at "ダッシュボ" + "ード"
+    parts = _split_long_text(s, 1200)
+    assert any("ダッシュボード" in p for p in parts)
+    for p in parts:
+        assert len(p) <= 1200
+
+
+def test_split_long_text_short_text_unchanged():
+    """短いテキストはそのまま返る。"""
+    short = "これは短いテキストです。分割不要。"
+    parts = _split_long_text(short, 1200)
+    assert len(parts) == 1
+    assert parts[0] == short
+
+
+def test_split_long_text_breaks_at_comma():
+    """句点がないが読点がある長い文は読点で分割され、max_chars 境界の分断を防ぐ。"""
+    s = "あ" * 700 + "、" + "B" * 600
+    parts = _split_long_text(s, 1200)
+    assert len(parts) >= 2
+    assert parts[0].endswith("、")
+    for p in parts:
+        assert len(p) <= 1200
+
+
+def test_find_breakpoint_period_at_max_chars():
+    """句点が max_chars 直前にあっても分割される。"""
+    s = "あ" * 1198 + "。文章"
+    bp = _find_breakpoint(s, 1200)
+    assert bp == 1199
+    assert len(s[:bp]) <= 1200
+
+
+def test_find_breakpoint_comma_at_edge():
+    """読点が探索範囲の下限（max_chars//2）にある。"""
+    s = "A" * 600 + "、" + "B" * 600
+    bp = _find_breakpoint(s, 1200)
+    assert bp == 601
+
+
+def test_find_breakpoint_small_max_chars():
+    """max_chars が極小でもクラッシュしない。"""
+    assert _find_breakpoint("ABCDE", 5) == 5
+    assert _find_breakpoint("AB、CDE", 5) == 3
+    assert _find_breakpoint("AB", 1) == 1
