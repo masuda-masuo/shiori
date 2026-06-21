@@ -625,8 +625,12 @@ def read_issue(
         allowlist（SHIORI_INDEX_BOT_LOGINS）登録済み bot の投稿は残る（issue #44）。
     numbers: 複数の issue/PR 番号（バッチ取得）。指定時は配列を返す。
 """
+    if number is not None and numbers is not None:
+        raise ValueError("number と numbers は同時に指定できません")
     target = _resolve_repo(repo)
     if numbers is not None:
+        if len(numbers) > 50:
+            raise ValueError(f"numbers は最大50件までです（{len(numbers)}件指定されました）")
         results: list[dict[str, Any]] = []
         for n in numbers:
             try:

@@ -294,6 +294,18 @@ class TestReadIssueNumbers:
         assert "status" not in result
         assert len(result["items"]) == 1
 
+    def test_number_and_numbers_mutually_exclusive(self):
+        """number と numbers の両方を指定すると ValueError。"""
+        with patch("shiori.mcp_server._resolve_repo", return_value="o/r"):
+            with pytest.raises(ValueError, match="同時に指定できません"):
+                read_issue(number=42, numbers=[42, 43])
+
+    def test_batch_too_many_numbers(self):
+        """51件以上は ValueError。"""
+        with patch("shiori.mcp_server._resolve_repo", return_value="o/r"):
+            with pytest.raises(ValueError, match="最大50件"):
+                read_issue(numbers=list(range(51)))
+
     def _mock_conn_with_rows(self, rows):
         conn = MagicMock()
         cursor = MagicMock()
