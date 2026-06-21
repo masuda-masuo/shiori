@@ -561,16 +561,8 @@ def read_file(
     }
 
 
-@mcp.tool(name="shiori_read_issue")
-def read_issue(number: int, repo: str | None = None, exclude_noise_bots: bool = False) -> dict[str, Any]:
-    """issue / PR のスレッド全体（本文＋コメント＋レビューコメント）を時系列で取得する。
-    bot コメントも含まれる（is_bot で識別可能）。
-
-    number: issue または PR 番号。
-    repo: リポジトリ名（"owner/name"）。省略時は SHIORI_REPOS の最初のリポジトリ。
-    exclude_noise_bots: True で allowlist 外の bot（CI / dependabot 等）を除外する（既定 False）。
-        allowlist（SHIORI_INDEX_BOT_LOGINS）登録済み bot の投稿は残る（issue #44）。"""
-    target = _resolve_repo(repo)
+def _read_issue_single(target: str, number: int, exclude_noise_bots: bool) -> dict[str, Any]:
+    """1 件の issue を取得（内部ヘルパー）。未索引の場合は ValueError。"""
     with _conn() as conn, conn.cursor() as cur:
         cur.execute(
             """
@@ -615,6 +607,43 @@ def read_issue(number: int, repo: str | None = None, exclude_noise_bots: bool = 
             for r in rows
         ],
     }
+
+
+@mcp.tool(name="shiori_read_issue")
+def read_issue(
+    number: int | None = None,
+    repo: str | None = None,
+    exclude_noise_bots: bool = False,
+    numbers: list[int] | None = None,
+) -> dict[str, Any] | list[dict[str, Any]]:
+    """issue / PR のスレッド全体（本文＋コメント＋レビューコメント）を時系列で取得する。
+    bot コメントも含まれる（is_bot で識別可能）。
+
+    number: issue または PR 番号（単発取得。numbers と排他）。
+    repo: リポジトリ名（"owner/name"）。省略時は SHIORI_REPOS の最初のリポジトリ。
+    exclude_noise_bots: True で allowlist 外の bot（CI / dependabot 等）を除外する（既定 False）。
+        allowlist（SHIORI_INDEX_BOT_LOGINS）登録済み bot の投稿は残る（issue #44）。
+    numbers: 複数の issue/PR 番号（バッチ取得）。指定時は配列を返す。
+"""
+    target = _resolve_repo(repo)
+    if numbers is not None:
+        results: list[dict[str, Any]] = []
+        for n in numbers:
+            try:
+                result = _read_issue_single(target, n, exclude_noise_bots)
+                result["status"] = "ok"
+                results.append(result)
+            except ValueError as e:
+                results.append({
+                    "repo": target,
+                    "number": n,
+                    "status": "error",
+                    "error": str(e),
+                })
+        return results
+    if number is None:
+        raise ValueError("number または numbers を指定してください")
+    return _read_issue_single(target, number, exclude_noise_bots)
 
 
 @mcp.tool(name="shiori_pr_changes")
