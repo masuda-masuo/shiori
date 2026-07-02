@@ -1,7 +1,6 @@
 """shiori configuration.
 
-すべて環境変数から読む。docker compose の `.env` 経由で渡す想定。
-"""
+Everything reads from environment variables. Passed via docker compose `.env`."""
 
 from __future__ import annotations
 
@@ -15,41 +14,25 @@ def _repos_from_env() -> list[str]:
 
 
 def _index_bot_logins_from_env() -> set[str]:
-    """SHIORI_INDEX_BOT_LOGINS を小文字の set で返す。
-
-    カンマ区切り。例: ``mcp-launcher-masuda[bot]``
-    ここに列挙された bot login は is_bot=true でも索引対象にする（allowlist）。
-    """
+    """Return SHIORI_INDEX_BOT_LOGINS as a lowercase set."""
     raw = os.environ.get("SHIORI_INDEX_BOT_LOGINS", "")
     return {s.strip().lower() for s in raw.split(",") if s.strip()}
 
 
 def _code_extensions_from_env() -> set[str]:
-    """SHIORI_CODE_EXTENSIONS を小文字の set で返す。
-
-    カンマ区切り（ドット付き）。例: ``.py,.js,.ts,.go,.rs``
-    未設定なら None（= 全コード拡張子が対象）。
-    """
+    """Return SHIORI_CODE_EXTENSIONS as a lowercase set."""
     raw = os.environ.get("SHIORI_CODE_EXTENSIONS", "")
     return {s.strip().lower() for s in raw.split(",") if s.strip()}
 
 
 def _code_exclude_globs_from_env() -> list[str]:
-    """SHIORI_CODE_EXCLUDE_GLOBS をリストで返す。
-
-    カンマ区切り。glob パターン（例: ``**/test_*, **/migrations/*``）。
-    """
+    """Return SHIORI_CODE_EXCLUDE_GLOBS as a list."""
     raw = os.environ.get("SHIORI_CODE_EXCLUDE_GLOBS", "")
     return [s.strip() for s in raw.split(",") if s.strip()]
 
 
 def _allow_rebuild_from_env() -> bool:
-    """SHIORI_ALLOW_REBUILD を bool で返す。
-
-    MCP ツール shiori_ingest からの rebuild=True（全 TRUNCATE）を許可するか。
-    既定 false。運用上必要な場合のみ true に設定する（issue #63）。
-    CLI 経路（python -m shiori ingest --rebuild）はこの設定に依らず常に許可。
-    """
+    """Return SHIORI_ALLOW_REBUILD as a bool."""
     return os.environ.get("SHIORI_ALLOW_REBUILD", "").lower() in (
         "1", "true", "yes"
     )
@@ -148,7 +131,7 @@ class Settings:
         return os.path.join(self.data_dir, "repos", f"{owner}__{name}")
 
     def github_app_private_key(self) -> str | None:
-        """GitHub App の秘密鍵 PEM を返す。PATH 優先、無ければ本文、どちらも無ければ None。"""
+        """Return the GitHub App private key PEM. PATH preferred, then inline text, else None."""
         if self.github_app_private_key_path:
             with open(self.github_app_private_key_path, encoding="utf-8") as fp:
                 return fp.read()

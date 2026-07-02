@@ -1,26 +1,12 @@
-"""ingest ジョブ（詳細設計/01・07）。
+"""Ingest job (detailed design/01, 07).
+On-demand: docker compose run --rm app python -m shiori ingest.
+Auth via build_token_provider shared across all repos (detailed design/09).
 
-決定: 同期はオンデマンド実行。
-    docker compose run --rm app python -m shiori ingest
-スケジュール実行が必要な場合はホスト側 cron 等から同コマンドを叩く。
-認証は build_token_provider で構築し、全リポジトリの同期で共有する（詳細設計/09）。
+Process mutual exclusion (issue #6): PostgreSQL advisory lock prevents concurrent execution with serve auto-sync or MCP ingest.
 
-プロセス横断排他（issue #6）:
-    PostgreSQL advisory lock (pg_try_advisory_lock) を使い、serve プロセスの
-    自動同期や MCP ツール ingest との同時実行を防ぐ。
-    SYNC_LOCK_KEY は mcp_server.py と同じ値（0x5348494F = 'SHIO'）。
+Freshness tracking (issue #22 / #33): Records completion to sync_runs per repo. Route via SHIORI_INGEST_ROUTE (default 'cli').
 
-鮮度の記録（issue #22 / #33）:
-    リポジトリごとの同期完了時に sync_runs へ完了時刻と経路を記録する。
-    経路は環境変数 SHIORI_INGEST_ROUTE（既定 'cli'）。reindex.yml（self-hosted
-    runner）は 'runner' を設定して実行経路を識別できるようにする。
-
-セキュリティ（issue #63）:
-    指定された repo を SHIORI_REPOS（allowlist）と照合し、含まれないものは拒否する。
-
-バルク経路最適化（issue #72）:
-    初回または rebuild では、重い索引（HNSW／pgroonga）をロード後に一括作成し、
-    埋め込みをファイル横断バッチ化、チャンク挿入をバルク化する。
+Security (issue #63): Validates repo against SHIORI_REPOS allowlist.
 """
 
 from __future__ import annotations
@@ -45,10 +31,7 @@ _BULK_BUFFER_SIZE = 500
 
 
 def _is_bulk_path(conn, rebuild: bool) -> bool:
-    """バルク経路か判定する: rebuild=True または chunks テーブルが空／未存在。
-
-    新規 DB（chunks テーブル未作成）もバルク扱いする（issue #72）。
-    """
+    """Determine if bulk path: rebuild=True or chunks table empty/missing."""
     if rebuild:
         return True
     with conn.cursor() as cur:
