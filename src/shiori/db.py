@@ -96,6 +96,7 @@ CREATE TABLE IF NOT EXISTS chunks (
     path TEXT,
     issue_no INTEGER,
     comment_id BIGINT,
+    kind TEXT,                     -- 'issue' | 'pr' | NULL (issue #98)
     language TEXT,
     heading_path TEXT,
     content TEXT NOT NULL,
@@ -152,7 +153,12 @@ def _run_alter_statements(conn: psycopg.Connection) -> None:
         cur.execute("ALTER TABLE doc_files ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'doc'")
     conn.commit()
 
-    # 4. Add sync_runs.code_indexed (returned as code_added via API)
+    # 4. Add chunks.kind (issue #98)
+    with conn.cursor() as cur:
+        cur.execute("ALTER TABLE chunks ADD COLUMN IF NOT EXISTS kind TEXT")
+    conn.commit()
+
+    # 5. Add sync_runs.code_indexed (returned as code_added via API)
     with conn.cursor() as cur:
         cur.execute("ALTER TABLE sync_runs ADD COLUMN IF NOT EXISTS code_indexed INTEGER")
     conn.commit()
@@ -431,6 +437,7 @@ def insert_chunk(
     path: str | None = None,
     issue_no: int | None = None,
     comment_id: int | None = None,
+    kind: str | None = None,
     language: str | None = None,
     heading_path: str | None = None,
     state: str | None = None,
@@ -449,16 +456,17 @@ def insert_chunk(
             """
             INSERT INTO chunks (
                 chunk_key, chunk_index, source_type, repo, path, issue_no,
-                comment_id, language, heading_path, content, embedding,
+                comment_id, kind, language, heading_path, content, embedding,
                 state, author, line, end_line, commit_sha, prog_lang, symbols,
                 created_at, updated_at, url
             ) VALUES (
-                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::vector,
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::vector,
                 %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
             )
             ON CONFLICT (chunk_key, chunk_index) DO UPDATE SET
                 content = EXCLUDED.content,
                 embedding = EXCLUDED.embedding,
+                kind = EXCLUDED.kind,
                 language = EXCLUDED.language,
                 heading_path = EXCLUDED.heading_path,
                 state = EXCLUDED.state,
@@ -474,7 +482,7 @@ def insert_chunk(
             """,
             (
                 chunk_key, chunk_index, source_type, repo, path, issue_no,
-                comment_id, language, heading_path, content, vec_literal(embedding),
+                comment_id, kind, language, heading_path, content, vec_literal(embedding),
                 state, author, line, end_line, commit_sha, prog_lang, symbols,
                 created_at, updated_at, url,
             ),
@@ -484,16 +492,17 @@ def insert_chunk(
 _BULK_INSERT_SQL = """
     INSERT INTO chunks (
         chunk_key, chunk_index, source_type, repo, path, issue_no,
-        comment_id, language, heading_path, content, embedding,
+        comment_id, kind, language, heading_path, content, embedding,
         state, author, line, end_line, commit_sha, prog_lang, symbols,
         created_at, updated_at, url
     ) VALUES (
-        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::vector,
+        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::vector,
         %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
     )
     ON CONFLICT (chunk_key, chunk_index) DO UPDATE SET
         content = EXCLUDED.content,
         embedding = EXCLUDED.embedding,
+        kind = EXCLUDED.kind,
         language = EXCLUDED.language,
         heading_path = EXCLUDED.heading_path,
         state = EXCLUDED.state,
@@ -523,6 +532,7 @@ def bulk_insert_chunks(conn: psycopg.Connection, rows: list[dict]) -> None:
                 r.get("path"),
                 r.get("issue_no"),
                 r.get("comment_id"),
+                r.get("kind"),
                 r.get("language"),
                 r.get("heading_path"),
                 r["content"],

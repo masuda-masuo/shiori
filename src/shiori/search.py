@@ -17,14 +17,14 @@ from .embedding import Embedder
 RRF_K = 60
 
 _RESULT_COLS = (
-    "id, source_type, repo, path, issue_no, comment_id, language, "
+    "id, source_type, repo, path, issue_no, comment_id, kind, language, "
     "heading_path, content, state, author, line, created_at, updated_at, url"
 )
 
 # _RESULT_COLS column positions (row tuple indices)
 _COL_SOURCE_TYPE = 1
-_COL_STATE = 9
-_COL_UPDATED_AT = 13
+_COL_STATE = 10
+_COL_UPDATED_AT = 14
 
 # Sentinel for primary source (doc/code) compound key.
 # Secondary source -sp max is 0 (open is -0). For desc sort, primary comes first
@@ -46,6 +46,7 @@ class SearchHit:
     issue_no: int | None
     heading_path: str | None
     snippet: str
+    kind: str | None
     language: str | None
     state: str | None
     author: str | None
@@ -62,7 +63,7 @@ class SearchHit:
 def _filter_sql(filters: dict | None) -> tuple[str, list]:
     clauses, params = [], []
     f = filters or {}
-    for col in ("source_type", "language", "state", "repo", "prog_lang"):
+    for col in ("source_type", "language", "state", "repo", "prog_lang", "kind"):
         if f.get(col):
             clauses.append(f"{col} = %s")
             params.append(f[col])
@@ -80,7 +81,7 @@ def _row_to_hit(
     row, snippet_chars: int, score: float
 ) -> SearchHit:
     (
-        _id, source_type, repo, path, issue_no, _comment_id, language,
+        _id, source_type, repo, path, issue_no, _comment_id, kind, language,
         heading_path, content, state, author, line, created_at, updated_at, url,
     ) = row
     snippet = (
@@ -88,7 +89,8 @@ def _row_to_hit(
     )
     return SearchHit(
         source_type=source_type, repo=repo, path=path, issue_no=issue_no,
-        heading_path=heading_path, snippet=snippet, language=language,
+        heading_path=heading_path, snippet=snippet, kind=kind,
+        language=language,
         state=state, author=author, line=line,
         created_at=created_at.isoformat() if created_at else None,
         updated_at=updated_at.isoformat() if updated_at else None,
