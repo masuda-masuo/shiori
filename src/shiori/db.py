@@ -96,7 +96,7 @@ CREATE TABLE IF NOT EXISTS chunks (
     path TEXT,
     issue_no INTEGER,
     comment_id BIGINT,
-    kind TEXT,                     -- 'issue' | 'pr' | NULL (issue #98)
+    kind TEXT CHECK (kind IN ('issue', 'pr') OR kind IS NULL),  -- 'issue' | 'pr' | NULL (issue #98)
     language TEXT,
     heading_path TEXT,
     content TEXT NOT NULL,

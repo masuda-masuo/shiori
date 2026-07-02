@@ -6,6 +6,7 @@ from shiori.search import _filter_sql, _rank_candidates
 
 # _RESULT_COLS indices (must match constants in search.py)
 _COL_SOURCE_TYPE = 1
+_COL_KIND = 6
 _COL_STATE = 10
 _COL_UPDATED_AT = 14
 
@@ -238,3 +239,9 @@ class TestFilterSql:
         assert "state = %s" in sql
         assert "open" in params
         assert "issue" in params
+
+    def test_kind_none_excluded(self):
+        sql, params = _filter_sql({"kind": None, "state": "open"})
+        assert "kind" not in sql
+        assert "state = %s" in sql
+        assert params == ["open"]
