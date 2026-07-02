@@ -1,7 +1,7 @@
-"""github_auth のユニットテスト（詳細設計/09）。
+"""Unit tests for github_auth (detailed design/09).
 
-httpx をモックして installation token の取得・キャッシュ・再発行を検証する。
-RS256 の鍵はテスト内で生成する。
+Mocks httpx to verify installation token acquisition, caching, and re-issuance.
+RS256 keys are generated inside tests.
 """
 
 from __future__ import annotations

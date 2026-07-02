@@ -1,12 +1,12 @@
-"""DB 接続とスキーマ。
+"""Database connection and schema.
 
-設計判断（詳細設計/04）:
-- docs / issue / pr_review / code は `source_type` 列で 1 テーブル (`chunks`) に統合する。
-- 全文検索は pgroonga。索引作成時に TokenMecab（形態素解析）を試み、
-  プラグインが無ければ TokenBigram にフォールバックする。
-- read_issue 用に生のスレッドを `issue_items` に保持する（チャンクとは別）。
-- 初回／rebuild のバルク経路では、重い索引（HNSW／pgroonga）をロード後に一括作成し、
-  逐次構築コストを回避する（issue #72）。
+Design decisions (detailed design/04):
+- docs / issue / pr_review / code are unified into a single `chunks` table with a `source_type` column.
+- Full-text search uses pgroonga. TokenMecab (morphological analysis) is tried first;
+  if the plugin is not available, falls back to TokenBigram.
+- Raw threads are kept in `issue_items` for read_issue (separate from chunks).
+- In bulk paths (first-run / rebuild), heavy indexes (HNSW / pgroonga) are created
+  after data load in one batch to avoid incremental build cost (issue #72).
 """
 
 from __future__ import annotations
@@ -131,9 +131,9 @@ _PGROONGA_SYMBOLS_INDEX = "chunks_symbols_pgroonga"
 
 
 def _run_alter_statements(conn: psycopg.Connection) -> None:
-    """既存 DB に対する冪等な ALTER。CREATE TABLE IF NOT EXISTS では新カラムが追加されないため。
+    """Graceful ALTERs for existing DB. Required because CREATE TABLE IF NOT EXISTS does not add new columns.
 
-    migrate_light / migrate の両方から呼ばれる。
+    Called from both migrate_light and migrate.
     """
     # 1. source_type CHECK 制約に 'code' を追加（既存制約を置き換え）
     with conn.cursor() as cur:
@@ -167,9 +167,9 @@ def _run_alter_statements(conn: psycopg.Connection) -> None:
 
 
 def migrate_light(conn: psycopg.Connection, settings: Settings) -> None:
-    """テーブル・制約・btree 索引のみ作成。HNSW・pgroonga は作成しない（issue #72）。
+    """Create tables, constraints, and btree indexes only. Does not create HNSW/pgroonga indexes (issue #72).
 
-    バルク経路（初回／rebuild）で使用。重い索引はデータロード後に create_heavy_indexes() で一括作成する。
+    Used in the bulk path (first-run / rebuild). Heavy indexes are created in batch by create_heavy_indexes() after data load.
     """
     with conn.cursor() as cur:
         cur.execute(SCHEMA_SQL.format(dim=settings.embedding_dim))
@@ -178,7 +178,7 @@ def migrate_light(conn: psycopg.Connection, settings: Settings) -> None:
 
 
 def _create_pgroonga_index(conn: psycopg.Connection, index_name: str, column: str) -> None:
-    """pgroonga 索引を作成する。TokenMecab 優先、無ければ TokenBigram にフォールバック。"""
+    """Create a pgroonga index. Tries TokenMecab first, falls back to TokenBigram if unavailable."""
     try:
         with conn.cursor() as cur:
             cur.execute(
@@ -199,9 +199,9 @@ def _create_pgroonga_index(conn: psycopg.Connection, index_name: str, column: st
 
 
 def create_heavy_indexes(conn: psycopg.Connection) -> None:
-    """HNSW と pgroonga 索引を作成する（issue #72）。
+    """Create HNSW and pgroonga indexes (issue #72).
 
-    バルク経路で全データロード後に呼ぶ。既に存在する場合は何もしない（IF NOT EXISTS）。
+    Called after full data load in the bulk path. No-op if already exists (IF NOT EXISTS).
     """
     # pgvector: HNSW (cosine)
     with conn.cursor() as cur:
@@ -217,9 +217,9 @@ def create_heavy_indexes(conn: psycopg.Connection) -> None:
 
 
 def drop_heavy_indexes(conn: psycopg.Connection) -> None:
-    """HNSW と pgroonga 索引を削除する（issue #72）。
+    """Drop HNSW and pgroonga indexes (issue #72).
 
-    バルク経路でデータロード前に呼ぶ。存在しない場合は何もしない（IF EXISTS）。
+    Called before data load in the bulk path. No-op if not exists (IF EXISTS).
     """
     for idx in (_HNSW_INDEX, _PGROONGA_CONTENT_INDEX, _PGROONGA_SYMBOLS_INDEX):
         with conn.cursor() as cur:
@@ -229,9 +229,9 @@ def drop_heavy_indexes(conn: psycopg.Connection) -> None:
 
 
 def migrate(conn: psycopg.Connection, settings: Settings) -> None:
-    """完全なスキーマ作成（テーブル＋全索引）。増分経路で使用（issue #72）。
+    """Full schema creation (tables + all indexes). Used in the incremental path (issue #72).
 
-    バルク経路では migrate_light() + ロード後 create_heavy_indexes() を使う。
+    In the bulk path, use migrate_light() + create_heavy_indexes() after load.
     """
     migrate_light(conn, settings)
     create_heavy_indexes(conn)
@@ -272,10 +272,10 @@ def record_sync_run(
     issues_indexed: int,
     code_indexed: int = 0,
 ):
-    """同期の成功をリポジトリ単位で記録し、完了時刻（DB の now()）を返す（issue #22 / #33）。
+    """Record a successful sync per repository and return the completion timestamp (DB now()) (issue #22 / #33).
 
-    advisory lock で skip された実行は呼び出し側で記録しないこと（成功した同期のみ）。
-    時刻は DB の now() を使う: 複数経路・複数プロセスでも単一 DB の時計で一貫する。
+    Calls skipped by advisory lock should not be recorded (only successful syncs).
+    Uses DB now() so multiple paths and processes share a single clock.
     """
     with conn.cursor() as cur:
         cur.execute(
@@ -298,7 +298,7 @@ def record_sync_run(
 
 
 def get_sync_runs(conn: psycopg.Connection) -> dict[str, dict]:
-    """リポジトリごとの最終同期記録。age_seconds は DB 時計基準の経過秒数。"""
+    """Last sync record per repository. age_seconds is elapsed seconds based on DB clock."""
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -323,7 +323,7 @@ def get_sync_runs(conn: psycopg.Connection) -> dict[str, dict]:
 
 
 def get_chunk_counts(conn: psycopg.Connection, repo: str) -> dict[str, int]:
-    """source_type ごとのチャンク数（issue #31）。"""
+    """Chunk counts per source_type (issue #31)."""
     with conn.cursor() as cur:
         cur.execute(
             "SELECT source_type, count(*) FROM chunks WHERE repo = %s GROUP BY source_type",
@@ -333,7 +333,7 @@ def get_chunk_counts(conn: psycopg.Connection, repo: str) -> dict[str, int]:
 
 
 def get_issue_item_count(conn: psycopg.Connection, repo: str) -> int:
-    """issue_items の総行数（bot 含む全件。issue #31）。"""
+    """Total count of issue_items (all items including bots, issue #31)."""
     with conn.cursor() as cur:
         cur.execute(
             "SELECT count(*) FROM issue_items WHERE repo = %s", (repo,)
@@ -345,12 +345,12 @@ def get_issue_item_count(conn: psycopg.Connection, repo: str) -> int:
 def get_pr_changes(
     conn: psycopg.Connection, repo: str, issue_no: int
 ) -> tuple[list[dict], str | None]:
-    """PR の変更ファイルマップを取得する（issue #54）。
+    """Get PR change file map (issue #54).
 
     Returns:
-        (files, head_sha) のタプル。
-        files: ファイル一覧（path / status / additions / deletions / changes / blob_url）
-        head_sha: PR の head_sha（全ファイル共通）。ファイル0件でも保持される。
+        (files, head_sha) tuple.
+        files: file list (path / status / additions / deletions / changes / blob_url)
+        head_sha: PR head_sha (common across all files). Kept even for 0-file PRs.
     """
     with conn.cursor() as cur:
         cur.execute(
@@ -386,12 +386,12 @@ def upsert_pr_changes(
     head_sha: str,
     files: list[dict],
 ) -> None:
-    """PR の変更ファイルマップを upsert する（issue #54）。
+    """Upsert PR change file map (issue #54).
 
-    既存行を全削除してから新しいファイル一覧を挿入する（force-push 等で
-    ファイル構成が変わるため、差分更新ではなく全置換）。
-    ファイル0件の場合も head_sha を保持するため sentinel 行を挿入する。
-    呼び出し側が commit すること（upsert_pr_changes 内では commit しない）。
+    Deletes all existing rows and inserts the new file list (full replacement because
+    file composition can change due to force-push etc.).
+    For 0-file PRs, inserts a sentinel row to preserve head_sha.
+    Caller must commit (upsert_pr_changes does not commit).
     """
     with conn.cursor() as cur:
         cur.execute(
@@ -431,7 +431,7 @@ def upsert_pr_changes(
 def get_pr_head_sha(
     conn: psycopg.Connection, repo: str, issue_no: int
 ) -> str | None:
-    """PR の保存済み head_sha を取得する（変更検知用。issue #54）。"""
+    """Get the saved PR head_sha (for change detection, issue #54)."""
     with conn.cursor() as cur:
         cur.execute(
             "SELECT head_sha FROM pr_changes WHERE repo = %s AND issue_no = %s LIMIT 1",
@@ -541,10 +541,10 @@ _BULK_INSERT_SQL = """
 
 
 def bulk_insert_chunks(conn: psycopg.Connection, rows: list[dict]) -> None:
-    """チャンクをバルク挿入する（executemany。issue #72）。
+    """Bulk insert chunks using executemany (issue #72).
 
-    呼び出し側が commit すること。各行は insert_chunk と同じキーを持つ dict。
-    embedding はリスト形式で渡す（vec_literal は内部で適用）。
+    Caller must commit. Each row is a dict with the same keys as insert_chunk.
+    embedding is passed as a list (vec_literal is applied internally).
     """
     if not rows:
         return

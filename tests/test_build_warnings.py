@@ -1,4 +1,4 @@
-"""_build_warnings の単体テスト（issue #35）。"""
+"""Unit tests for _build_warnings (issue #35)."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from shiori.mcp_server import _build_warnings
 
 
 def test_no_warnings_when_everything_is_fine():
-    """全て正常な場合は空リストを返す。"""
+    """Return empty list when everything is fine."""
     info = {"age_seconds": 3600}  # 1 時間 → 新鮮
     chunk_counts = {"issue": 10, "pr_review": 2}
     items_in_db = 10
@@ -25,7 +25,7 @@ def test_no_warnings_when_everything_is_fine():
 
 
 def test_staleness_warning_when_age_exceeds_threshold():
-    """age_seconds > 86400 で警告を出す。"""
+    """Warning when age_seconds > 86400."""
     info = {"age_seconds": 90000}  # 25 時間
     chunk_counts = {}
     items_in_db = 0
@@ -36,7 +36,7 @@ def test_staleness_warning_when_age_exceeds_threshold():
 
 
 def test_no_staleness_warning_at_boundary():
-    """age_seconds == 86400 ちょうどは警告なし。"""
+    """No warning at boundary (age_seconds == 86400)."""
     info = {"age_seconds": 86400}
     chunk_counts = {}
     items_in_db = 0
@@ -47,7 +47,7 @@ def test_no_staleness_warning_at_boundary():
 
 
 def test_no_staleness_warning_when_age_is_none():
-    """age_seconds=None（未同期）では鮮度警告を出さない。"""
+    """No staleness warning when age_seconds=None (unsynced)."""
     info = {"age_seconds": None}
     chunk_counts = {}
     items_in_db = 0
@@ -61,7 +61,7 @@ def test_no_staleness_warning_when_age_is_none():
 
 
 def test_missing_chunks_warning_when_chunks_few():
-    """chunks が少ない場合に警告を出す。"""
+    """Warning when chunks are few."""
     info = {"age_seconds": 3600}
     chunk_counts = {"issue": 1, "pr_review": 0}
     items_in_db = 10
@@ -73,7 +73,7 @@ def test_missing_chunks_warning_when_chunks_few():
 
 
 def test_no_missing_warning_at_boundary():
-    """境界値: items_in_db=6, chunks=3 で警告なし。"""
+    """No warning at boundary: items_in_db=6, chunks=3."""
     info = {"age_seconds": 3600}
     chunk_counts = {"issue": 3, "pr_review": 0}
     items_in_db = 6
@@ -85,7 +85,7 @@ def test_no_missing_warning_at_boundary():
 
 
 def test_missing_warning_with_pr_review():
-    """pr_review チャンクが欠落警告の抑止に寄与する。"""
+    """pr_review chunks contribute to suppressing missing-chunks warning."""
     info = {"age_seconds": 3600}
     chunk_counts = {"issue": 1, "pr_review": 4}
     items_in_db = 10
@@ -97,7 +97,7 @@ def test_missing_warning_with_pr_review():
 
 
 def test_missing_warning_with_zero_items():
-    """items_in_db=0 のときは欠落警告を出さない。"""
+    """No missing-chunks warning when items_in_db=0."""
     info = {"age_seconds": 3600}
     chunk_counts = {"issue": 0, "pr_review": 0}
     items_in_db = 0
@@ -111,7 +111,7 @@ def test_missing_warning_with_zero_items():
 
 
 def test_unsynced_warning_for_missing_cursors():
-    """カーソルが欠落しているカテゴリがある場合に警告を出す。"""
+    """Warning when categories have missing cursors."""
     info = {"age_seconds": 3600}
     chunk_counts = {}
     items_in_db = 0
@@ -122,7 +122,7 @@ def test_unsynced_warning_for_missing_cursors():
 
 
 def test_no_unsynced_warning_when_all_cursors_present():
-    """全てのカーソルが揃っている場合は警告なし。"""
+    """No warning when all cursors are present."""
     info = {"age_seconds": 3600}
     chunk_counts = {}
     items_in_db = 0
@@ -138,7 +138,7 @@ def test_no_unsynced_warning_when_all_cursors_present():
 
 
 def test_multiple_warnings_can_coexist():
-    """複数の警告が同時に出力される。"""
+    """Multiple warnings can coexist."""
     info = {"age_seconds": 90000}  # 鮮度警告
     chunk_counts = {"issue": 1, "pr_review": 0}
     items_in_db = 10  # 欠落警告

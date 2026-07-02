@@ -1,4 +1,4 @@
-"""shiori_pr_changes の include_diff パラメータのユニットテスト（issue #100）。"""
+"""Unit tests for shiori_pr_changes include_diff parameter (issue #100)."""
 
 from __future__ import annotations
 
@@ -10,10 +10,10 @@ from shiori.mcp_server import pr_changes
 
 
 class TestPrChangesIncludeDiff:
-    """pr_changes(include_diff=True) の振る舞い。"""
+    """Behavior of pr_changes(include_diff=True)."""
 
     def test_include_diff_false_returns_metadata_only(self):
-        """include_diff=False（既定）は従来通りメタデータのみ返す。"""
+        """include_diff=False (default) returns metadata only."""
         with (
             patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
             patch("shiori.mcp_server._conn"),
@@ -31,7 +31,7 @@ class TestPrChangesIncludeDiff:
         assert "diff" not in result
 
     def test_include_diff_true_returns_diff(self):
-        """include_diff=True で unified diff が返される。"""
+        """include_diff=True returns unified diff."""
         with (
             patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
             patch("shiori.mcp_server._conn"),
@@ -71,7 +71,7 @@ class TestPrChangesIncludeDiff:
         mock_git_delete.assert_called_once_with("refs/shiori/tmp-abc", cwd="/data/repos/o/r")
 
     def test_include_diff_true_raises_when_clone_missing(self):
-        """include_diff=True でクローンが無ければ FileNotFoundError。"""
+        """include_diff=True raises FileNotFoundError when clone is missing."""
         with (
             patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
             patch("shiori.mcp_server._conn"),
@@ -89,7 +89,7 @@ class TestPrChangesIncludeDiff:
                 pr_changes(number=42, repo="o/r", include_diff=True)
 
     def test_include_diff_true_cleans_up_tmp_ref_on_error(self):
-        """include_diff=True で例外発生時も tmp_ref を確実に削除する。"""
+        """include_diff=True always cleans up tmp_ref even on exception."""
         with (
             patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
             patch("shiori.mcp_server._conn"),

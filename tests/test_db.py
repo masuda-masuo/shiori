@@ -1,4 +1,4 @@
-"""db モジュールのユニットテスト（issue #54, #72）。"""
+"""Unit tests for the db module (issue #54, #72)."""
 
 from __future__ import annotations
 
@@ -19,10 +19,10 @@ from shiori.db import (
 
 
 class TestGetPrChanges:
-    """get_pr_changes の振る舞い。"""
+    """Behavior of get_pr_changes."""
 
     def _mock_conn(self, rows: list[tuple]):
-        """pr_changes の SELECT 結果を返すモック接続を作る。"""
+        """Create a mock connection returning pr_changes SELECT results."""
         conn = MagicMock()
         cursor = MagicMock()
         cursor.fetchall.return_value = rows
@@ -30,7 +30,7 @@ class TestGetPrChanges:
         return conn, cursor
 
     def test_returns_files_and_head_sha(self):
-        """ファイル一覧と head_sha を正しく返す（1クエリで両方取得）。"""
+        """Returns file list and head_sha correctly (both from single query)."""
         conn, cursor = self._mock_conn(
             [
                 ("src/a.py", "modified", 5, 2, 7, "url_a", "abc1234"),
@@ -52,7 +52,7 @@ class TestGetPrChanges:
         assert files[1]["path"] == "src/b.py"
 
     def test_returns_empty_list_and_none_when_no_rows(self):
-        """pr_changes に行がない場合、空リストと None を返す。"""
+        """Empty list and None when pr_changes has no rows."""
         conn, cursor = self._mock_conn([])
 
         files, sha = get_pr_changes(conn, "o/r", 42)
@@ -61,7 +61,7 @@ class TestGetPrChanges:
         assert sha is None
 
     def test_excludes_sentinel_rows(self):
-        """path が空文字の sentinel 行は files に含まれず、head_sha は取得される。"""
+        """Sentinel rows (empty path) are excluded from files, head_sha is still returned."""
         conn, cursor = self._mock_conn(
             [
                 ("", None, None, None, None, None, "abc1234"),  # sentinel
@@ -73,7 +73,7 @@ class TestGetPrChanges:
         assert sha == "abc1234"
 
     def test_uses_order_by_path_in_query(self):
-        """SQL に ORDER BY path が含まれている。ソートは DB 側に委譲。"""
+        """SQL includes ORDER BY path; sorting delegated to DB."""
         conn = MagicMock()
         cursor = MagicMock()
         cursor.fetchall.return_value = []
@@ -89,10 +89,10 @@ class TestGetPrChanges:
 
 
 class TestUpsertPrChanges:
-    """upsert_pr_changes の振る舞い。"""
+    """Behavior of upsert_pr_changes."""
 
     def test_deletes_existing_and_inserts_new(self):
-        """既存行を DELETE してから新しい行を INSERT する。commit は呼ばない。"""
+        """Deletes existing rows then inserts new rows. Does not commit."""
         conn = MagicMock()
         cursor = MagicMock()
         conn.cursor.return_value.__enter__.return_value = cursor
@@ -131,7 +131,7 @@ class TestUpsertPrChanges:
         conn.commit.assert_not_called()
 
     def test_empty_files_list_inserts_sentinel(self):
-        """ファイル0件の場合、head_sha を保持する sentinel 行を挿入する。"""
+        """When files list is empty, inserts a sentinel row to preserve head_sha."""
         conn = MagicMock()
         cursor = MagicMock()
         conn.cursor.return_value.__enter__.return_value = cursor
@@ -150,7 +150,7 @@ class TestUpsertPrChanges:
         assert sentinel_params[2] == "abc1234"    # head_sha
 
     def test_handles_none_fields(self):
-        """blob_url 等が None でも正しく扱われる。"""
+        """Handles None fields like blob_url correctly."""
         conn = MagicMock()
         cursor = MagicMock()
         conn.cursor.return_value.__enter__.return_value = cursor
@@ -178,10 +178,10 @@ class TestUpsertPrChanges:
 
 
 class TestGetPrHeadSha:
-    """get_pr_head_sha の振る舞い。"""
+    """Behavior of get_pr_head_sha."""
 
     def test_returns_sha_when_exists(self):
-        """保存済みの head_sha を返す（sentinel 行含む）。"""
+        """Returns stored head_sha (includes sentinel rows)."""
         conn = MagicMock()
         cursor = MagicMock()
         cursor.fetchone.return_value = ("abc1234",)
@@ -192,7 +192,7 @@ class TestGetPrHeadSha:
         assert result == "abc1234"
 
     def test_returns_none_when_no_rows(self):
-        """pr_changes に行がない場合は None を返す。"""
+        """Returns None when pr_changes has no rows."""
         conn = MagicMock()
         cursor = MagicMock()
         cursor.fetchone.return_value = None
@@ -207,7 +207,7 @@ class TestGetPrHeadSha:
 
 
 class TestMigrateLight:
-    """migrate_light: テーブル・btree 索引のみ作成し、重い索引は作らない。"""
+    """migrate_light: creates tables and btree indexes only, no heavy indexes."""
 
     def _mock_conn(self):
         conn = MagicMock()
@@ -216,10 +216,10 @@ class TestMigrateLight:
         return conn, cursor
 
     def test_creates_tables_and_btree_indexes_only(self):
-        """migrate_light は SCHEMA_SQL を実行するが、HNSW 索引は作らない。
+        """migrate_light executes SCHEMA_SQL but does not create HNSW indexes.
 
-        SCHEMA_SQL 自体には CREATE EXTENSION pgroonga が含まれるが、
-        それは拡張のロードであって索引作成ではない。
+        SCHEMA_SQL itself includes CREATE EXTENSION pgroonga, but that is
+        an extension load, not index creation.
         """
         from shiori.config import Settings
         conn, cursor = self._mock_conn()
@@ -241,7 +241,7 @@ class TestMigrateLight:
         assert "create index" not in joined.lower() or "using pgroonga" not in joined.lower()
 
     def test_runs_alter_statements(self):
-        """migrate_light は ALTER 文も実行する。"""
+        """migrate_light also runs ALTER statements."""
         from shiori.config import Settings
         conn, cursor = self._mock_conn()
 
@@ -260,7 +260,7 @@ class TestMigrateLight:
 
 
 class TestCreateHeavyIndexes:
-    """create_heavy_indexes: HNSW + pgroonga 索引を作成する。"""
+    """create_heavy_indexes: creates HNSW + pgroonga indexes."""
 
     def _mock_conn(self):
         conn = MagicMock()
@@ -269,7 +269,7 @@ class TestCreateHeavyIndexes:
         return conn, cursor
 
     def test_creates_hnsw_and_pgroonga_indexes(self):
-        """create_heavy_indexes は HNSW と pgroonga(content/symbols) を作成する。"""
+        """create_heavy_indexes creates HNSW and pgroonga(content/symbols) indexes."""
         conn, cursor = self._mock_conn()
 
         create_heavy_indexes(conn)
@@ -286,7 +286,7 @@ class TestCreateHeavyIndexes:
 
 
 class TestDropHeavyIndexes:
-    """drop_heavy_indexes: 3 つの重量索引を DROP する。"""
+    """drop_heavy_indexes: DROPs the 3 heavy indexes."""
 
     def _mock_conn(self):
         conn = MagicMock()
@@ -295,7 +295,7 @@ class TestDropHeavyIndexes:
         return conn, cursor
 
     def test_drops_three_indexes(self):
-        """drop_heavy_indexes は 3 つの DROP INDEX IF EXISTS を実行する。"""
+        """drop_heavy_indexes executes 3 DROP INDEX IF EXISTS statements."""
         conn, cursor = self._mock_conn()
 
         drop_heavy_indexes(conn)
@@ -318,7 +318,7 @@ class TestDropHeavyIndexes:
 
 
 class TestBulkInsertChunks:
-    """bulk_insert_chunks: executemany によるバルク挿入。"""
+    """bulk_insert_chunks: batch insert via executemany."""
 
     def _mock_conn(self):
         conn = MagicMock()
@@ -327,7 +327,7 @@ class TestBulkInsertChunks:
         return conn, cursor
 
     def test_empty_list_noops(self):
-        """空リストは何もしない。"""
+        """Empty list does nothing."""
         conn, cursor = self._mock_conn()
 
         bulk_insert_chunks(conn, [])
@@ -335,7 +335,7 @@ class TestBulkInsertChunks:
         cursor.executemany.assert_not_called()
 
     def test_calls_executemany_with_correct_number_of_rows(self):
-        """executemany が正しい行数で呼ばれる。"""
+        """executemany is called with correct row count."""
         conn, cursor = self._mock_conn()
 
         rows = [
@@ -376,7 +376,7 @@ class TestBulkInsertChunks:
         assert len(args[1]) == 3
 
     def test_embedding_is_vector_literal(self):
-        """embedding が vec_literal で '[x,y,z]' 形式に変換される。"""
+        """embedding is converted to '[x,y,z]' format via vec_literal."""
         conn, cursor = self._mock_conn()
 
         rows = [

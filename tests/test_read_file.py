@@ -1,4 +1,4 @@
-"""shiori_read_file / shiori_read_pr_file / shiori_status の拡張部分のテスト（issue #101）。"""
+"""Tests for extended parts of shiori_read_file / shiori_read_pr_file / shiori_status (issue #101)."""
 
 from __future__ import annotations
 
@@ -13,10 +13,10 @@ from shiori.mcp_server import (
 
 
 class TestReadFileLargeFileHint:
-    """read_file の large-file hint（issue #101）。"""
+    """read_file large-file hint (issue #101)."""
 
     def _run_read_file(self, content: str, **kwargs):
-        """read_file をモック環境で実行するヘルパー。"""
+        """Helper to run read_file in a mocked environment."""
         with (
             patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
             patch("shiori.mcp_server.settings") as mock_settings,
@@ -28,7 +28,7 @@ class TestReadFileLargeFileHint:
             return read_file(path="src/file.py", **kwargs)
 
     def test_hint_when_end_line_none_and_file_large(self):
-        """end_line 未指定かつファイルが閾値を超える場合に hints を含む。"""
+        """Includes hints when end_line is unset and file exceeds threshold."""
         large_content = "\n".join(f"line {i}" for i in range(_LARGE_FILE_THRESHOLD + 10))
         result = self._run_read_file(large_content)
 
@@ -37,21 +37,21 @@ class TestReadFileLargeFileHint:
         assert "File is large" in result["hints"][0]
 
     def test_no_hint_when_file_small(self):
-        """end_line 未指定でもファイルが閾値以下の場合は hints を含まない。"""
+        """No hints when file is below threshold even without end_line."""
         small_content = "\n".join(f"line {i}" for i in range(10))
         result = self._run_read_file(small_content)
 
         assert "hints" not in result
 
     def test_no_hint_when_end_line_specified(self):
-        """end_line 指定時はファイルが大きくても hints を含まない。"""
+        """No hints when end_line is specified even for large files."""
         large_content = "\n".join(f"line {i}" for i in range(_LARGE_FILE_THRESHOLD + 10))
         result = self._run_read_file(large_content, end_line=50)
 
         assert "hints" not in result
 
     def test_hint_at_threshold_boundary(self):
-        """閾値ちょうどのファイルは hints なし、閾値+1 で hints あり。"""
+        """Exactly at threshold: no hints; threshold+1: hints present."""
         result = self._run_read_file(
             "\n".join(f"line {i}" for i in range(_LARGE_FILE_THRESHOLD))
         )
@@ -64,10 +64,10 @@ class TestReadFileLargeFileHint:
 
 
 class TestReadPrFileLargeFileHint:
-    """read_pr_file の large-file hint（issue #101）。"""
+    """read_pr_file large-file hint (issue #101)."""
 
     def _run_read_pr_file(self, content: str, **kwargs):
-        """read_pr_file をモック環境で実行するヘルパー。"""
+        """Helper to run read_pr_file in a mocked environment."""
         with (
             patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
             patch("shiori.mcp_server.settings") as mock_settings,
@@ -83,7 +83,7 @@ class TestReadPrFileLargeFileHint:
             return read_pr_file(number=42, path="src/file.py", **kwargs)
 
     def test_hint_when_end_line_none_and_file_large(self):
-        """end_line 未指定かつファイルが閾値を超える場合に hints を含む。"""
+        """Includes hints when end_line is unset and file exceeds threshold."""
         large_content = "\n".join(f"line {i}" for i in range(_LARGE_FILE_THRESHOLD + 10))
         result = self._run_read_pr_file(large_content)
 
@@ -92,21 +92,21 @@ class TestReadPrFileLargeFileHint:
         assert "File is large" in result["hints"][0]
 
     def test_no_hint_when_file_small(self):
-        """end_line 未指定でもファイルが閾値以下の場合は hints を含まない。"""
+        """No hints when file is below threshold even without end_line."""
         small_content = "\n".join(f"line {i}" for i in range(10))
         result = self._run_read_pr_file(small_content)
 
         assert "hints" not in result
 
     def test_no_hint_when_end_line_specified(self):
-        """end_line 指定時はファイルが大きくても hints を含まない。"""
+        """No hints when end_line is specified even for large files."""
         large_content = "\n".join(f"line {i}" for i in range(_LARGE_FILE_THRESHOLD + 10))
         result = self._run_read_pr_file(large_content, end_line=50)
 
         assert "hints" not in result
 
     def test_hint_at_threshold_boundary(self):
-        """閾値ちょうどのファイルは hints なし、閾値+1 で hints あり。"""
+        """Exactly at threshold: no hints; threshold+1: hints present."""
         result = self._run_read_pr_file(
             "\n".join(f"line {i}" for i in range(_LARGE_FILE_THRESHOLD))
         )
@@ -119,10 +119,10 @@ class TestReadPrFileLargeFileHint:
 
 
 class TestStatusCodeChunks:
-    """status() の code_chunks フィールド（issue #101）。"""
+    """status() code_chunks field (issue #101)."""
 
     def test_code_chunks_present(self):
-        """status() のレスポンスに code_chunks フィールドが含まれる。"""
+        """status() response includes code_chunks field."""
         with (
             patch("shiori.mcp_server._conn"),
             patch("shiori.mcp_server.settings") as mock_settings,
@@ -141,7 +141,7 @@ class TestStatusCodeChunks:
         assert repo_info["code_chunks"] == 1290
 
     def test_code_chunks_zero_when_no_code_chunks(self):
-        """コードチャンクが存在しない場合、code_chunks は 0。"""
+        """code_chunks is 0 when no code chunks exist."""
         with (
             patch("shiori.mcp_server._conn"),
             patch("shiori.mcp_server.settings") as mock_settings,
@@ -160,10 +160,10 @@ class TestStatusCodeChunks:
 
 
 class TestStatusCodeAdded:
-    """status() の code_added キー名（issue #101）。"""
+    """status() code_added key name (issue #101)."""
 
     def test_code_added_key_present_in_status(self):
-        """status() のレスポンスに code_added（code_indexed ではない）が含まれる。"""
+        """status() response includes code_added (not code_indexed)."""
         from datetime import datetime, timezone
 
         now = datetime.now(timezone.utc)
@@ -198,7 +198,7 @@ class TestStatusCodeAdded:
         assert repo_info["code_added"] == 3
 
     def test_code_added_default_when_no_sync_run(self):
-        """同期記録がない場合のデフォルトに code_added が含まれる。"""
+        """code_added default is included when no sync record exists."""
         with (
             patch("shiori.mcp_server._conn"),
             patch("shiori.mcp_server.settings") as mock_settings,

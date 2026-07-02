@@ -1,11 +1,11 @@
-"""埋め込み（詳細設計/03）。
+"""Embeddings (detailed design/03).
 
-決定事項:
-- 既定モデルは intfloat/multilingual-e5-small（384 次元）。軽量でクロスリンガル
-  （日本語クエリ→英語ドキュメント）に対応。EMBEDDING_MODEL で差し替え可能だが、
-  次元が変わるため変更時は再索引（`shiori ingest --rebuild`）が必要。
-- e5 系は "query: " / "passage: " プレフィックスが必須なのでここで吸収する。
-- モデルの重みは HF_HOME（named volume）にキャッシュされる。
+Decisions:
+- Default model is intfloat/multilingual-e5-small (384 dims). Lightweight and cross-lingual
+  (Japanese query -> English document). Can be changed via EMBEDDING_MODEL, but re-indexing
+  (`shiori ingest --rebuild`) is required since dimensions change.
+- e5 models require "query: " / "passage: " prefixes, handled here.
+- Model weights are cached in HF_HOME (named volume).
 """
 
 from __future__ import annotations

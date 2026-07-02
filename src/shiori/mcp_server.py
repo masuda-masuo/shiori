@@ -1,41 +1,41 @@
-"""MCP サーバー（詳細設計/06）。
+"""MCP server (detailed design/06).
 
-ツール構成（決定: shiori_search が統合入口。keyword_search は厳密一致専用で分離維持）:
-- search(query, filters?)             : 意味＋キーワードのハイブリッド検索（入口ツール）。まずこれを使う。
-- keyword_search(query, filters?)     : 完全一致寄りのキーワード検索（日本語対応）。厳密一致が欲しいときに使う。
-- list_tree(path?, source_type?, extension?): 索引済みドキュメント＋コードファイルのツリー閲覧。
-- read_file(path, start?, end?)       : ローカルクローンからファイル（の一部）を取得。
-- read_issue(number, repo?, exclude_noise_bots?) : issue/PR スレッド全体を取得。
-- pr_changes(number, repo?, include_diff?) : PR の変更ファイルマップ（＋必要に応じて unified diff）を返す（issue #54, #100）。
-- read_pr_file(number, path, start?, end?, repo?) : PR head のファイル内容を透過的に取得（issue #81）。
-- ingest(rebuild?, repo?)             : docs / issue / PR / code の差分同期（索引更新）。
-- status()                            : 索引の鮮度と健全性（最終同期時刻・件数内訳・警告）。
+Tool composition (decision: shiori_search is the unified entry point; keyword_search is kept separate for exact-match):
+- search(query, filters?)             : Semantic + keyword hybrid search (entry point tool). Use this first.
+- keyword_search(query, filters?)     : Exact-match-oriented keyword search (Japanese-aware). Use when exact match is needed.
+- list_tree(path?, source_type?, extension?): Tree listing of indexed docs + code files.
+- read_file(path, start?, end?)       : Read (part of) a file from the local clone.
+- read_issue(number, repo?, exclude_noise_bots?) : Get full issue/PR thread.
+- pr_changes(number, repo?, include_diff?) : Return PR change file map (+ unified diff if needed) (issue #54, #100).
+- read_pr_file(number, path, start?, end?, repo?) : Transparently get PR head file content (issue #81).
+- ingest(rebuild?, repo?)             : Incremental sync of docs / issue / PR / code (index update).
+- status()                            : Index freshness and health (last sync time, count breakdown, warnings).
 
-実際に MCP クライアントに公開されるツール名は shiori_ 接頭辞付き（issue #8）。
-filesystem 等の他 MCP サーバーとの名前衝突を避けるため。関数名は据え置き。
+Tool names exposed to MCP clients have a shiori_ prefix (issue #8) to avoid name collisions
+with other MCP servers (filesystem, etc.). Function names remain as-is.
 
-検索結果は常にポインタ＋スニペット＋ GitHub URL。全文は read 系で取得する。
+Search results always include pointer + snippet + GitHub URL. Full text is retrieved via read tools.
 
-索引更新は 3 経路（issue #2, #6 の決定）:
-- shiori_ingest ツール: エージェント／ユーザーによるオンデマンド更新。
-- SHIORI_SYNC_INTERVAL_SECONDS: serve プロセス内のバックグラウンド自動同期（保険）。
-  イベント駆動が主になったため推奨値は 3600 秒。
-- self-hosted runner: push / issue / PR イベントで即時差分同期（issue #6）。
-  同期の実体は _do_sync()。PostgreSQL advisory lock でプロセス横断の排他を保証。
+Index update has 3 paths (decision from issue #2, #6):
+- shiori_ingest tool: On-demand update by agent/user.
+- SHIORI_SYNC_INTERVAL_SECONDS: Background auto-sync within the serve process (safety net).
+  Recommended value is 3600 seconds since event-driven is the primary mode.
+- self-hosted runner: Immediate incremental sync on push / issue / PR events (issue #6).
+  Sync body is _do_sync(). PostgreSQL advisory lock ensures cross-process exclusive access.
 
-同期が成功するたびに sync_runs へ完了時刻と経路（mcp / auto。runner / cli は
-ingest.py 側で記録）を残し、shiori_status で照会できる（issue #22）。
+On each successful sync, completion timestamp and route (mcp / auto. runner / cli are
+recorded in ingest.py) are written to sync_runs, queryable via shiori_status (issue #22).
 
-code 索引（issue #33）は SHIORI_INDEX_CODE=true で有効化。sync_docs と同一クローンを
-共有し、sha デルタで変化ファイルのみ再索引する。
+Code indexing (issue #33) is enabled via SHIORI_INDEX_CODE=true. Shares the same clone as
+sync_docs, re-indexing only changed files via sha delta.
 
-セキュリティ（issue #63）:
-- _do_sync の repo 引数は settings.repos と照合し、allowlist 外は拒否。
-- shiori_ingest の rebuild=True は SHIORI_ALLOW_REBUILD=true 時のみ許可。
+Security (issue #63):
+- _do_sync repo argument is validated against settings.repos (allowlist); unknowns are rejected.
+- shiori_ingest rebuild=True is only allowed when SHIORI_ALLOW_REBUILD=true.
 
-バルク経路最適化（issue #72）:
-  初回または rebuild では、重い索引（HNSW／pgroonga）をロード後に一括作成し、
-  埋め込みをファイル横断バッチ化、チャンク挿入をバルク化する。
+Bulk path optimisation (issue #72):
+  On first-run or rebuild, heavy indexes (HNSW / pgroonga) are created after data load,
+  embeddings are batched across files, and chunk insertion is bulkified.
 """
 
 from __future__ import annotations
@@ -120,7 +120,7 @@ def _make_filters(
 
 
 def _is_bulk_path(conn, rebuild: bool) -> bool:
-    """バルク経路か判定する: rebuild=True または chunks テーブルが空／未存在（issue #72）。"""
+    """Determine whether to use the bulk path: rebuild=True, or chunks table is empty / does not exist (issue #72)."""
     if rebuild:
         return True
     with conn.cursor() as cur:
@@ -136,15 +136,15 @@ def _do_sync(
     rebuild: bool = False,
     route: str = "mcp",
 ) -> dict[str, Any]:
-    """差分同期の実体。ingest ツールと自動同期ループの両方から呼ばれる。
+    """Sync body. Called from both the ingest tool and the auto-sync loop.
 
-    プロセス内排他: _sync_lock（threading.Lock）で早期 skip。
-    プロセス横断排他: PostgreSQL advisory lock (pg_try_advisory_lock) で、
-    runner ジョブ（別プロセス）との同時実行を防ぐ。
-    どちらも非ブロッキング（取得失敗 = skip）。
-    リポジトリごとの完了時に sync_runs へ完了時刻と経路を記録する（issue #22 / #33）。
+    Intra-process exclusion: _sync_lock (threading.Lock) for early skip.
+    Cross-process exclusion: PostgreSQL advisory lock (pg_try_advisory_lock) prevents
+    concurrent execution with runner jobs (separate process).
+    Both are non-blocking (failure to acquire = skip).
+    Records completion timestamp and route to sync_runs per repository (issue #22 / #33).
 
-    初回／rebuild はバルク経路: 重量索引をロード後に一括作成し、埋め込みをバッチ化する（issue #72）。
+    First-run / rebuild uses the bulk path: creates heavy indexes after data load, batches embeddings (issue #72).
     """
     # allowlist 検証: 明示的に指定された repo が settings.repos に含まれるか（issue #63）
     if repos is not None:
@@ -286,31 +286,31 @@ _EXCLUDE_EXTENSIONS = {
 
 
 def _is_doc_file(filename: str) -> bool:
-    """ファイル名がドキュメント拡張子か（大文字小文字無視）。"""
+    """Check if the filename has a document extension (case-insensitive)."""
     return any(filename.lower().endswith(ext) for ext in _DOC_EXTENSIONS)
 
 
 def _is_excluded_file(filename: str) -> bool:
-    """ファイル名が除外拡張子か（大文字小文字無視）。"""
+    """Check if the filename has an excluded extension (case-insensitive)."""
     lower = filename.lower()
     return any(lower.endswith(ext) for ext in _EXCLUDE_EXTENSIONS)
 
 
 def _match_extension(path: str, extension: str) -> bool:
-    """拡張子が指定値にマッチするか（大文字小文字無視、'.' 有無両対応）。"""
+    """Check if the extension matches the given value (case-insensitive, with or without leading '.')."""
     ext = extension if extension.startswith(".") else "." + extension
     return path.lower().endswith(ext.lower())
 
 
 def _walk_code_files(base: str, prefix: str, extension: str | None = None) -> set[str]:
-    """クローンを walk し、コードファイルの相対パス集合を返す。
+    """Walk the clone and return a set of relative paths for code files.
 
-    - .git / node_modules / .venv / __pycache__ 等のノイズディレクトリをスキップ
-    - .md / .mdx / .markdown は doc_files テーブルが担当するため除外
-    - バイナリ・アセット・ロックファイル等の非テキスト拡張子も除外
-    - prefix が指定された場合はそのパス自身またはその配下のファイルのみを返す
-      （例: prefix="src" は "src/main.py" にマッチ、"src2/main.py" にはマッチしない）
-    - extension が指定された場合はウォーク中に拡張子フィルタを適用（大文字小文字無視）
+    - Skips noise directories (.git / node_modules / .venv / __pycache__ etc.)
+    - Excludes .md / .mdx / .markdown (handled by doc_files table)
+    - Excludes non-text extensions (binary, assets, lock files, etc.)
+    - When prefix is given, only returns paths matching that prefix or its subtree
+      (e.g. prefix="src" matches "src/main.py" but not "src2/main.py")
+    - When extension is given, applies extension filter during walk (case-insensitive)
     """
     paths: set[str] = set()
     if not os.path.isdir(base):
@@ -386,18 +386,19 @@ def semantic_search(
     sort_by: str = "score",
     sort_order: str = "desc",
 ) -> list[dict[str, Any]]:
-    """意味ベースの検索（入口ツール）。言い換え・概念・クロスリンガル（日本語クエリで英語ドキュメント）に強い。
-    内部でキーワード検索とのハイブリッド融合 (RRF) を行う。
-    ポインタ（path / heading_path / issue_no）＋スニペット＋URL を返す。全文は read 系で取得すること。
-    filters: source_type は doc / issue / pr_review / code、language は ja / en、
-    state は open / closed、prog_lang は python / go / rust 等、
-    updated_after は ISO8601 日付。
-    sort_by: "score"（既定）/ "updated_at" / "created_at"。
-      後方互換のため受け付けるが、ランキングは常に関連度主に固定（issue #69）。
-      一次ソース（doc/code）は RRF スコア順、
-      二次ソース（issue/pr_review）は RRF スコア＋state/updated_at tie-break。
-      純粋な日付置換ソートは行わず、既定（score）のまま使うことを推奨。
-    sort_order: "desc"（既定）/ "asc"（asc 時は複合キー全体が反転）。"""
+    """Semantic search (entry point tool). Strong for paraphrasing, concepts, and cross-lingual (Japanese query for English docs).
+    Internally performs hybrid fusion with keyword search (RRF).
+    Returns pointer (path / heading_path / issue_no) + snippet + URL. Full text via read tools.
+    filters: source_type is doc / issue / pr_review / code, language is ja / en,
+    state is open / closed, prog_lang is python / go / rust etc.,
+    updated_after is ISO8601 date.
+    sort_by: "score" (default) / "updated_at" / "created_at".
+      Accepted for backward compatibility, but ranking is always relevance-primary (issue #69).
+      Primary sources (doc/code) are RRF-score-ordered,
+      secondary sources (issue/pr_review) use RRF score + state/updated_at tie-break.
+      Pure date-replacement sort is not performed; use default (score).
+    sort_order: "desc" (default) / "asc" (asc inverts the entire composite key).
+    """
     with _conn() as conn:
         return search.semantic_search(
             settings, conn, _get_embedder(), query,
@@ -422,17 +423,17 @@ def keyword_search(
     sort_by: str = "score",
     sort_order: str = "desc",
 ) -> list[dict[str, Any]]:
-    """キーワード検索（日本語対応トークナイズ）。関数名・API 名・エラーコード・設定キーなど
-    固有の文字列の厳密一致に強い。通常は shiori_search を使い、厳密一致が必要なときに
-    このツールを使うこと。
-    code チャンクは content（シグネチャ＋docstring）と symbols（識別子分割済み文字列）の
-    OR 検索になるため、camelCase/snake_case の部分一致でも発見できる。
-    sort_by: "score"（既定）/ "updated_at" / "created_at"。
-      後方互換のため受け付けるが、ランキングは常に関連度主に固定（issue #69）。
-      一次ソース（doc/code）はスコア順、
-      二次ソース（issue/pr_review）はスコア＋state/updated_at tie-break。
-      純粋な日付置換ソートは行わず、既定（score）のまま使うことを推奨。
-    sort_order: "desc"（既定）/ "asc"（asc 時は複合キー全体が反転）。"""
+    """Keyword search (Japanese-aware tokenisation). Strong for exact matches of function names, API names,
+    error codes, and config keys. Normally use shiori_search; use this tool when exact match is needed.
+    code chunks are an OR search of content (signature + docstring) and symbols (tokenised identifiers),
+    so partial matches of camelCase/snake_case are also found.
+    sort_by: "score" (default) / "updated_at" / "created_at".
+      Accepted for backward compatibility, but ranking is always relevance-primary (issue #69).
+      Primary sources (doc/code) are score-ordered,
+      secondary sources (issue/pr_review) use score + state/updated_at tie-break.
+      Pure date-replacement sort is not performed; use default (score).
+    sort_order: "desc" (default) / "asc" (asc inverts the entire composite key).
+    """
     with _conn() as conn:
         return search.keyword_search(
             settings, conn, query,
@@ -454,25 +455,26 @@ def list_tree(
     extension: str | None = None,
     repo: str | None = None,
 ) -> list[dict[str, Any]]:
-    """索引済みドキュメント＋コードファイルのパス一覧。path を渡すとその配下に絞る。
-    リポジトリの構造を把握し、当たりをつけるのに使う。
+    """List indexed docs + code file paths. When path is given, filter by that subtree.
+    Use this to understand the repository structure and get file pointers.
 
-    ■ 二ストア・モデルと source_type の意味:
-      - source_type='doc' (索引): doc_files テーブル（Postgres に索引済みの Markdown のみ）。
-        索引されていないドキュメントは返らない。
-      - source_type='code' (クローン): ディスク上のクローン（main 固定）を os.walk した結果。
-        索引前でも物理的に存在すれば返る。バイナリ・ロックファイル等は除外。
-      - 省略時: 両方を返すが、各エントリの source フィールドで出所を区別できる。
+    ■ Two-store model and meaning of source_type:
+      - source_type='doc' (index): doc_files table (Postgres-indexed Markdown only).
+        Unindexed documents are not returned.
+      - source_type='code' (clone): os.walk result of the disk clone (main branch fixed).
+        Returns files that exist physically even before indexing. Binary/lock files etc. are excluded.
+      - When omitted: returns both, distinguishable by the source field per entry.
 
-    コードファイル（.py, .ts, .go 等）もクローンファイルシステムから返す。
-    コードは索引前でも発見可能。
+    Code files (.py, .ts, .go etc.) are also returned from the clone filesystem.
+    Code is discoverable even before indexing.
 
-    戻り値は [{"path": ..., "source": "doc"|"code"}, ...] のリスト（path でソート済み）。
+    Returns a list of [{"path": ..., "source": "doc"|"code"}, ...] (sorted by path).
 
-    source_type: 'doc'（索引済み Markdown）/'code'（クローンのコードファイル）で絞り込み。
-                 省略時は両方を返す。無効な値はエラー。
-    extension:   '.py' や '.md' 等の拡張子でフィルタ（先頭ドットの有無は自由）。
-                 大文字小文字無視。各取得経路でフィルタするため効率的。"""
+    source_type: 'doc' (indexed Markdown) /'code' (clone code files) filter.
+                 When omitted, returns both. Invalid values raise an error.
+    extension:   Filter by extension like '.py' or '.md' (leading dot optional).
+                 Case-insensitive. Filters at each retrieval path for efficiency.
+    """
     # バリデーション
     if source_type is not None and source_type not in _VALID_SOURCE_TYPES:
         raise ValueError(
@@ -531,13 +533,14 @@ def read_file(
     end_line: int | None = None,
     repo: str | None = None,
 ) -> dict[str, Any]:
-    """指定ファイルの全文（または start_line〜end_line の範囲）を取得する。
-    検索結果のポインタから本当に必要な範囲だけ読むこと。
-    ドキュメントだけでなくコードファイルも読める。
+    """Get full content (or start_line~end_line range) of the specified file.
+    Only read the range truly needed from search result pointers.
+    Can read both documents and code files.
 
-    このツールは索引（Postgres）ではなく、ローカルクローン（main ブランチ固定）の
-    実ファイルを直接読み取る。索引が存在しなくても、クローンがあれば読める。
-    PR head / 別 ref / diff の取得は GitHub MCP または shiori_read_pr_file に委譲すること。"""
+    This tool reads from the local clone (main branch fixed), not from the index (Postgres).
+    As long as the clone exists, files can be read even without an index.
+    PR head / other ref / diff retrieval is delegated to GitHub MCP or shiori_read_pr_file.
+    """
     target = _resolve_repo(repo)
     base = os.path.realpath(settings.repo_dir(target))
     full = os.path.realpath(os.path.join(base, path))
@@ -573,7 +576,7 @@ def read_file(
 
 
 def _read_issue_single(target: str, number: int, exclude_noise_bots: bool) -> dict[str, Any]:
-    """1 件の issue を取得（内部ヘルパー）。未索引の場合は ValueError。"""
+    """Get a single issue (internal helper). Raises ValueError if not indexed."""
     with _conn() as conn, conn.cursor() as cur:
         cur.execute(
             """
@@ -627,14 +630,14 @@ def read_issue(
     exclude_noise_bots: bool = False,
     numbers: list[int] | None = None,
 ) -> dict[str, Any] | list[dict[str, Any]]:
-    """issue / PR のスレッド全体（本文＋コメント＋レビューコメント）を時系列で取得する。
-    bot コメントも含まれる（is_bot で識別可能）。
+    """Get the full issue/PR thread (body + comments + review comments) chronologically.
+    bot comments are also included (identifiable via is_bot).
 
-    number: issue または PR 番号（単発取得。numbers と排他）。
-    repo: リポジトリ名（"owner/name"）。省略時は SHIORI_REPOS の最初のリポジトリ。
-    exclude_noise_bots: True で allowlist 外の bot（CI / dependabot 等）を除外する（既定 False）。
-        allowlist（SHIORI_INDEX_BOT_LOGINS）登録済み bot の投稿は残る（issue #44）。
-    numbers: 複数の issue/PR 番号（バッチ取得）。指定時は配列を返す。
+    number: issue or PR number (single fetch; mutually exclusive with numbers).
+    repo: Repository name ("owner/name"). When omitted, uses the first repo in SHIORI_REPOS.
+    exclude_noise_bots: When True, exclude bots outside the allowlist (CI / dependabot etc.) (default False).
+        Posts from bots registered in the allowlist (SHIORI_INDEX_BOT_LOGINS) remain (issue #44).
+    numbers: Multiple issue/PR numbers (batch fetch). When set, returns an array.
 """
     if number is not None and numbers is not None:
         raise ValueError("number と numbers は同時に指定できません")
@@ -667,17 +670,18 @@ def pr_changes(
     repo: str | None = None,
     include_diff: bool = False,
 ) -> dict[str, Any]:
-    """PR の変更ファイルマップ（メタデータ）を返す。ポインタ層のツール（issue #54, #100）。
+    """Return PR change file map (metadata). Pointer-level tool (issue #54, #100).
 
-    保持するもの（メタデータ）:
-      - head_sha: PR の head コミット SHA（force-push 追従用）
-      - ファイル一覧: path / status / additions / deletions / changes / blob_url
-      - diff: include_diff=True 時、unified diff（issue #100）
+    Holds (metadata):
+      - head_sha: PR head commit SHA (tracks force-push)
+      - File list: path / status / additions / deletions / changes / blob_url
+      - diff: unified diff when include_diff=True (issue #100)
 
-    number: PR 番号
-    repo: リポジトリ名（"owner/name"）。省略時は SHIORI_REPOS の最初のリポジトリ。
-    include_diff: True で unified diff も取得する（既定 False）。GitHub の
-        refs/pull/{N}/head から git fetch し、merge-base との間の diff を返す。"""
+    number: PR number
+    repo: Repository name ("owner/name"). When omitted, uses the first repo in SHIORI_REPOS.
+    include_diff: When True, also fetch unified diff (default False). Fetches from GitHub's
+        refs/pull/{N}/head via git fetch and returns the diff against merge-base.
+    """
     target = _resolve_repo(repo)
     with _conn() as conn:
         files, head_sha = db.get_pr_changes(conn, target, number)
@@ -720,17 +724,18 @@ def read_pr_file(
     end_line: int | None = None,
     repo: str | None = None,
 ) -> dict[str, Any]:
-    """PR head のファイル内容（または start_line〜end_line の範囲）を取得する。
-    shiori_pr_changes で変更ファイル一覧を取得した後、このツールで各ファイルの中身を読む。
-    shiori_read_file と違い、PR の head ブランチのファイルを透過的に読める。
-    GitHub の refs/pull/{N}/head から git fetch し、ワーキングツリーを変更せずに
-    ファイル内容を取り出す。一時 ref は自動クリーンアップされる。
+    """Get PR head file content (or start_line~end_line range).
+    After getting the changed file list from shiori_pr_changes, use this tool to read each file.
+    Unlike shiori_read_file, this can transparently read files from the PR head branch.
+    Fetches from GitHub's refs/pull/{N}/head via git fetch and extracts file content
+    without modifying the working tree. Temporary refs are cleaned up automatically.
 
-    number: PR 番号
-    path: ファイルパス（例: "src/main.py"）
-    repo: リポジトリ名（"owner/name"）。省略時は SHIORI_REPOS の最初のリポジトリ。
-    start_line: 開始行（1-indexed）
-    end_line: 終了行（1-indexed、省略時は最終行）"""
+    number: PR number
+    path: File path (e.g. "src/main.py")
+    repo: Repository name ("owner/name"). When omitted, uses the first repo in SHIORI_REPOS.
+    start_line: Start line (1-indexed)
+    end_line: End line (1-indexed, defaults to last line)
+    """
     target = _resolve_repo(repo)
     base = os.path.realpath(settings.repo_dir(target))
 
@@ -785,15 +790,16 @@ def read_pr_file(
 
 @mcp.tool(name="shiori_ingest")
 def ingest(rebuild: bool = False, repo: str | None = None) -> dict[str, Any]:
-    """docs / issue/PR / code を GitHub から同期し索引を更新する（差分同期なので通常は数秒）。
-    検索結果が古い・未索引と思われる場合（直近の変更がヒットしない、ユーザーが
-    最近の変更に言及している等）に呼ぶ。rebuild=True で索引を破棄して全件作り直す
-    （埋め込みモデル変更時のみ）。repo 省略時は設定済みの全リポジトリを同期する。
-    code 索引は SHIORI_INDEX_CODE=true で有効化。
+    """Sync docs / issue/PR / code from GitHub and update the index (incremental, normally a few seconds).
+    Call when search results seem stale or not yet indexed (recent changes not hitting, user mentioning
+    recent changes, etc.). rebuild=True discards the index and rebuilds from scratch
+    (only when embedding model changes). When repo is omitted, syncs all configured repos.
+    Code indexing is enabled with SHIORI_INDEX_CODE=true.
 
-    rebuild=True は MCP ツールからは既定で無効化されている。使用するには
-    環境変数 SHIORI_ALLOW_REBUILD=true の設定が必要（issue #63）。
-    repo は SHIORI_REPOS に含まれるもののみ有効。"""
+    rebuild=True is disabled by default from the MCP tool. Requires
+    setting SHIORI_ALLOW_REBUILD=true (issue #63).
+    Only repos in SHIORI_REPOS are valid.
+    """
     if rebuild and not settings.allow_rebuild:
         raise ValueError(
             "rebuild=True は MCP ツールからは実行できません。"
@@ -813,7 +819,7 @@ def _build_warnings(
     items_in_db: int,
     cursors: dict[str, str | None],
 ) -> list[str]:
-    """索引の異常を検出して警告リストを返す（issue #31）。"""
+    """Detect index anomalies and return a warning list (issue #31)."""
     warnings: list[str] = []
 
     # 鮮度: 最終同期から長時間経過
@@ -847,13 +853,14 @@ def _build_warnings(
 
 @mcp.tool(name="shiori_status")
 def status() -> dict[str, Any]:
-    """索引の鮮度と健全性を返す。リポジトリごとに最終同期の完了時刻（last_synced_at）・
-    経過秒数（age_seconds）・実行経路（cli / runner / mcp / auto）・直近の追加件数
-    （docs_updated / issues_indexed / code_added）・チャンク総数内訳（chunks）・
-    code_chunks・issue_items 全件数・差分同期カーソル・警告（warnings）を返す。
-    「索引は最新か?」の判断に使う:
-    age_seconds が小さければ同期済み、大きい／last_synced_at が null なら
-    shiori_ingest で差分同期すること。warnings があれば索引に異常がある可能性。"""
+    """Return index freshness and health. Per-repository: last sync completion time (last_synced_at),
+    elapsed seconds (age_seconds), execution route (cli / runner / mcp / auto), recent additions
+    (docs_updated / issues_indexed / code_added), chunk count breakdown (chunks),
+    code_chunks, issue_items total count, incremental sync cursors, warnings.
+    Use to determine if the index is up to date:
+    if age_seconds is small, the index is synced; if large or last_synced_at is null,
+    call shiori_ingest for incremental sync. If warnings are present, the index may have issues.
+    """
     with _conn() as conn:
         runs = db.get_sync_runs(conn)
         repos: dict[str, Any] = {}

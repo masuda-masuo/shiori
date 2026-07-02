@@ -1,26 +1,26 @@
-"""ingest ジョブ（詳細設計/01・07）。
+"""Ingest job (detailed design/01, 07).
 
-決定: 同期はオンデマンド実行。
+Decision: Sync is on-demand.
     docker compose run --rm app python -m shiori ingest
-スケジュール実行が必要な場合はホスト側 cron 等から同コマンドを叩く。
-認証は build_token_provider で構築し、全リポジトリの同期で共有する（詳細設計/09）。
+For scheduled execution, run the same command from host-side cron etc.
+Authentication is built via build_token_provider and shared across all repos (detailed design/09).
 
-プロセス横断排他（issue #6）:
-    PostgreSQL advisory lock (pg_try_advisory_lock) を使い、serve プロセスの
-    自動同期や MCP ツール ingest との同時実行を防ぐ。
-    SYNC_LOCK_KEY は mcp_server.py と同じ値（0x5348494F = 'SHIO'）。
+Cross-process exclusion (issue #6):
+    Uses PostgreSQL advisory lock (pg_try_advisory_lock) to prevent concurrent execution
+    with the serve process auto-sync or MCP tool ingest.
+    SYNC_LOCK_KEY matches mcp_server.py (0x5348494F = 'SHIO').
 
-鮮度の記録（issue #22 / #33）:
-    リポジトリごとの同期完了時に sync_runs へ完了時刻と経路を記録する。
-    経路は環境変数 SHIORI_INGEST_ROUTE（既定 'cli'）。reindex.yml（self-hosted
-    runner）は 'runner' を設定して実行経路を識別できるようにする。
+Freshness recording (issue #22 / #33):
+    Records completion timestamp and route to sync_runs per repository.
+    Route is set via SHIORI_INGEST_ROUTE env var (default 'cli'). reindex.yml (self-hosted
+    runner) sets 'runner' to identify the execution route.
 
-セキュリティ（issue #63）:
-    指定された repo を SHIORI_REPOS（allowlist）と照合し、含まれないものは拒否する。
+Security (issue #63):
+    Validates specified repos against SHIORI_REPOS (allowlist); rejects unknowns.
 
-バルク経路最適化（issue #72）:
-    初回または rebuild では、重い索引（HNSW／pgroonga）をロード後に一括作成し、
-    埋め込みをファイル横断バッチ化、チャンク挿入をバルク化する。
+Bulk path optimisation (issue #72):
+    On first-run or rebuild, heavy indexes (HNSW / pgroonga) are created after data load,
+    embeddings are batched across files, and chunk insertion is bulkified.
 """
 
 from __future__ import annotations
@@ -45,9 +45,9 @@ _BULK_BUFFER_SIZE = 500
 
 
 def _is_bulk_path(conn, rebuild: bool) -> bool:
-    """バルク経路か判定する: rebuild=True または chunks テーブルが空／未存在。
+    """Determine whether to use the bulk path: rebuild=True, or chunks table is empty / does not exist.
 
-    新規 DB（chunks テーブル未作成）もバルク扱いする（issue #72）。
+    A new DB (chunks table not yet created) is also treated as bulk (issue #72).
     """
     if rebuild:
         return True

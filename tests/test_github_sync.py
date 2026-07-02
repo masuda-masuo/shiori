@@ -1,8 +1,8 @@
-"""github_sync のユニットテスト（issue #25, #54, #72, #73, #81）。
+"""Unit tests for github_sync (issue #25, #54, #72, #73, #81).
 
-_should_index の allowlist 判定ロジック、_sync_pr_changes の head_sha 比較による
-スキップ／再取得ロジック、ChunkBuffer のバッチ蓄積・フラッシュ、
-_clean_text の制御文字除去、_git_fetch_ref / _git_delete_ref を検証する。
+Verifies _should_index allowlist logic, _sync_pr_changes head_sha comparison
+skip/re-fetch logic, ChunkBuffer batch accumulation and flush,
+_clean_text control character removal, _git_fetch_ref / _git_delete_ref.
 """
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ from shiori.github_sync import (
 
 
 class TestChunkBuffer:
-    """ChunkBuffer: チャンク蓄積→一括埋め込み→バルク挿入。"""
+    """ChunkBuffer: chunk accumulate → batch embed → bulk insert."""
 
     def _mock_conn(self):
         conn = MagicMock()
@@ -65,7 +65,7 @@ class TestChunkBuffer:
         return defaults
 
     def test_add_then_flush_batches_embedding_and_insert(self):
-        """add で蓄積し、flush で一括埋め込み＋バルク挿入＋commit。"""
+        """Accumulate with add, then flush does batch embed + bulk insert + commit."""
         conn = self._mock_conn()
         embedder = MagicMock()
         embedder.embed_passages.return_value = [[0.1, 0.2], [0.3, 0.4]]
@@ -87,7 +87,7 @@ class TestChunkBuffer:
             conn.commit.assert_called_once()
 
     def test_auto_flush_when_batch_size_reached(self):
-        """batch_size に達すると自動で flush される。"""
+        """Auto-flush when batch_size is reached."""
         conn = self._mock_conn()
         embedder = MagicMock()
         embedder.embed_passages.return_value = [[0.1, 0.2], [0.3, 0.4]]
@@ -106,7 +106,7 @@ class TestChunkBuffer:
             assert len(buf._items) == 1  # まだ flush されていない
 
     def test_flush_empty_buffer_noops(self):
-        """空バッファの flush は何もしない。"""
+        """Flushing an empty buffer does nothing."""
         conn = self._mock_conn()
         embedder = MagicMock()
 
@@ -119,7 +119,7 @@ class TestChunkBuffer:
         conn.commit.assert_not_called()
 
     def test_flush_returns_inserted_count(self):
-        """flush の返り値は挿入件数。"""
+        """flush return value is the inserted count."""
         conn = self._mock_conn()
         embedder = MagicMock()
         embedder.embed_passages.return_value = [
@@ -146,7 +146,7 @@ class TestChunkBuffer:
 
 
 class TestShouldIndex:
-    """_should_index の allowlist 判定（issue #25）。"""
+    """_should_index allowlist logic (issue #25)."""
 
     def test_non_bot_always_indexed(self):
         settings = Settings()
@@ -167,13 +167,13 @@ class TestShouldIndex:
         assert _should_index(True, "other[bot]", settings) is False
 
     def test_author_none_with_allowlist(self):
-        """author が None の bot は allowlist にかかわらず除外。"""
+        """Bot with author=None is excluded regardless of allowlist."""
         settings = Settings()
         settings.index_bot_logins = {"any[bot]"}
         assert _should_index(True, None, settings) is False
 
     def test_case_insensitive(self):
-        """allowlist 判定は大文字小文字を無視する。"""
+        """allowlist check is case-insensitive."""
         settings = Settings()
         settings.index_bot_logins = {"my-bot[bot]"}
         assert _should_index(True, "MY-BOT[bot]", settings) is True
@@ -185,7 +185,7 @@ class TestShouldIndex:
 
 
 class TestIsBot:
-    """_is_bot の判定ロジック。"""
+    """_is_bot determination logic."""
 
     def test_type_bot(self):
         assert _is_bot({"type": "Bot", "login": "x"}) is True
@@ -205,7 +205,7 @@ class TestIsBot:
 
 
 class TestPropagateIssueState:
-    """_propagate_issue_state の振る舞い。"""
+    """Behavior of _propagate_issue_state."""
 
     def test_updates_all_chunks_for_repo_and_issue(self):
         conn = MagicMock()
@@ -221,7 +221,7 @@ class TestPropagateIssueState:
         )
 
     def test_zero_rowcount_does_not_log(self):
-        """rowcount=0 でも例外は出ない。"""
+        """rowcount=0 does not raise an exception."""
         conn = MagicMock()
         cursor = MagicMock()
         cursor.rowcount = 0
@@ -236,7 +236,7 @@ class TestPropagateIssueState:
 
 
 class TestSyncPrChanges:
-    """_sync_pr_changes の振る舞い。"""
+    """Behavior of _sync_pr_changes."""
 
     def test_skips_when_head_sha_unchanged(self):
         client = MagicMock()
@@ -323,11 +323,11 @@ class TestSyncPrChanges:
 
 
 class TestGit:
-    """_git の safe.directory 付与ロジック（issue #48）。"""
+    """_git safe.directory assignment logic (issue #48)."""
 
     @patch("shiori.github_sync.subprocess.run")
     def test_safe_directory_added_when_cwd_given(self, mock_run):
-        """cwd 指定時に -c safe.directory=<cwd> が渡ること。"""
+        """When cwd is specified, -c safe.directory=<cwd> is passed."""
         mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
         _git(["status"], cwd="/data/repos/foo")
         called_cmd = mock_run.call_args[0][0]
@@ -335,7 +335,7 @@ class TestGit:
 
     @patch("shiori.github_sync.subprocess.run")
     def test_no_safe_directory_when_cwd_none(self, mock_run):
-        """cwd=None（clone 時など）には safe.directory が付与されないこと。"""
+        """When cwd=None (e.g. clone), safe.directory is not assigned."""
         mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
         _git(["clone", "url", "dest"])
         called_cmd = mock_run.call_args[0][0]
@@ -348,45 +348,45 @@ class TestGit:
 
 
 class TestCleanText:
-    """_clean_text: 制御文字除去（改行・タブは保持）。"""
+    """_clean_text: control character removal (preserves newline, tab)."""
 
     def test_remove_nul(self):
-        """NUL (0x00) が除去される。"""
+        """NUL (0x00) is removed."""
         assert _clean_text("hello\x00world") == "helloworld"
 
     def test_remove_control_chars(self):
-        """改行・タブ以外の制御文字 (0x01-0x08, 0x0B-0x1F) が除去される。"""
+        """Control chars except newline/tab (0x01-0x08, 0x0B-0x1F) are removed."""
         assert _clean_text("a\x01b\x08c\x0Bd\x1Fe") == "abcde"
 
     def test_preserve_newline(self):
-        """改行 (\n, 0x0A) は保持される。"""
+        """Newline (\n, 0x0A) is preserved."""
         assert _clean_text("line1\nline2\nline3") == "line1\nline2\nline3"
 
     def test_preserve_tab(self):
-        """タブ (\t, 0x09) は保持される。"""
+        """Tab (\t, 0x09) is preserved."""
         assert _clean_text("col1\tcol2\tcol3") == "col1\tcol2\tcol3"
 
     def test_preserve_normal_text(self):
-        """通常のテキストはそのまま。"""
+        """Normal text is unchanged."""
         text = "Hello, 世界! This is a test \U0001f60a"
         assert _clean_text(text) == text
 
     def test_none_returns_empty(self):
-        """None は空文字列になる。"""
+        """None becomes empty string."""
         assert _clean_text(None) == ""
 
     def test_empty_string(self):
-        """空文字列はそのまま。"""
+        """Empty string is unchanged."""
         assert _clean_text("") == ""
 
     def test_mixed_control_and_valid(self):
-        """制御文字・改行・タブ・通常テキストの混合。"""
+        """Mix of control chars, newline, tab, and normal text."""
         mixed = "a\x00b\x01c\nd\te\x1Ff\x09g\nh"
         expected = "abc\nd\tef\tg\nh"
         assert _clean_text(mixed) == expected
 
     def test_only_control_chars(self):
-        """制御文字だけの文字列は空になる。"""
+        """String with only control chars becomes empty."""
         assert _clean_text("\x00\x01\x08\x0B\x1F") == ""
 
 
@@ -396,11 +396,11 @@ class TestCleanText:
 
 
 class TestGitFetchRef:
-    """_git_fetch_ref / _git_delete_ref: PR head 取得の共通プリミティブ。"""
+    """_git_fetch_ref / _git_delete_ref: PR head fetch common primitives."""
 
     @patch("shiori.github_sync._git")
     def test_auto_generates_tmp_ref(self, mock_git):
-        """tmp_ref 未指定時は refs/shiori/tmp-{uuid} を自動生成する。"""
+        """Auto-generates refs/shiori/tmp-{uuid} when tmp_ref is unset."""
         with patch("shiori.github_sync.uuid.uuid4") as mock_uuid:
             mock_uuid.return_value.hex = "deadbeef1234"
             result = _git_fetch_ref("pull/42/head", cwd="/data/repos/o/r")
@@ -414,7 +414,7 @@ class TestGitFetchRef:
 
     @patch("shiori.github_sync._git")
     def test_uses_custom_tmp_ref(self, mock_git):
-        """tmp_ref 指定時はその値を使う。"""
+        """Uses the provided tmp_ref value when specified."""
         result = _git_fetch_ref(
             "pull/42/head",
             cwd="/data/repos/o/r",
@@ -430,7 +430,7 @@ class TestGitFetchRef:
     @patch("shiori.github_sync._auth_args")
     @patch("shiori.github_sync._git")
     def test_forwards_provider_auth(self, mock_git, mock_auth):
-        """provider が指定された場合、_auth_args の結果を git 引数に含める。"""
+        """When provider is given, includes _auth_args result in git args."""
         mock_auth.return_value = ["-c", "http.extraHeader=Authorization: Basic xxx"]
         provider = MagicMock()
 
@@ -446,7 +446,7 @@ class TestGitFetchRef:
     @patch("shiori.github_sync._auth_args")
     @patch("shiori.github_sync._git")
     def test_no_auth_when_provider_none(self, mock_git, mock_auth):
-        """provider=None なら認証引数は付与されない。"""
+        """No auth args when provider=None."""
         mock_auth.return_value = []
 
         with patch("shiori.github_sync.uuid.uuid4") as mock_uuid:
@@ -460,7 +460,7 @@ class TestGitFetchRef:
 
     @patch("shiori.github_sync._git")
     def test_fetch_failure_propagated(self, mock_git):
-        """git fetch の失敗はそのまま伝播する。"""
+        """git fetch failure is propagated as-is."""
         mock_git.side_effect = RuntimeError("fetch failed")
 
         with pytest.raises(RuntimeError, match="fetch failed"):
@@ -468,7 +468,7 @@ class TestGitFetchRef:
 
     @patch("shiori.github_sync._git")
     def test_delete_ref_exists(self, mock_git):
-        """_git_delete_ref は update-ref -d を呼ぶ。"""
+        """_git_delete_ref calls update-ref -d."""
         _git_delete_ref("refs/shiori/tmp-abc", cwd="/r")
 
         mock_git.assert_called_once_with(
@@ -478,7 +478,7 @@ class TestGitFetchRef:
 
     @patch("shiori.github_sync._git")
     def test_delete_ref_nonexistent_ignored(self, mock_git):
-        """存在しない ref の削除は RuntimeError を握りつぶす。"""
+        """Deleting a non-existent ref silently swallows RuntimeError."""
         mock_git.side_effect = RuntimeError("fatal: ...")
 
         # 例外を出さない

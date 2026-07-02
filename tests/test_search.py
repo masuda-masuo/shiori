@@ -1,4 +1,4 @@
-"""search モジュールのユニットテスト（issue #41, #69）。"""
+"""Unit tests for the search module (issue #41, #69)."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ _COL_UPDATED_AT = 13
 
 
 def _make_row(source_type, state=None, updated_at=None, created_at=None):
-    """_RESULT_COLS に合わせたモック row タプルを作る。"""
+    """Create a mock row tuple matching _RESULT_COLS."""
     from datetime import datetime, timezone
     return (
         1, source_type, "test/repo", "dummy/path", None, None,
@@ -23,7 +23,7 @@ def _make_row(source_type, state=None, updated_at=None, created_at=None):
 # ── _sort_hits 後方互換テスト ──
 
 class TestSortHits:
-    """_sort_hits の振る舞い（後方互換）。"""
+    """Behavior of _sort_hits (backward compatibility)."""
 
     def _make_hits(self) -> list[dict]:
         return [
@@ -86,7 +86,7 @@ class TestSortHits:
 # ── _rank_candidates テスト（issue #69） ──
 
 class TestRankCandidates:
-    """source-aware な pool 段複合ランキングの振る舞い。"""
+    """Behavior of source-aware pool-stage composite ranking."""
 
     # ── 一次ソース（doc / code）: 関連度のみ ──
 
@@ -101,7 +101,7 @@ class TestRankCandidates:
         assert method == "rrf"
 
     def test_primary_sources_ignore_date_sort_by(self):
-        """一次ソースでは sort_by=updated_at でもスコア順が維持される。"""
+        """Primary sources maintain score order even with sort_by=updated_at."""
         from datetime import datetime, timezone
         ts_old = datetime(2026, 1, 1, tzinfo=timezone.utc)
         ts_new = datetime(2026, 6, 14, tzinfo=timezone.utc)
@@ -150,7 +150,7 @@ class TestRankCandidates:
     # ── created_at は updated_at に集約（review #1） ──
 
     def test_sort_by_created_at_same_as_updated_at(self):
-        """sort_by=created_at は updated_at と同じ tie-break を生成する。"""
+        """sort_by=created_at produces the same tie-break as updated_at."""
         from datetime import datetime, timezone
         ts_old = datetime(2026, 1, 1, tzinfo=timezone.utc)
         ts_new = datetime(2026, 6, 14, tzinfo=timezone.utc)
@@ -173,7 +173,7 @@ class TestRankCandidates:
         assert [rid for rid, _ in result] == [2, 3, 1]
 
     def test_mixed_sources_primary_before_secondary_at_equal_score(self):
-        """同スコアでは一次ソースが sentinel により二次より前に来る。"""
+        """At equal scores, primary source comes before secondary via sentinel."""
         from datetime import datetime, timezone
         ts = datetime(2026, 6, 10, tzinfo=timezone.utc)
         rows_by_id = {1: _make_row("doc", state=None, updated_at=ts), 2: _make_row("issue", state="open", updated_at=ts)}
@@ -192,7 +192,7 @@ class TestRankCandidates:
         assert [rid for rid, _ in result] == [1, 2]
 
     def test_sort_order_asc_secondary_reverses_composite(self):
-        """sort_order=asc 時は複合キー全体が反転し、closed→open・古い→新しい の順になる。"""
+        """sort_order=asc inverts the composite key so closed→open, old→new."""
         from datetime import datetime, timezone
         ts_old = datetime(2026, 1, 1, tzinfo=timezone.utc)
         ts_new = datetime(2026, 6, 14, tzinfo=timezone.utc)
@@ -219,7 +219,7 @@ class TestRankCandidates:
         assert method == "rrf"
 
     def test_missing_row_goes_last(self):
-        """rows_by_id に存在しない ID は最下位に沈む（防御的フォールバック）。"""
+        """IDs not in rows_by_id sink to the bottom (defensive fallback)."""
         from datetime import datetime, timezone
         ts = datetime(2026, 6, 10, tzinfo=timezone.utc)
         rows_by_id = {1: _make_row("issue", state="open", updated_at=ts)}
@@ -246,7 +246,7 @@ class TestRankCandidates:
     # ── ranking_method ──
 
     def test_ranking_method_always_rrf(self):
-        """sort_by に関わらず method は常に "rrf"。"""
+        """method is always "rrf" regardless of sort_by."""
         for sb in ("score", "updated_at", "created_at"):
             _, method = _rank_candidates([], {}, sort_by=sb)
             assert method == "rrf", f"sort_by={sb} should return 'rrf'"

@@ -1,6 +1,6 @@
 """shiori configuration.
 
-すべて環境変数から読む。docker compose の `.env` 経由で渡す想定。
+All values are read from environment variables, intended to be passed via docker compose `.env`.
 """
 
 from __future__ import annotations
@@ -15,40 +15,40 @@ def _repos_from_env() -> list[str]:
 
 
 def _index_bot_logins_from_env() -> set[str]:
-    """SHIORI_INDEX_BOT_LOGINS を小文字の set で返す。
+    """Return SHIORI_INDEX_BOT_LOGINS as a lowercase set.
 
-    カンマ区切り。例: ``mcp-launcher-masuda[bot]``
-    ここに列挙された bot login は is_bot=true でも索引対象にする（allowlist）。
+    Comma-separated. Example: ``mcp-launcher-masuda[bot]``
+    Bot logins listed here are indexed even when is_bot=true (allowlist).
     """
     raw = os.environ.get("SHIORI_INDEX_BOT_LOGINS", "")
     return {s.strip().lower() for s in raw.split(",") if s.strip()}
 
 
 def _code_extensions_from_env() -> set[str]:
-    """SHIORI_CODE_EXTENSIONS を小文字の set で返す。
+    """Return SHIORI_CODE_EXTENSIONS as a lowercase set.
 
-    カンマ区切り（ドット付き）。例: ``.py,.js,.ts,.go,.rs``
-    未設定なら None（= 全コード拡張子が対象）。
+    Comma-separated (with dots). Example: ``.py,.js,.ts,.go,.rs``
+    If unset returns None (= all code extensions are indexed).
     """
     raw = os.environ.get("SHIORI_CODE_EXTENSIONS", "")
     return {s.strip().lower() for s in raw.split(",") if s.strip()}
 
 
 def _code_exclude_globs_from_env() -> list[str]:
-    """SHIORI_CODE_EXCLUDE_GLOBS をリストで返す。
+    """Return SHIORI_CODE_EXCLUDE_GLOBS as a list.
 
-    カンマ区切り。glob パターン（例: ``**/test_*, **/migrations/*``）。
+    Comma-separated glob patterns (e.g. ``**/test_*, **/migrations/*``).
     """
     raw = os.environ.get("SHIORI_CODE_EXCLUDE_GLOBS", "")
     return [s.strip() for s in raw.split(",") if s.strip()]
 
 
 def _allow_rebuild_from_env() -> bool:
-    """SHIORI_ALLOW_REBUILD を bool で返す。
+    """Return SHIORI_ALLOW_REBUILD as a bool.
 
-    MCP ツール shiori_ingest からの rebuild=True（全 TRUNCATE）を許可するか。
-    既定 false。運用上必要な場合のみ true に設定する（issue #63）。
-    CLI 経路（python -m shiori ingest --rebuild）はこの設定に依らず常に許可。
+    Whether to allow rebuild=True (full TRUNCATE) from the MCP tool shiori_ingest.
+    Default false. Set to true only when operationally necessary (issue #63).
+    The CLI path (python -m shiori ingest --rebuild) is always allowed regardless of this setting.
     """
     return os.environ.get("SHIORI_ALLOW_REBUILD", "").lower() in (
         "1", "true", "yes"
@@ -148,7 +148,7 @@ class Settings:
         return os.path.join(self.data_dir, "repos", f"{owner}__{name}")
 
     def github_app_private_key(self) -> str | None:
-        """GitHub App の秘密鍵 PEM を返す。PATH 優先、無ければ本文、どちらも無ければ None。"""
+        """Return the GitHub App private key PEM. PATH takes precedence, then inline value, else None."""
         if self.github_app_private_key_path:
             with open(self.github_app_private_key_path, encoding="utf-8") as fp:
                 return fp.read()

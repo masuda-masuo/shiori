@@ -1,12 +1,13 @@
-"""チャンク分割（詳細設計/02）。
+"""Chunk splitting (detailed design/02).
 
-決定事項:
-- docs: 見出し単位で分割し、見出しパスをメタデータに保持。
-  長い節は文字基準（既定 1200 字）で、文境界（。．.!? と改行）を優先して分割。
-- issue/PR: コメント 1 件を自然な単位とし、`[タイトル]` を文脈プレフィックスとして付与。
-- 言語はチャンク（実質ファイル/コメント）単位でヒューリスティック判定（ja/en）。
-- code: tree-sitter で関数/メソッド/クラス単位に分割（地図型: シグネチャ＋docstring）。
-  非対応言語は _split_long_text フォールバック（詳細設計/10）。
+Decisions:
+- docs: Split by heading, keep heading path in metadata.
+  Long sections are split at character limits (default 1200 chars), preferring
+  sentence boundaries (。．.!? and newlines).
+- issue/PR: Each comment forms a natural unit; `[title]` is prepended as context prefix.
+- Language is detected heuristically per chunk (effectively per file/comment) (ja/en).
+- code: Split by function/method/class via tree-sitter (map type: signature + docstring).
+  Unsupported languages fall back to _split_long_text (detailed design/10).
 """
 
 from __future__ import annotations
@@ -144,21 +145,21 @@ def _split_long_text(text: str, max_chars: int) -> list[str]:
 
 
 def _find_breakpoint(s: str, max_chars: int) -> int:
-    """max_chars を超えない最も近い意味的境界を探す。
+    """Find the nearest meaningful breakpoint not exceeding max_chars.
 
-    この関数が呼ばれる時点で _SENTENCE_END_RE による文分割は完了している。
-    句点（。．！？!?.）は _SENTENCE_END_RE が既に分割に使っているため、
-    この関数が句点を見つけるのは以下のケース:
-      1. _SENTENCE_END_RE の句点以外の分割条件（\\n{2,}）で生じた文内に
-         句点が残っている場合
-      2. 過去の分割で句点が先のチャンクに含まれ、現在の s に句点がない場合
-           → 読点（、，,）で代用
-    実用的には **読点フォールバック**が主な役割。
+    By the time this function is called, sentence splitting via _SENTENCE_END_RE is complete.
+    Sentence-ending punctuation has already been used by _SENTENCE_END_RE for splitting,
+    so this function encounters them only in these cases:
+      1. Within a sentence produced by a non-punctuation split condition (\\n{2,}) of _SENTENCE_END_RE
+         where punctuation remains inside.
+      2. When punctuation was consumed by a previous chunk and the current s has none
+         → falls back to clause-boundary punctuation.
+    In practice, the **clause-boundary fallback** is the main role.
 
-    優先順:
-    1. 句点・終端記号（。．！？!?.）: 文の終わり
-    2. 読点（、，,）: 節の境界
-    3. 見つからなければ max_chars でハードカット
+    Priority:
+    1. Sentence-ending punctuation
+    2. Clause-boundary punctuation
+    3. Hard cut at max_chars if none found
     """
     search_start = max(1, max_chars // 2)
     for terminal in ("。．！？!?.", "、，,"):
@@ -236,7 +237,7 @@ _SYMBOL_SPLIT_RE = re.compile(
 
 
 def _split_symbols(text: str) -> str:
-    """識別子を snake_case / camelCase / PascalCase 境界で分割し、小文字スペース区切りで返す。"""
+    """Split identifiers at snake_case / camelCase / PascalCase boundaries, return lowercase space-separated."""
     if not text:
         return ""
     parts = _SYMBOL_SPLIT_RE.split(text)
@@ -318,7 +319,7 @@ def _build_heading_path(path_prefix: str, name: str, kind: str) -> str:
 
 
 def split_code(file_path: str, source: str, max_chars: int = _CODE_MAX_CHARS) -> list[Chunk]:
-    """ソースコードを関数/メソッド/クラス単位でチャンク分割する（詳細設計/10 Step 2）。"""
+    """Split source code into chunks by function/method/class (detailed design/10 Step 2)."""
     prog_lang = _detect_prog_lang(file_path)
     if not prog_lang:
         return _split_code_fallback(source, file_path, max_chars)

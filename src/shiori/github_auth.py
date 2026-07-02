@@ -1,11 +1,11 @@
-"""GitHub 認証（詳細設計/09）。
+"""GitHub authentication (detailed design/09).
 
-PAT と GitHub App installation token を TokenProvider 抽象に統一する。
+Unifies PAT and GitHub App installation tokens under the TokenProvider abstraction.
 
-決定事項:
-- App 設定があれば App を優先、なければ GITHUB_TOKEN、どちらもなければ匿名（公開リポジトリのみ）。
-- installation token は有効期限 1 時間。expiry の 5 分前を過ぎたら provider 内で再発行する。
-- 秘密鍵は ingest 実行プロセスにだけ渡す（常駐 MCP サーバーには渡さない構成。詳細設計/07・09）。
+Decisions:
+- App settings take priority if present; otherwise GITHUB_TOKEN; otherwise anonymous (public repos only).
+- Installation tokens are valid for 1 hour. Auto-refreshes in the provider when within 5 minutes of expiry.
+- Private keys are only passed to the ingest process, not to the persistent MCP server (detailed design/07, 09).
 """
 
 from __future__ import annotations
@@ -24,14 +24,14 @@ API = "https://api.github.com"
 
 
 class TokenProvider:
-    """トークン供給の抽象。get_token() は None を返したら匿名（認証なし）を意味する。"""
+    """Abstract token provider. get_token() returning None means anonymous (no authentication)."""
 
     def get_token(self) -> str | None:
         raise NotImplementedError
 
 
 class AnonymousProvider(TokenProvider):
-    """認証なし。公開リポジトリのみ（レート制限は厳しい）。"""
+    """No authentication. Public repos only (strict rate limits)."""
 
     def get_token(self) -> str | None:
         return None
@@ -39,7 +39,7 @@ class AnonymousProvider(TokenProvider):
 
 @dataclass
 class StaticTokenProvider(TokenProvider):
-    """長期 PAT などの固定トークン。"""
+    """Static token such as long-lived PAT."""
 
     token: str
 
@@ -48,10 +48,10 @@ class StaticTokenProvider(TokenProvider):
 
 
 class AppTokenProvider(TokenProvider):
-    """GitHub App の installation access token を発行・キャッシュする。
+    """Issue and cache GitHub App installation access tokens.
 
-    get_token() は、未取得または expiry の REFRESH_BEFORE 秒前を過ぎていれば再発行する。
-    長時間の ingest（CPU 埋め込みで 1 時間超があり得る）でも途中で失効しないようにする。
+    get_token() refreshes if not yet acquired or within REFRESH_BEFORE seconds of expiry.
+    Ensures tokens do not expire mid-way through long ingests (CPU-bound embedding can exceed 1 hour).
     """
 
     REFRESH_BEFORE = 300  # expiry の 5 分前から再発行
@@ -69,9 +69,9 @@ class AppTokenProvider(TokenProvider):
         return self._token
 
     def _app_jwt(self) -> str:
-        """App 認証用の JWT（RS256）を生成する。
+        """Generate a JWT (RS256) for App authentication.
 
-        iat を 60 秒過去にして時計ずれを吸収する。exp は上限 10 分未満の 9 分。
+        Sets iat 60 seconds in the past to absorb clock skew. exp is 9 minutes (under 10-minute limit).
         """
         now = int(time.time())
         payload = {"iat": now - 60, "exp": now + 540, "iss": self._app_id}
@@ -122,9 +122,9 @@ class AppTokenProvider(TokenProvider):
 
 
 def build_token_provider(settings: "Settings") -> TokenProvider:  # type: ignore[name-defined]  # noqa: F821
-    """Settings から適切な TokenProvider を選ぶ。優先順: App > PAT > 匿名。
+    """Select the appropriate TokenProvider from Settings. Priority: App > PAT > anonymous.
 
-    App 設定が部分的（一部の変数だけ）な場合は、設定ミスをサイレントに握り潰さず ValueError にする。
+    If App settings are partial (only some variables set), raises ValueError instead of silently ignoring the misconfiguration.
     """
     app_id = settings.github_app_id
     installation_id = settings.github_app_installation_id

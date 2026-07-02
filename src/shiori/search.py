@@ -1,22 +1,21 @@
-"""検索（詳細設計/05）。
+"""Search (detailed design/05).
 
-決定事項:
-- `semantic_search` は内部でハイブリッド: pgvector 類似度と pgroonga キーワードの
-  双方で候補を取り、RRF (k=60) で融合して top-k を返す。MCP ツール `shiori_search`
-  の実体であり、エージェントの入口ツール。
-- `keyword_search` は pgroonga (`&@~`) による厳密寄りの検索専用として分離して残す。
-  code チャンクに対しては content に加えて symbols カラムも OR 検索する（issue #33）。
-- リランクモデルは v1 では不採用（RRF のみ）。
-- 返すのは常にポインタ＋スニペット（既定 400 字）。state / updated_at を結果に
-  含め、鮮度の判断はエージェント側に委ねる。
-- ランキング方針（issue #69, docs/design/05）:
-  - 一次ソース（doc / code）: 関連度（RRF / pgroonga スコア）のみ。日付ソートは無効。
-  - 二次ソース（issue / pr_review）: 関連度主＋state / updated_at の tie-break。
-  - 純粋な日付置換ソート（sort_by=updated_at/created_at で関連度を丸ごと捨てる挙動）は撤去。
-  - sort_by は既定 "score" で後方互換維持。非 "score" 指定も二次ソースの tie-break に限定。
-  - tie-break は pool 段（top-k 切り詰め前）で適用する。
-  - 同スコアでは一次ソース（doc/code）が sentinel により二次より前に来る。
-  - sort_order="asc" 時は複合キー全体が反転する（closed→open・古い→新しい）。
+Decisions:
+- `semantic_search` internally hybrid: fetches candidates via both pgvector similarity and pgroonga keyword search,
+  fuses them with RRF (k=60), and returns top-k. The body of the MCP tool `shiori_search`, the agent entry point.
+- `keyword_search` is kept separate for exact-match-oriented search via pgroonga (`&@~`).
+  For code chunks, OR-searches both the content and symbols columns (issue #33).
+- No re-ranking model in v1 (RRF only).
+- Always returns pointer + snippet (default 400 chars). Includes state / updated_at in results;
+  freshness judgment is left to the agent.
+- Ranking policy (issue #69, docs/design/05):
+  - Primary sources (doc / code): relevance only (RRF / pgroonga score). Date-based sort is disabled.
+  - Secondary sources (issue / pr_review): relevance-primary + state / updated_at tie-break.
+  - Pure date-replacement sort (sort_by=updated_at/created_at discarding relevance) is removed.
+  - sort_by defaults to "score" for backward compatibility. Non-"score" values are limited to tie-break for secondary sources.
+  - Tie-break is applied at the pool stage (before top-k truncation).
+  - At equal scores, primary sources (doc/code) come before secondary via sentinel.
+  - sort_order="asc" inverts the entire composite key (closed->open, old->new).
 """
 
 from __future__ import annotations
@@ -156,26 +155,26 @@ def _rank_candidates(
     sort_by: str = "score",
     sort_order: str = "desc",
 ) -> tuple[list[tuple[int, float]], str]:
-    """候補プールに source-aware な複合ランキングを適用する（issue #69）。
+    """Apply source-aware composite ranking to the candidate pool (issue #69).
 
-    ランキング方針（docs/design/05）:
-    - 一次ソース（doc / code）: 関連度スコアのみ。日付系 sort_by は無効（no-op）。
-      同スコアでは sentinel により二次ソースより前に来る。
-    - 二次ソース（issue / pr_review）: 関連度主＋state / updated_at の tie-break。
-      同スコア帯では open → 新着順に並ぶ。
-    - sort_by は既定 "score" で後方互換を維持。非 "score" 指定も挙動は不変で、
-      純粋な日付置換ソート（関連度を丸ごと捨てる挙動）は行わない。
-      tie-break は常に updated_at で行われ、created_at は updated_at に集約される。
-    - sort_order="asc" 時は複合キー全体が反転する（closed→open・古い→新しい）。
+    Ranking policy (docs/design/05):
+    - Primary sources (doc / code): relevance score only. Date-based sort_by is no-op.
+      At equal scores, sentinel ensures they come before secondary sources.
+    - Secondary sources (issue / pr_review): relevance-primary + state / updated_at tie-break.
+      Within same score band: open -> newest order.
+    - sort_by defaults to "score" for backward compatibility. Non-"score" values do not change behaviour;
+      pure date-replacement sort (discarding relevance entirely) is not performed.
+      Tie-break is always by updated_at; created_at is subsumed into updated_at.
+    - sort_order="asc" inverts the entire composite key (closed->open, old->new).
 
     Args:
-        ranked: [(row_id, score), ...] — RRF または pgroonga スコア付き候補。
-        rows_by_id: row_id → row tuple（スコア抜き）。
-        sort_by: "score" / "updated_at" / "created_at"。挙動はすべて同一。
-        sort_order: "desc"（既定）/ "asc"。
+        ranked: [(row_id, score), ...] — candidates with RRF or pgroonga score.
+        rows_by_id: row_id → row tuple (without score).
+        sort_by: "score" / "updated_at" / "created_at". All behave identically.
+        sort_order: "desc" (default) / "asc".
 
     Returns:
-        (ranked_list, ranking_method_string) — 常に "rrf"。
+        (ranked_list, ranking_method_string) — always "rrf".
     """
     reverse = sort_order != "asc"
 
@@ -216,10 +215,10 @@ def _rank_candidates(
 def _sort_hits(
     hits: list[dict[str, Any]], sort_by: str, sort_order: str
 ) -> list[dict[str, Any]]:
-    """結果リストを指定されたキーと順序でソートする（後方互換ラッパー）。
+    """Sort the result list by the specified key and order (backward-compatibility wrapper).
 
-    deprecated: 新規コードでは _rank_candidates を使用すること。
-    sort_by="score" 以外は関連度を丸ごと破棄する旧挙動を維持。
+    deprecated: Use _rank_candidates for new code.
+    Maintains legacy behaviour where non-"score" sort_by discards relevance entirely.
     """
     if sort_by == "score":
         key = lambda h: h.get("score", 0.0)
@@ -239,20 +238,18 @@ def keyword_search(
     sort_by: str = "score",
     sort_order: str = "desc",
 ) -> list[dict]:
-    """キーワード検索（日本語対応トークナイズ）。関数名・API 名・エラーコード・設定キーなど
-    固有の文字列の一致に強い。通常は shiori_search を使い、厳密一致が必要なときに
-    shiori_keyword_search を使うこと。
+    """Keyword search (Japanese-aware tokenisation). Strong for exact matches of function names, API names,
+    error codes, and config keys. Normally use shiori_search; use this tool when exact match is needed.
 
-    code チャンクに対しては content（シグネチャ＋docstring）に加えて symbols
-    （識別子分割済み文字列）も OR 検索するため、camelCase や snake_case の部分一致でも
-    発見できる（詳細設計/10 決定 3）。
+    For code chunks, OR-searches both content (signature + docstring) and symbols (tokenised identifiers),
+    so partial matches of camelCase or snake_case are also found (detailed design/10 decision 3).
 
-    ランキングは関連度主に固定（issue #69）。一次ソース（doc/code）はスコア順、
-    二次ソース（issue/pr_review）はスコア＋state/updated_at tie-break。
-    sort_by: "score"（既定）/ "updated_at" / "created_at"。
-      純粋な日付置換ソートは行わず、二次ソースの tie-break 指定に限定される。
-      created_at は updated_at に集約される。
-    sort_order: "desc"（既定）/ "asc"（asc 時は複合キー全体が反転）。
+    Ranking is relevance-primary (issue #69). Primary sources (doc/code) are score-ordered;
+    secondary sources (issue/pr_review) use score + state/updated_at tie-break.
+    sort_by: "score" (default) / "updated_at" / "created_at".
+      Pure date-replacement sort is not performed; limited to secondary-source tie-break.
+      created_at is subsumed into updated_at.
+    sort_order: "desc" (default) / "asc" (asc inverts the entire composite key).
     """
     k = top_k or settings.default_top_k
     pool = max(k * 4, 20)
@@ -287,21 +284,21 @@ def semantic_search(
     sort_by: str = "score",
     sort_order: str = "desc",
 ) -> list[dict]:
-    """ハイブリッド検索。ベクトルとキーワードの順位を RRF で融合する。
-    MCP ツール `shiori_search` の実体。エージェントの入口ツール。
+    """Hybrid search. Fuses vector and keyword rankings with RRF.
+    Body of the MCP tool `shiori_search`. The agent entry point.
 
-    source_type='code' のチャンクも検索対象に含まれる。
-    キーワード側は symbols カラムも OR 検索するため、関数名やクラス名の部分一致でも
-    発見できる（詳細設計/10 決定 3）。
+    Chunks with source_type='code' are also included in search targets.
+    On the keyword side, the symbols column is also OR-searched, so partial matches
+    of function or class names are also found (detailed design/10 decision 3).
 
-    ランキングは関連度主に固定（issue #69）。一次ソース（doc/code）は RRF スコア順、
-    二次ソース（issue/pr_review）は RRF スコア＋state/updated_at tie-break。
-    同スコアでは一次ソースが二次より前に来る。
-    tie-break は pool 段（top-k 切り詰め前）で適用する。
-    sort_by: "score"（既定）/ "updated_at" / "created_at"。
-      純粋な日付置換ソートは行わず、二次ソースの tie-break 指定に限定される。
-      created_at は updated_at に集約される。
-    sort_order: "desc"（既定）/ "asc"（asc 時は複合キー全体が反転）。
+    Ranking is relevance-primary (issue #69). Primary sources (doc/code) are RRF-score-ordered;
+    secondary sources (issue/pr_review) use RRF score + state/updated_at tie-break.
+    At equal scores, primary sources come before secondary.
+    Tie-break is applied at the pool stage (before top-k truncation).
+    sort_by: "score" (default) / "updated_at" / "created_at".
+      Pure date-replacement sort is not performed; limited to secondary-source tie-break.
+      created_at is subsumed into updated_at.
+    sort_order: "desc" (default) / "asc" (asc inverts the entire composite key).
     """
     k = top_k or settings.default_top_k
     pool = max(k * 4, 20)
