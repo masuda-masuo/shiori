@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, mock_open, patch
 
-import pytest
-
 from shiori.mcp_server import (
     _LARGE_FILE_THRESHOLD,
     read_file,
@@ -106,6 +104,18 @@ class TestReadPrFileLargeFileHint:
         result = self._run_read_pr_file(large_content, end_line=50)
 
         assert "hints" not in result
+
+    def test_hint_at_threshold_boundary(self):
+        """閾値ちょうどのファイルは hints なし、閾値+1 で hints あり。"""
+        result = self._run_read_pr_file(
+            "\n".join(f"line {i}" for i in range(_LARGE_FILE_THRESHOLD))
+        )
+        assert "hints" not in result
+
+        result = self._run_read_pr_file(
+            "\n".join(f"line {i}" for i in range(_LARGE_FILE_THRESHOLD + 1))
+        )
+        assert "hints" in result
 
 
 class TestStatusCodeChunks:
