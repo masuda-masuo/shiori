@@ -6,7 +6,7 @@
 - list_tree(path?, source_type?, extension?): 索引済みドキュメント＋コードファイルのツリー閲覧。
 - read_file(path, start?, end?)       : ローカルクローンからファイル（の一部）を取得。
 - read_issue(number, repo?, exclude_noise_bots?) : issue/PR スレッド全体を取得。
-- pr_changes(number, repo?)           : PR の変更ファイルマップ（ポインタ）を返す（issue #54）。
+- pr_changes(number, repo?, include_diff?) : PR の変更ファイルマップ（＋必要に応じて unified diff）を返す（issue #54, #100）。
 - read_pr_file(number, path, start?, end?, repo?) : PR head のファイル内容を透過的に取得（issue #81）。
 - ingest(rebuild?, repo?)             : docs / issue / PR / code の差分同期（索引更新）。
 - status()                            : 索引の鮮度と健全性（最終同期時刻・件数内訳・警告）。
@@ -651,20 +651,22 @@ def read_issue(
 
 
 @mcp.tool(name="shiori_pr_changes")
-def pr_changes(number: int, repo: str | None = None) -> dict[str, Any]:
-    """PR の変更ファイルマップ（メタデータ）を返す。ポインタ層のツール（issue #54）。
+def pr_changes(
+    number: int,
+    repo: str | None = None,
+    include_diff: bool = False,
+) -> dict[str, Any]:
+    """PR の変更ファイルマップ（メタデータ）を返す。ポインタ層のツール（issue #54, #100）。
 
     保持するもの（メタデータ）:
       - head_sha: PR の head コミット SHA（force-push 追従用）
       - ファイル一覧: path / status / additions / deletions / changes / blob_url
+      - diff: include_diff=True 時、unified diff（issue #100）
 
-    保持しないもの（コンテンツ）:
-      - patch hunk 全文 → GitHub MCP の pull_request_read(method='get_diff') で取得
-      - PR head のファイル全文 → shiori_read_pr_file で取得（推奨）、または
-        GitHub MCP の get_file_contents(sha=head_sha, ...) で取得
-
-    このツールは索引（DB）からメタデータを返す。PR head のファイル内容は
-    shiori_read_pr_file（ShioriMCP）または GitHub MCP で取得すること。"""
+    number: PR 番号
+    repo: リポジトリ名（"owner/name"）。省略時は SHIORI_REPOS の最初のリポジトリ。
+    include_diff: True で unified diff も取得する（既定 False）。GitHub の
+        refs/pull/{N}/head から git fetch し、merge-base との間の diff を返す。"""
     target = _resolve_repo(repo)
     with _conn() as conn:
         files, head_sha = db.get_pr_changes(conn, target, number)
@@ -673,12 +675,30 @@ def pr_changes(number: int, repo: str | None = None) -> dict[str, Any]:
             f"PR #{number} の変更ファイルマップが見つかりません。"
             "shiori_ingest で同期してください。"
         )
-    return {
+    result: dict[str, Any] = {
         "repo": target,
         "number": number,
         "head_sha": head_sha,
         "files": files,
     }
+    if include_diff:
+        base = os.path.realpath(settings.repo_dir(target))
+        if not os.path.isdir(os.path.join(base, ".git")):
+            raise FileNotFoundError(
+                f"{target} のクローンが存在しません。shiori_ingest で同期してください。"
+            )
+        ref = f"pull/{number}/head"
+        tmp_ref = None
+        try:
+            provider = build_token_provider(settings)
+            tmp_ref = _git_fetch_ref(ref, cwd=base, provider=provider)
+            result["diff"] = _git(
+                ["diff", f"HEAD...{tmp_ref}", "--unified=3"], cwd=base
+            )
+        finally:
+            if tmp_ref:
+                _git_delete_ref(tmp_ref, cwd=base)
+    return result
 
 
 @mcp.tool(name="shiori_read_pr_file")
