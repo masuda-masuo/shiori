@@ -408,9 +408,9 @@ class TestBulkInsertChunks:
         bulk_insert_chunks(conn, rows)
 
         params = cursor.executemany.call_args[0][1][0]
-        # embedding は 11 番目の要素（0-indexed: 10）
+        # embedding は 12 番目の要素（0-indexed: 11）
         # 0:chunk_key 1:chunk_index 2:source_type 3:repo 4:path
-        # 5:issue_no 6:comment_id 7:language 8:heading_path 9:content
-        # 10:embedding
-        embedding_str = params[10]
+        # 5:issue_no 6:comment_id 7:kind 8:language 9:heading_path 10:content
+        # 11:embedding
+        embedding_str = params[11]
         assert embedding_str == "[0.100000,0.200000,0.300000]"

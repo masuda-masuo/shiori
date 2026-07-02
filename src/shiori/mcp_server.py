@@ -71,6 +71,7 @@ def _make_filters(
     path_prefix: str | None,
     updated_after: str | None,
     prog_lang: str | None = None,
+    kind: str | None = None,
 ) -> dict:
     return {
         "source_type": source_type,
@@ -80,6 +81,7 @@ def _make_filters(
         "path_prefix": path_prefix,
         "updated_after": updated_after,
         "prog_lang": prog_lang,
+        "kind": kind,
     }
 
 
@@ -332,16 +334,19 @@ def semantic_search(
     path_prefix: str | None = None,
     updated_after: str | None = None,
     prog_lang: str | None = None,
+    kind: str | None = None,
     top_k: int | None = None,
     sort_by: str = "score",
     sort_order: str = "desc",
 ) -> list[dict[str, Any]]:
     """Semantic search (entry). Strong for paraphrasing, concept, cross-lingual queries.
-    Hybrid with keyword search internally."""
+    Hybrid with keyword search internally.
+    kind: 'issue' | 'pr' — further filter source_type='issue'/'pr_review' results
+          by thread type. No effect on doc/code results (issue #98)."""
     with _conn() as conn:
         return search.semantic_search(
             settings, conn, _get_embedder(), query,
-            _make_filters(source_type, language, state, repo, path_prefix, updated_after, prog_lang),
+            _make_filters(source_type, language, state, repo, path_prefix, updated_after, prog_lang, kind),
             top_k,
             sort_by,
             sort_order,
@@ -358,16 +363,19 @@ def keyword_search(
     path_prefix: str | None = None,
     updated_after: str | None = None,
     prog_lang: str | None = None,
+    kind: str | None = None,
     top_k: int | None = None,
     sort_by: str = "score",
     sort_order: str = "desc",
 ) -> list[dict[str, Any]]:
     """Keyword search (Japanese tokenize). Strong for exact matches: function names, API names, error codes, config keys.
-    Usually called via semantic_search."""
+    Usually called via semantic_search.
+    kind: 'issue' | 'pr' — further filter source_type='issue'/'pr_review' results
+          by thread type. No effect on doc/code results (issue #98)."""
     with _conn() as conn:
         return search.keyword_search(
             settings, conn, query,
-            _make_filters(source_type, language, state, repo, path_prefix, updated_after, prog_lang),
+            _make_filters(source_type, language, state, repo, path_prefix, updated_after, prog_lang, kind),
             top_k,
             sort_by,
             sort_order,

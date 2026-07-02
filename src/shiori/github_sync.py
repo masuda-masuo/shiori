@@ -103,9 +103,10 @@ class ChunkBuffer:
     def add(self, *, chunk_key: str, chunk_index: int, source_type: str,
             repo: str, content: str,
             path: str | None = None, issue_no: int | None = None,
-            comment_id: int | None = None, language: str | None = None,
-            heading_path: str | None = None, state: str | None = None,
-            author: str | None = None, line: int | None = None,
+            comment_id: int | None = None, kind: str | None = None,
+            language: str | None = None, heading_path: str | None = None,
+            state: str | None = None, author: str | None = None,
+            line: int | None = None,
             end_line: int | None = None, commit_sha: str | None = None,
             prog_lang: str | None = None, symbols: str | None = None,
             created_at=None, updated_at=None, url: str | None = None,
@@ -115,6 +116,7 @@ class ChunkBuffer:
             "chunk_key": chunk_key, "chunk_index": chunk_index,
             "source_type": source_type, "repo": repo, "content": content,
             "path": path, "issue_no": issue_no, "comment_id": comment_id,
+            "kind": kind,
             "language": language, "heading_path": heading_path,
             "state": state, "author": author, "line": line,
             "end_line": end_line, "commit_sha": commit_sha,
@@ -590,17 +592,17 @@ def _upsert_issue_item(conn: psycopg.Connection, row: dict) -> None:
         )
 
 
-def _issue_title_state(
+def _issue_title_state_kind(
     conn: psycopg.Connection, repo: str, issue_no: int
-) -> tuple[str | None, str | None]:
+) -> tuple[str | None, str | None, str | None]:
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT title, state FROM issue_items "
+            "SELECT title, state, kind FROM issue_items "
             "WHERE repo = %s AND issue_no = %s AND comment_id = 0",
             (repo, issue_no),
         )
         row = cur.fetchone()
-    return (row[0], row[1]) if row else (None, None)
+    return (row[0], row[1], row[2]) if row else (None, None, None)
 
 
 def _propagate_issue_state(
@@ -630,6 +632,7 @@ def _index_item(
     repo: str,
     issue_no: int,
     comment_id: int | None,
+    kind: str | None,
     title: str | None,
     body: str,
     state: str | None,
@@ -656,6 +659,7 @@ def _index_item(
                 path=path,
                 issue_no=issue_no,
                 comment_id=comment_id,
+                kind=kind,
                 language=language,
                 content=c.content,
                 state=state,
@@ -677,6 +681,7 @@ def _index_item(
                 path=path,
                 issue_no=issue_no,
                 comment_id=comment_id,
+                kind=kind,
                 language=language,
                 content=c.content,
                 embedding=v,
@@ -794,6 +799,7 @@ def sync_issues(
                     chunk_key=f"issue:{repo}:{no}:body",
                     source_type="issue",
                     repo=repo, issue_no=no, comment_id=None,
+                    kind=kind,
                     title=title, body=body,
                     state=it.get("state"), author=author,
                     path=None, line=None,
@@ -819,7 +825,7 @@ def sync_issues(
         comments = _api_pages(client, f"{API}/repos/{repo}/issues/comments", params)
         for c in comments:
             no = int(c["issue_url"].rstrip("/").rsplit("/", 1)[-1])
-            title, state = _issue_title_state(conn, repo, no)
+            title, state, issue_kind = _issue_title_state_kind(conn, repo, no)
             author = (c.get("user") or {}).get("login")
             is_bot = _is_bot(c.get("user"))
             body = _clean_text(c.get("body") or "")
@@ -836,6 +842,7 @@ def sync_issues(
                     chunk_key=f"issue:{repo}:{no}:c{c['id']}",
                     source_type="issue",
                     repo=repo, issue_no=no, comment_id=c["id"],
+                    kind=issue_kind,
                     title=title, body=body,
                     state=state, author=author, path=None, line=None,
                     created_at=c.get("created_at"), updated_at=c.get("updated_at"),
@@ -856,7 +863,7 @@ def sync_issues(
         reviews = _api_pages(client, f"{API}/repos/{repo}/pulls/comments", params)
         for c in reviews:
             no = int(c["pull_request_url"].rstrip("/").rsplit("/", 1)[-1])
-            title, state = _issue_title_state(conn, repo, no)
+            title, state, _ = _issue_title_state_kind(conn, repo, no)
             author = (c.get("user") or {}).get("login")
             is_bot = _is_bot(c.get("user"))
             line = c.get("line") or c.get("original_line")
@@ -879,6 +886,7 @@ def sync_issues(
                     chunk_key=f"pr_review:{repo}:{no}:rc{c['id']}",
                     source_type="pr_review",
                     repo=repo, issue_no=no, comment_id=c["id"],
+                    kind="pr",
                     title=title, body=body,
                     state=state, author=author,
                     path=c.get("path"), line=line,

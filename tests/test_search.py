@@ -2,19 +2,20 @@
 
 from __future__ import annotations
 
-from shiori.search import _rank_candidates
+from shiori.search import _filter_sql, _rank_candidates
 
 # _RESULT_COLS indices (must match constants in search.py)
 _COL_SOURCE_TYPE = 1
-_COL_STATE = 9
-_COL_UPDATED_AT = 13
+_COL_KIND = 6
+_COL_STATE = 10
+_COL_UPDATED_AT = 14
 
 
-def _make_row(source_type, state=None, updated_at=None, created_at=None):
-    """Build a mock row tuple matching _RESULT_COLS."""
+def _make_row(source_type, kind=None, state=None, updated_at=None, created_at=None):
+    """Build a mock row tuple matching _RESULT_COLS (issue #98)."""
     from datetime import datetime, timezone
     return (
-        1, source_type, "test/repo", "dummy/path", None, None,
+        1, source_type, "test/repo", "dummy/path", None, None, kind,
         "ja", "heading", "content text", state, "author", None,
         created_at, updated_at, "https://example.com",
     )
@@ -199,3 +200,48 @@ class TestRankCandidates:
         ranked = [(1, 0.5), (2, 0.5), (3, 0.5), (4, 0.5)]
         result, _ = _rank_candidates(ranked, rows_by_id)
         assert [rid for rid, _ in result] == [4, 3, 2, 1]
+
+
+# ── _filter_sql tests (issue #98) ──
+
+class TestFilterSql:
+    """kind filter SQL generation."""
+
+    def test_no_filters_returns_empty_clause(self):
+        sql, params = _filter_sql(None)
+        assert sql == ""
+        assert params == []
+
+    def test_empty_filters_returns_empty_clause(self):
+        sql, params = _filter_sql({})
+        assert sql == ""
+        assert params == []
+
+    def test_kind_issue_filter(self):
+        sql, params = _filter_sql({"kind": "issue"})
+        assert "kind = %s" in sql
+        assert params == ["issue"]
+
+    def test_kind_pr_filter(self):
+        sql, params = _filter_sql({"kind": "pr"})
+        assert "kind = %s" in sql
+        assert params == ["pr"]
+
+    def test_kind_combined_with_source_type(self):
+        sql, params = _filter_sql({"source_type": "issue", "kind": "pr"})
+        assert "source_type = %s" in sql
+        assert "kind = %s" in sql
+        assert params == ["issue", "pr"]
+
+    def test_kind_combined_with_state(self):
+        sql, params = _filter_sql({"kind": "issue", "state": "open"})
+        assert "kind = %s" in sql
+        assert "state = %s" in sql
+        assert "open" in params
+        assert "issue" in params
+
+    def test_kind_none_excluded(self):
+        sql, params = _filter_sql({"kind": None, "state": "open"})
+        assert "kind" not in sql
+        assert "state = %s" in sql
+        assert params == ["open"]
