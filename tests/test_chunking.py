@@ -73,7 +73,7 @@ def test_rrf_fusion_orders_overlap_first():
 
 
 # ---------------------------------------------------------------------------
-# split_code のテスト（Step 2, issue #33）
+# split_code tests (Step 2, issue #33)
 # ---------------------------------------------------------------------------
 
 
@@ -100,7 +100,7 @@ def test_split_symbols_empty():
 
 
 def test_split_code_python_basic():
-    """Python の関数とクラスが分割されることを確認。"""
+    """Verifies Python functions and classes are split."""
     code = """\
 def hello():
     print("hello")
@@ -120,7 +120,7 @@ class Greeter:
 
 
 def test_split_code_python_with_docstring():
-    """docstring が content に含まれること。"""
+    """docstring is included in content."""
     code = '''\
 def add(a: int, b: int) -> int:
     """Add two numbers together."""
@@ -133,7 +133,7 @@ def add(a: int, b: int) -> int:
 
 
 def test_split_code_fallback_for_unknown_ext():
-    """未知の拡張子はフォールバック分割される。"""
+    """Unknown extensions fall back to text splitting."""
     code = "some random text\n" * 100
     chunks = split_code("unknown.xyz", code, max_chars=200)
     assert len(chunks) > 1
@@ -142,20 +142,20 @@ def test_split_code_fallback_for_unknown_ext():
 
 
 def test_split_code_empty():
-    """空ファイルは空リスト。"""
+    """Empty file returns empty list."""
     assert split_code("empty.py", "") == []
     assert split_code("empty.xyz", "") == []
 
 
 def test_split_code_no_definitions():
-    """定義がないファイルでもクラッシュしない。"""
+    """File with no definitions does not crash."""
     code = "x = 1\ny = 2\n"
     chunks = split_code("vars.py", code)
     assert isinstance(chunks, list)
 
 
 # ---------------------------------------------------------------------------
-# tree-sitter 前提の断定的テスト（_ts_get_parser 成否で gate）
+# Deterministic tree-sitter tests (gated by _ts_get_parser success)
 # ---------------------------------------------------------------------------
 
 import pytest
@@ -165,7 +165,7 @@ _TS_PYTHON_OK = _ts_get_parser("python") is not None
 
 @pytest.mark.skipif(not _TS_PYTHON_OK, reason="tree-sitter python parser not available")
 def test_split_code_ts_python_has_chunks():
-    """tree-sitter が使えるなら Python で必ず2チャンク以上＋start_line 設定。"""
+    """If tree-sitter is available, Python always produces 2+ chunks with start_line."""
     code = """\
 def hello():
     print("hello")
@@ -185,7 +185,7 @@ class Greeter:
 
 @pytest.mark.skipif(not _TS_PYTHON_OK, reason="tree-sitter python parser not available")
 def test_split_code_ts_python_docstring_emitted():
-    """docstring が content に含まれる。"""
+    """docstring is included in content."""
     code = '''\
 def add(a: int, b: int) -> int:
     """Add two numbers together."""
@@ -200,7 +200,7 @@ def add(a: int, b: int) -> int:
 
 @pytest.mark.skipif(not _TS_PYTHON_OK, reason="tree-sitter python parser not available")
 def test_split_code_ts_python_nesting():
-    """クラスの中のメソッドの heading_path に親クラス情報が含まれる。"""
+    """Method heading_path inside a class includes parent class info."""
     code = """\
 class Calculator:
     def add(self, a, b):
@@ -211,17 +211,17 @@ class Calculator:
 """
     chunks = split_code("calc.py", code)
     assert len(chunks) >= 2
-    # 注意: クラスチャンクのシグネチャは body 開始行（= "def add" 行）まで含むため、
-    # "add" 一致だとクラスチャンク自身も拾ってしまう。メソッド本体に固有の行で一意に選ぶ。
+    # Note: class chunk signature includes body start line (= "def add" line), so
+    # matching "add" would also match the class chunk itself. Use a line unique to the method body.
     method_chunks = [c for c in chunks if "return a + b" in c.content]
-    assert method_chunks, "add メソッドのチャンクが見つからない"
+    assert method_chunks, "add method chunk not found"
     hp = method_chunks[0].heading_path or ""
     assert "Calculator" in hp
 
 
 @pytest.mark.skipif(not _TS_PYTHON_OK, reason="tree-sitter python parser not available")
 def test_split_code_ts_python_symbols():
-    """symbols に分割済み識別子が入る。"""
+    """symbols contains split identifiers."""
     code = "def parse_config_file(path):\n    return None\n"
     chunks = split_code("cfg.py", code)
     assert len(chunks) >= 1
@@ -232,34 +232,34 @@ def test_split_code_ts_python_symbols():
 
 
 # ---------------------------------------------------------------------------
-# _find_breakpoint / _split_long_text: チャンク境界で単語が分断されないこと（issue #85）
+# _find_breakpoint / _split_long_text: words not split at chunk boundaries (issue #85)
 # ---------------------------------------------------------------------------
 
 
 def test_find_breakpoint_at_period():
-    """句点で分割される（max_chars より手前の最終句点を探す）。"""
+    """Splits at full-stop (finds the last full-stop before max_chars)."""
     s = "あ" * 800 + "。文章の続きです。" + "B" * 500
     bp = _find_breakpoint(s, 1200)
-    assert bp == 809  # s[808]="。", その直後 index 809
+    assert bp == 809  # s[808]="。", immediately after index 809
 
 
 def test_find_breakpoint_at_comma_fallback():
-    """句点がない場合、読点で分割される。"""
+    """Falls back to comma when no full-stop is found."""
     s = "A" * 1195 + "、" + "B" * 500
     bp = _find_breakpoint(s, 1200)
     assert bp == 1196
 
 
 def test_find_breakpoint_hard_cut_when_no_boundary():
-    """文境界が見つからない場合は max_chars でハードカット。"""
-    s = "A" * 2000  # 句読点なし
+    """Hard-cuts at max_chars when no sentence boundary is found."""
+    s = "A" * 2000  # no punctuation
     bp = _find_breakpoint(s, 1200)
     assert bp == 1200
 
 
 def test_split_long_text_preserves_katakana_word():
-    """max_chars 境界にカタカナ語があっても分断されない（issue #85）。
-    読点での分割により、カタカナ語が 1 つのチャンクに完全に収まる。"""
+    """Katakana word not split at max_chars boundary (issue #85).
+    Comma-based split keeps the katakana word entirely in one chunk."""
     prefix = "あ" * 1194
     s = prefix + "、" + "ダッシュボード" + "重要な機能です" + "B" * 100
     # "ダッシュボード" (7 chars) starts at position 1195, spans 1195-1201.
@@ -271,7 +271,7 @@ def test_split_long_text_preserves_katakana_word():
 
 
 def test_split_long_text_short_text_unchanged():
-    """短いテキストはそのまま返る。"""
+    """Short text is returned as-is."""
     short = "これは短いテキストです。分割不要。"
     parts = _split_long_text(short, 1200)
     assert len(parts) == 1
@@ -279,7 +279,7 @@ def test_split_long_text_short_text_unchanged():
 
 
 def test_split_long_text_breaks_at_comma():
-    """句点がないが読点がある長い文は読点で分割され、max_chars 境界の分断を防ぐ。"""
+    """Long text without full-stop but with comma splits at comma to avoid hard cut."""
     s = "あ" * 700 + "、" + "B" * 600
     parts = _split_long_text(s, 1200)
     assert len(parts) >= 2
@@ -289,7 +289,7 @@ def test_split_long_text_breaks_at_comma():
 
 
 def test_find_breakpoint_period_at_max_chars():
-    """句点が max_chars 直前にあっても分割される。"""
+    """Splits at full-stop even when it is just before max_chars."""
     s = "あ" * 1198 + "。文章"
     bp = _find_breakpoint(s, 1200)
     assert bp == 1199
@@ -297,14 +297,14 @@ def test_find_breakpoint_period_at_max_chars():
 
 
 def test_find_breakpoint_comma_at_edge():
-    """読点が探索範囲の下限（max_chars//2）にある。"""
+    """Comma at the lower search bound (max_chars//2)."""
     s = "A" * 600 + "、" + "B" * 600
     bp = _find_breakpoint(s, 1200)
     assert bp == 601
 
 
 def test_find_breakpoint_small_max_chars():
-    """max_chars が極小でもクラッシュしない。"""
+    """No crash when max_chars is very small."""
     assert _find_breakpoint("ABCDE", 5) == 5
     assert _find_breakpoint("AB、CDE", 5) == 3
     assert _find_breakpoint("AB", 1) == 1

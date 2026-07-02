@@ -1,10 +1,10 @@
-"""shiori_read_issue の exclude_noise_bots パラメータのユニットテスト（issue #44）。
+"""Unit tests for shiori_read_issue exclude_noise_bots parameter (issue #44).
 
-テスト対象:
-- read_issue: exclude_noise_bots=False（既定）で全件返す
-- read_issue: exclude_noise_bots=True で allowlist 外の bot を除外
-- read_issue: 全件フィルタ時の ValueError
-- read_issue: 行なし時の ValueError（既存動作）
+Test targets:
+- read_issue: exclude_noise_bots=False (default) returns all items
+- read_issue: exclude_noise_bots=True filters out bots outside allowlist
+- read_issue: ValueError when all items filtered
+- read_issue: ValueError when no rows (existing behavior)
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ import pytest
 from shiori.mcp_server import read_issue, settings
 
 
-# ── テスト用のヘルパー ──
+# ── Test helpers ──
 
 
 def _row(
@@ -32,27 +32,27 @@ def _row(
     url: str = "https://github.com/o/r/issues/1",
     created_at: str | None = "2026-06-14T00:00:00+00:00",
 ) -> tuple:
-    """test 用の行タプルを作る (comment_id, kind, title, author, is_bot, state, path, line, body, url, created_at)。"""
+    """Build a test row tuple (comment_id, kind, title, author, is_bot, state, path, line, body, url, created_at)."""
     from datetime import datetime
     ca = datetime.fromisoformat(created_at) if created_at else None
     return (comment_id, kind, title, author, is_bot, state, path, line, body, url, ca)
 
 
 class TestReadIssueExcludeNoiseBots:
-    """read_issue の exclude_noise_bots パラメータの振る舞い。"""
+    """Behavior of read_issue exclude_noise_bots parameter."""
 
     def _mock_conn_with_rows(self, rows: list[tuple]) -> MagicMock:
-        """指定行を返すモック接続を作る。"""
+        """Build a mock connection that returns the given rows."""
         conn = MagicMock()
         cursor = MagicMock()
         cursor.fetchall.return_value = rows
         conn.cursor.return_value.__enter__.return_value = cursor
-        # with _conn() as conn で conn が自分自身を返すようにする
+        # Ensure with _conn() as conn returns itself
         conn.__enter__.return_value = conn
         return conn
 
     def test_default_returns_all_items(self):
-        """exclude_noise_bots=False（既定）では bot 含め全件返す。"""
+        """exclude_noise_bots=False (default) returns all items including bots."""
         rows = [
             _row(comment_id=0, author="human-user", is_bot=False),
             _row(comment_id=1, author="allowlisted-bot[bot]", is_bot=True),
@@ -70,7 +70,7 @@ class TestReadIssueExcludeNoiseBots:
         assert result["items"][2]["author"] == "dependabot[bot]"
 
     def test_exclude_noise_bots_filters_non_allowlisted_bots(self, monkeypatch):
-        """exclude_noise_bots=True で allowlist 外の bot のみ除外する。"""
+        """exclude_noise_bots=True filters only bots outside the allowlist."""
         rows = [
             _row(comment_id=0, author="human-user", is_bot=False),
             _row(comment_id=1, author="allowlisted-bot[bot]", is_bot=True),
@@ -89,7 +89,7 @@ class TestReadIssueExcludeNoiseBots:
         assert result["items"][1]["author"] == "allowlisted-bot[bot]"
 
     def test_exclude_noise_bots_keeps_allowlisted_bot_with_different_case(self, monkeypatch):
-        """allowlist は大文字小文字無視でマッチする。"""
+        """allowlist match is case-insensitive."""
         rows = [
             _row(comment_id=0, author="Allowlisted-Bot[bot]", is_bot=True),
         ]
@@ -105,7 +105,7 @@ class TestReadIssueExcludeNoiseBots:
         assert result["items"][0]["author"] == "Allowlisted-Bot[bot]"
 
     def test_exclude_noise_bots_raises_when_all_filtered(self, monkeypatch):
-        """全件フィルタされた場合は ValueError を送出する。"""
+        """Raises ValueError when all items are filtered."""
         rows = [
             _row(comment_id=0, author="dependabot[bot]", is_bot=True),
             _row(comment_id=1, author="ci-bot[bot]", is_bot=True),
@@ -116,11 +116,11 @@ class TestReadIssueExcludeNoiseBots:
                             {"allowlisted-bot[bot]"})
         with patch("shiori.mcp_server._conn", return_value=mock_conn), \
              patch("shiori.mcp_server._resolve_repo", return_value="o/r"):
-            with pytest.raises(ValueError, match="全項目が allowlist 外の bot"):
+            with pytest.raises(ValueError, match="all items are bots outside the allowlist"):
                 read_issue(42, exclude_noise_bots=True)
 
     def test_exclude_noise_bots_with_author_none(self, monkeypatch):
-        """author が None の bot は allowlist にマッチせず除外される。"""
+        """Bot with author=None does not match allowlist and is excluded."""
         rows = [
             _row(comment_id=0, author="human-user", is_bot=False),
             _row(comment_id=1, author=None, is_bot=True),
@@ -133,22 +133,22 @@ class TestReadIssueExcludeNoiseBots:
              patch("shiori.mcp_server._resolve_repo", return_value="o/r"):
             result = read_issue(42, exclude_noise_bots=True)
 
-        # author=None の bot は除外される、人間は残る
+        # Bot with author=None is excluded, human remains
         assert len(result["items"]) == 1
         assert result["items"][0]["author"] == "human-user"
 
     def test_no_rows_raises_value_error(self):
-        """行が 0 件の場合は ValueError（既存動作）。"""
+        """Raises ValueError when there are 0 rows (existing behavior)."""
         mock_conn = self._mock_conn_with_rows([])
 
         with patch("shiori.mcp_server._conn", return_value=mock_conn), \
              patch("shiori.mcp_server._resolve_repo", return_value="o/r"):
-            with pytest.raises(ValueError, match="索引されていません"):
+            with pytest.raises(ValueError, match="is not indexed"):
                 read_issue(42)
 
 
 class TestReadIssueNumbers:
-    """read_issue の numbers パラメータ（バッチ取得）の振る舞い（issue #86）。"""
+    """Behavior of read_issue numbers parameter (batch fetch, issue #86)."""
 
     def _make_result(self, number: int, title: str = "Test") -> dict:
         return {
@@ -171,7 +171,7 @@ class TestReadIssueNumbers:
         }
 
     def test_batch_all_success(self):
-        """複数番号をすべて成功で取得する。"""
+        """Fetches multiple issue numbers all successfully."""
         with patch("shiori.mcp_server._read_issue_single") as mock, \
              patch("shiori.mcp_server._resolve_repo", return_value="o/r"):
             mock.side_effect = [
@@ -190,12 +190,12 @@ class TestReadIssueNumbers:
         assert result[1]["title"] == "issue 43"
 
     def test_batch_partial_unindexed(self):
-        """未索引の番号が混在しても全体を落とさず、success/error を併記する。"""
+        """Mixed indexed/unindexed numbers: returns success/error per item."""
         with patch("shiori.mcp_server._read_issue_single") as mock, \
              patch("shiori.mcp_server._resolve_repo", return_value="o/r"):
             mock.side_effect = [
                 self._make_result(42, "issue 42"),
-                ValueError("#43 は索引されていません（ingest 済みですか？）"),
+                ValueError("#43 is not indexed (has ingest been run?)"),
                 self._make_result(44, "issue 44"),
             ]
             result = read_issue(numbers=[42, 43, 44])
@@ -206,12 +206,12 @@ class TestReadIssueNumbers:
         assert result[0]["number"] == 42
         assert result[1]["status"] == "error"
         assert result[1]["number"] == 43
-        assert "索引されていません" in result[1]["error"]
+        assert "is not indexed" in result[1]["error"]
         assert result[2]["status"] == "ok"
         assert result[2]["number"] == 44
 
     def test_batch_empty_array(self):
-        """空配列は空リストを返す。"""
+        """Empty list returns an empty list."""
         with patch("shiori.mcp_server._resolve_repo", return_value="o/r"):
             result = read_issue(numbers=[])
 
@@ -219,7 +219,7 @@ class TestReadIssueNumbers:
         assert result == []
 
     def test_batch_duplicate_numbers(self):
-        """重複番号はそれぞれ個別に処理される。"""
+        """Duplicate numbers are processed individually."""
         with patch("shiori.mcp_server._read_issue_single") as mock, \
              patch("shiori.mcp_server._resolve_repo", return_value="o/r"):
             mock.side_effect = [
@@ -236,7 +236,7 @@ class TestReadIssueNumbers:
         assert result[1]["status"] == "ok"
 
     def test_batch_applies_exclude_noise_bots(self):
-        """exclude_noise_bots がバッチ内の全取得に適用される。"""
+        """exclude_noise_bots applied to all fetches in batch."""
         with patch("shiori.mcp_server._read_issue_single") as mock, \
              patch("shiori.mcp_server._resolve_repo", return_value="o/r"):
             mock.return_value = self._make_result(42, "issue 42")
@@ -249,7 +249,7 @@ class TestReadIssueNumbers:
             assert call_args[0][0] == "o/r"
 
     def test_batch_passes_repo_to_single(self):
-        """repo が _resolve_repo と _read_issue_single に正しく渡される。"""
+        """repo is correctly passed to _resolve_repo and _read_issue_single."""
         with patch("shiori.mcp_server._read_issue_single") as mock_single, \
              patch("shiori.mcp_server._resolve_repo") as mock_resolve:
             mock_resolve.return_value = "my/repo"
@@ -260,26 +260,26 @@ class TestReadIssueNumbers:
         mock_single.assert_called_once_with("my/repo", 42, False)
 
     def test_batch_all_errors(self):
-        """全件エラーでも例外を送出せず、全件 error を返す。"""
+        """All errors returns error items without raising."""
         with patch("shiori.mcp_server._read_issue_single") as mock, \
              patch("shiori.mcp_server._resolve_repo", return_value="o/r"):
-            mock.side_effect = ValueError("#99 は索引されていません")
+            mock.side_effect = ValueError("#99 is not indexed")
             result = read_issue(numbers=[99])
 
         assert isinstance(result, list)
         assert len(result) == 1
         assert result[0]["status"] == "error"
         assert result[0]["number"] == 99
-        assert "索引されていません" in result[0]["error"]
+        assert "is not indexed" in result[0]["error"]
 
     def test_number_and_numbers_missing_raises(self):
-        """number も numbers も指定しない場合は ValueError。"""
+        """Raises ValueError when neither number nor numbers is specified."""
         with patch("shiori.mcp_server._resolve_repo", return_value="o/r"):
-            with pytest.raises(ValueError, match="number または numbers"):
+            with pytest.raises(ValueError, match="specify number or numbers"):
                 read_issue()
 
     def test_single_number_backward_compatible(self):
-        """numbers なしの単発呼び出しは従来通り dict を返す（後方互換）。"""
+        """Single call without numbers returns dict as before (backward compat)."""
         rows = [
             _row(comment_id=0, author="human-user", is_bot=False),
         ]
@@ -295,15 +295,15 @@ class TestReadIssueNumbers:
         assert len(result["items"]) == 1
 
     def test_number_and_numbers_mutually_exclusive(self):
-        """number と numbers の両方を指定すると ValueError。"""
+        """Raises ValueError when both number and numbers are specified."""
         with patch("shiori.mcp_server._resolve_repo", return_value="o/r"):
-            with pytest.raises(ValueError, match="同時に指定できません"):
+            with pytest.raises(ValueError, match="cannot be specified together"):
                 read_issue(number=42, numbers=[42, 43])
 
     def test_batch_too_many_numbers(self):
-        """51件以上は ValueError。"""
+        """Raises ValueError for 51+ items."""
         with patch("shiori.mcp_server._resolve_repo", return_value="o/r"):
-            with pytest.raises(ValueError, match="最大50件"):
+            with pytest.raises(ValueError, match="supports up to 50 items"):
                 read_issue(numbers=list(range(51)))
 
     def _mock_conn_with_rows(self, rows):
