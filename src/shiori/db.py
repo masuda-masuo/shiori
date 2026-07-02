@@ -156,6 +156,13 @@ def _run_alter_statements(conn: psycopg.Connection) -> None:
     # 4. Add chunks.kind (issue #98)
     with conn.cursor() as cur:
         cur.execute("ALTER TABLE chunks ADD COLUMN IF NOT EXISTS kind TEXT")
+        cur.execute(
+            "ALTER TABLE chunks DROP CONSTRAINT IF EXISTS chunks_kind_check"
+        )
+        cur.execute(
+            "ALTER TABLE chunks ADD CONSTRAINT chunks_kind_check "
+            "CHECK (kind IN ('issue', 'pr') OR kind IS NULL)"
+        )
     conn.commit()
 
     # 5. Add sync_runs.code_indexed (returned as code_added via API)

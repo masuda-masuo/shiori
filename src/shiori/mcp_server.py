@@ -341,7 +341,8 @@ def semantic_search(
 ) -> list[dict[str, Any]]:
     """Semantic search (entry). Strong for paraphrasing, concept, cross-lingual queries.
     Hybrid with keyword search internally.
-    kind: 'issue' | 'pr' — filter issue search results by thread type (issue #98)."""
+    kind: 'issue' | 'pr' — further filter source_type='issue'/'pr_review' results
+          by thread type. No effect on doc/code results (issue #98)."""
     with _conn() as conn:
         return search.semantic_search(
             settings, conn, _get_embedder(), query,
@@ -369,7 +370,8 @@ def keyword_search(
 ) -> list[dict[str, Any]]:
     """Keyword search (Japanese tokenize). Strong for exact matches: function names, API names, error codes, config keys.
     Usually called via semantic_search.
-    kind: 'issue' | 'pr' — filter issue search results by thread type (issue #98)."""
+    kind: 'issue' | 'pr' — further filter source_type='issue'/'pr_review' results
+          by thread type. No effect on doc/code results (issue #98)."""
     with _conn() as conn:
         return search.keyword_search(
             settings, conn, query,
