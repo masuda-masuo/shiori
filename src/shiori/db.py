@@ -44,7 +44,7 @@ CREATE TABLE IF NOT EXISTS sync_runs (
     finished_at TIMESTAMPTZ NOT NULL,
     docs_updated INTEGER,
     issues_indexed INTEGER,
-    code_indexed INTEGER
+    code_indexed INTEGER   -- API では code_added として返される（キー名の方が実態を正確に表すため）
 );
 
 CREATE TABLE IF NOT EXISTS doc_files (
@@ -160,7 +160,7 @@ def _run_alter_statements(conn: psycopg.Connection) -> None:
         cur.execute("ALTER TABLE doc_files ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'doc'")
     conn.commit()
 
-    # 4. sync_runs.code_indexed 追加
+    # 4. sync_runs.code_indexed 追加（API では code_added として返される）
     with conn.cursor() as cur:
         cur.execute("ALTER TABLE sync_runs ADD COLUMN IF NOT EXISTS code_indexed INTEGER")
     conn.commit()
@@ -316,7 +316,7 @@ def get_sync_runs(conn: psycopg.Connection) -> dict[str, dict]:
             "route": r[1],
             "docs_updated": r[4],
             "issues_indexed": r[5],
-            "code_indexed": r[6],
+            "code_added": r[6],
         }
         for r in rows
     }

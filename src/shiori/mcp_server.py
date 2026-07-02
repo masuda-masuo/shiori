@@ -225,7 +225,7 @@ def _do_sync(
                     result["repos"][repo] = {
                         "docs_updated": n_docs,
                         "issues_indexed": n_items,
-                        "code_indexed": n_code,
+                        "code_added": n_code,
                         "synced_at": finished_at.isoformat(),
                     }
                     log.info(
@@ -551,7 +551,15 @@ def read_file(
     s = max((start_line or 1) - 1, 0)
     e = min(end_line or total, total)
     body = "\n".join(lines[s:e])
-    return {
+
+    hints: list[str] = []
+    if end_line is None and total > _LARGE_FILE_THRESHOLD:
+        hints.append(
+            f"File is large ({total} lines). "
+            "Use start_line/end_line for range-based reading."
+        )
+
+    result: dict[str, Any] = {
         "repo": target,
         "path": path,
         "start_line": s + 1,
@@ -559,6 +567,9 @@ def read_file(
         "total_lines": total,
         "content": body,
     }
+    if hints:
+        result["hints"] = hints
+    return result
 
 
 def _read_issue_single(target: str, number: int, exclude_noise_bots: bool) -> dict[str, Any]:
@@ -748,7 +759,14 @@ def read_pr_file(
         e = min(end_line or total, total)
         body = "\n".join(lines[s:e])
 
-        return {
+        hints: list[str] = []
+        if end_line is None and total > _LARGE_FILE_THRESHOLD:
+            hints.append(
+                f"File is large ({total} lines). "
+                "Use start_line/end_line for range-based reading."
+            )
+
+        result: dict[str, Any] = {
             "repo": target,
             "number": number,
             "path": path,
@@ -757,6 +775,9 @@ def read_pr_file(
             "total_lines": total,
             "content": body,
         }
+        if hints:
+            result["hints"] = hints
+        return result
     finally:
         if tmp_ref:
             _git_delete_ref(tmp_ref, cwd=base)
@@ -783,6 +804,7 @@ def ingest(rebuild: bool = False, repo: str | None = None) -> dict[str, Any]:
 
 
 _STALE_SECONDS = 86400  # 24 時間
+_LARGE_FILE_THRESHOLD = 500  # この行数を超えるファイルに range 指定 hint を表示
 
 
 def _build_warnings(
@@ -826,9 +848,10 @@ def _build_warnings(
 @mcp.tool(name="shiori_status")
 def status() -> dict[str, Any]:
     """索引の鮮度と健全性を返す。リポジトリごとに最終同期の完了時刻（last_synced_at）・
-    経過秒数（age_seconds）・実行経路（cli / runner / mcp / auto）・直近の更新件数・
-    チャンク数内訳（doc / issue / pr_review / code）・issue_items 全件数・差分同期カーソル・
-    警告（warnings）を返す。「索引は最新か?」の判断に使う:
+    経過秒数（age_seconds）・実行経路（cli / runner / mcp / auto）・直近の追加件数
+    （docs_updated / issues_indexed / code_added）・チャンク総数内訳（chunks）・
+    code_chunks・issue_items 全件数・差分同期カーソル・警告（warnings）を返す。
+    「索引は最新か?」の判断に使う:
     age_seconds が小さければ同期済み、大きい／last_synced_at が null なら
     shiori_ingest で差分同期すること。warnings があれば索引に異常がある可能性。"""
     with _conn() as conn:
@@ -841,12 +864,13 @@ def status() -> dict[str, Any]:
                 "route": None,
                 "docs_updated": None,
                 "issues_indexed": None,
-                "code_indexed": None,
+                "code_added": None,
             }
             chunk_counts = db.get_chunk_counts(conn, repo)
             items_in_db = db.get_issue_item_count(conn, repo)
             cursors = db.get_cursors(conn, repo)
             info["chunks"] = chunk_counts
+            info["code_chunks"] = chunk_counts.get("code", 0)
             info["items_in_db"] = items_in_db
             info["cursors"] = cursors
             warnings = _build_warnings(info, chunk_counts, items_in_db, cursors)
