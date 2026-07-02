@@ -71,7 +71,7 @@ class TestPrChangesIncludeDiff:
         mock_git_delete.assert_called_once_with("refs/shiori/tmp-abc", cwd="/data/repos/o/r")
 
     def test_include_diff_true_raises_when_clone_missing(self):
-        """include_diff=True でクローンが無ければ FileNotFoundError。"""
+        """FileNotFoundError when clone is missing with include_diff=True."""
         with (
             patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
             patch("shiori.mcp_server._conn"),
@@ -85,11 +85,11 @@ class TestPrChangesIncludeDiff:
                   return_value="/data/repos/o/r"),
         ):
             mock_settings.repo_dir.return_value = "/data/repos/o/r"
-            with pytest.raises(FileNotFoundError, match="クローンが存在しません"):
+            with pytest.raises(FileNotFoundError, match="does not exist"):
                 pr_changes(number=42, repo="o/r", include_diff=True)
 
     def test_include_diff_true_cleans_up_tmp_ref_on_error(self):
-        """include_diff=True で例外発生時も tmp_ref を確実に削除する。"""
+        """Ensures tmp_ref is cleaned up on error with include_diff=True."""
         with (
             patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
             patch("shiori.mcp_server._conn"),

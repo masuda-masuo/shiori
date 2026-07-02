@@ -11,16 +11,16 @@ def main() -> None:
     parser = argparse.ArgumentParser(prog="shiori")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p_ingest = sub.add_parser("ingest", help="docs と issue/PR を同期して索引する")
-    p_ingest.add_argument("--repo", action="append", help="owner/name（複数可。省略時は SHIORI_REPOS）")
-    p_ingest.add_argument("--rebuild", action="store_true", help="索引を破棄して全件作り直す")
+    p_ingest = sub.add_parser("ingest", help="sync docs and issue/PR to build index")
+    p_ingest.add_argument("--repo", action="append", help="owner/name (multiple allowed, defaults to SHIORI_REPOS)")
+    p_ingest.add_argument("--rebuild", action="store_true", help="discard index and rebuild all")
 
-    p_serve = sub.add_parser("serve", help="MCP サーバーを起動する")
+    p_serve = sub.add_parser("serve", help="start MCP server")
     p_serve.add_argument(
         "--transport",
         choices=["http", "stdio"],
         default="http",
-        help="http=streamable HTTP（compose 既定） / stdio=ローカル直接続",
+        help="http=streamable HTTP (compose default) / stdio=local direct connection",
     )
 
     args = parser.parse_args()

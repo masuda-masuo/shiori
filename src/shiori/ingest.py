@@ -1,26 +1,12 @@
-"""ingest ジョブ（詳細設計/01・07）。
+"""Ingest job (detailed design/01, 07).
+On-demand: docker compose run --rm app python -m shiori ingest.
+Auth via build_token_provider shared across all repos (detailed design/09).
 
-決定: 同期はオンデマンド実行。
-    docker compose run --rm app python -m shiori ingest
-スケジュール実行が必要な場合はホスト側 cron 等から同コマンドを叩く。
-認証は build_token_provider で構築し、全リポジトリの同期で共有する（詳細設計/09）。
+Process mutual exclusion (issue #6): PostgreSQL advisory lock prevents concurrent execution with serve auto-sync or MCP ingest.
 
-プロセス横断排他（issue #6）:
-    PostgreSQL advisory lock (pg_try_advisory_lock) を使い、serve プロセスの
-    自動同期や MCP ツール ingest との同時実行を防ぐ。
-    SYNC_LOCK_KEY は mcp_server.py と同じ値（0x5348494F = 'SHIO'）。
+Freshness tracking (issue #22 / #33): Records completion to sync_runs per repo. Route via SHIORI_INGEST_ROUTE (default 'cli').
 
-鮮度の記録（issue #22 / #33）:
-    リポジトリごとの同期完了時に sync_runs へ完了時刻と経路を記録する。
-    経路は環境変数 SHIORI_INGEST_ROUTE（既定 'cli'）。reindex.yml（self-hosted
-    runner）は 'runner' を設定して実行経路を識別できるようにする。
-
-セキュリティ（issue #63）:
-    指定された repo を SHIORI_REPOS（allowlist）と照合し、含まれないものは拒否する。
-
-バルク経路最適化（issue #72）:
-    初回または rebuild では、重い索引（HNSW／pgroonga）をロード後に一括作成し、
-    埋め込みをファイル横断バッチ化、チャンク挿入をバルク化する。
+Security (issue #63): Validates repo against SHIORI_REPOS allowlist.
 """
 
 from __future__ import annotations
@@ -37,18 +23,15 @@ from .github_sync import ChunkBuffer, sync_code, sync_docs, sync_issues
 
 log = logging.getLogger(__name__)
 
-# PostgreSQL advisory lock キー（mcp_server.py と共有。'SHIO' の ASCII）
+# PostgreSQL advisory lock key (shared with mcp_server.py. ASCII for 'SHIO')
 SYNC_LOCK_KEY = 0x5348494F
 
-# バルク経路の ChunkBuffer フラッシュ閾値（issue #72）
+# ChunkBuffer flush threshold for bulk path (issue #72)
 _BULK_BUFFER_SIZE = 500
 
 
 def _is_bulk_path(conn, rebuild: bool) -> bool:
-    """バルク経路か判定する: rebuild=True または chunks テーブルが空／未存在。
-
-    新規 DB（chunks テーブル未作成）もバルク扱いする（issue #72）。
-    """
+    """Determine if bulk path: rebuild=True or chunks table empty/missing."""
     if rebuild:
         return True
     with conn.cursor() as cur:
@@ -66,53 +49,53 @@ def run_ingest(
 ) -> None:
     settings = settings or load_settings()
 
-    # allowlist 検証: 明示的に指定された repo が settings.repos に含まれるか（issue #63）
+    # Allowlist validation: ensure specified repo is in settings.repos (issue #63)
     if repos is not None:
         allowed = set(settings.repos)
         invalid = sorted(set(repos) - allowed)
         if invalid:
             raise SystemExit(
-                f"指定されたリポジトリは SHIORI_REPOS に含まれていません: "
+                f"Specified repos not in SHIORI_REPOS: "
                 f"{', '.join(invalid)}"
             )
 
     targets = repos or settings.repos
     if not targets:
-        raise SystemExit("SHIORI_REPOS が未設定です（例: SHIORI_REPOS=owner/name）")
+        raise SystemExit("SHIORI_REPOS not set (e.g. SHIORI_REPOS=owner/name)")
 
     provider = build_token_provider(settings)
     route = os.environ.get("SHIORI_INGEST_ROUTE", "cli")
 
     conn = db.connect(settings)
 
-    # --- バルク経路判定（ロック前に判定のみ。新規DB対応。issue #72） ---
+    # --- Bulk path detection (detect before lock. Handles fresh DB. Issue #72) ---
     is_bulk = _is_bulk_path(conn, rebuild)
 
-    # --- スキーマ準備: migrate_light は冪等なのでロック外でOK ---
+    # --- Schema prep: migrate_light is idempotent, safe outside lock ---
     if is_bulk:
         log.info("bulk path detected (rebuild=%s), using light schema + deferred indexes", rebuild)
         db.migrate_light(conn, settings)
     else:
         db.migrate(conn, settings)
 
-    # --- プロセス横断排他: advisory lock ---
-    # serve の自動同期や MCP ツール ingest と同時に走らないよう DB レベルで排他する。
-    # advisory lock はセッション（接続）に紐づくため、取得と解放は同一接続で行う。
+    # --- Cross-process mutex: advisory lock ---
+    # Prevent concurrent execution with serve auto-sync and MCP ingest at DB level.
+    # Advisory lock is session-bound; acquire and release on the same connection.
     with conn.cursor() as cur:
         cur.execute("SELECT pg_try_advisory_lock(%s)", (SYNC_LOCK_KEY,))
         acquired = cur.fetchone()[0]
     if not acquired:
-        log.info("skipped: 別プロセスで同期が実行中です")
+        log.info("skipped: sync already running in another process")
         conn.close()
         return
 
     t_total = time.monotonic()
 
     try:
-        # --- バルク経路: 破壊的操作はロック内で（issue #72） ---
+        # --- Bulk path: destructive operations inside the lock (issue #72) ---
         if is_bulk:
             if rebuild:
-                log.warning("rebuild: 既存の索引と同期カーソルを破棄します")
+                log.warning("rebuild: discarding existing index and sync cursors")
                 with conn.cursor() as cur:
                     cur.execute("TRUNCATE chunks, doc_files, issue_items, sync_state")
                 conn.commit()
@@ -134,7 +117,7 @@ def run_ingest(
             )
             if is_bulk:
                 n_flushed = buffer.flush()
-                conn.commit()  # メタデータ（doc_files, set_cursor）をコミット
+                conn.commit()  # Commit metadata (doc_files, set_cursor)
                 log.info("docs flushed: %d chunks", n_flushed)
             t_docs = time.monotonic() - t0
             log.info("docs: %d files updated (%.1fs)", n_docs, t_docs)
@@ -147,7 +130,7 @@ def run_ingest(
             )
             if is_bulk:
                 n_flushed = buffer.flush()
-                conn.commit()  # メタデータ（issue_items, set_cursor）をコミット
+                conn.commit()  # Commit metadata (issue_items, set_cursor)
                 log.info("issues flushed: %d chunks", n_flushed)
             t_issues = time.monotonic() - t0
             log.info("issues/PR: %d items indexed (%.1fs)", n_items, t_issues)
@@ -160,7 +143,7 @@ def run_ingest(
             )
             if is_bulk:
                 n_flushed = buffer.flush()
-                conn.commit()  # メタデータ（doc_files, set_cursor）をコミット
+                conn.commit()  # Commit metadata (doc_files, set_cursor)
                 log.info("code flushed: %d chunks", n_flushed)
             t_code = time.monotonic() - t0
             log.info("code: %d files updated (%.1fs)", n_code, t_code)
@@ -170,7 +153,7 @@ def run_ingest(
             )
             log.info("synced at %s (route=%s)", finished_at.isoformat(), route)
 
-        # --- バルク経路: 重量索引を一括作成 ---
+        # --- Bulk path: create heavy indexes in batch ---
         if is_bulk:
             t0 = time.monotonic()
             db.create_heavy_indexes(conn)

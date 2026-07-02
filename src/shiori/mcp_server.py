@@ -1,41 +1,5 @@
-"""MCP サーバー（詳細設計/06）。
-
-ツール構成（決定: shiori_search が統合入口。keyword_search は厳密一致専用で分離維持）:
-- search(query, filters?)             : 意味＋キーワードのハイブリッド検索（入口ツール）。まずこれを使う。
-- keyword_search(query, filters?)     : 完全一致寄りのキーワード検索（日本語対応）。厳密一致が欲しいときに使う。
-- list_tree(path?, source_type?, extension?): 索引済みドキュメント＋コードファイルのツリー閲覧。
-- read_file(path, start?, end?)       : ローカルクローンからファイル（の一部）を取得。
-- read_issue(number, repo?, exclude_noise_bots?) : issue/PR スレッド全体を取得。
-- pr_changes(number, repo?, include_diff?) : PR の変更ファイルマップ（＋必要に応じて unified diff）を返す（issue #54, #100）。
-- read_pr_file(number, path, start?, end?, repo?) : PR head のファイル内容を透過的に取得（issue #81）。
-- ingest(rebuild?, repo?)             : docs / issue / PR / code の差分同期（索引更新）。
-- status()                            : 索引の鮮度と健全性（最終同期時刻・件数内訳・警告）。
-
-実際に MCP クライアントに公開されるツール名は shiori_ 接頭辞付き（issue #8）。
-filesystem 等の他 MCP サーバーとの名前衝突を避けるため。関数名は据え置き。
-
-検索結果は常にポインタ＋スニペット＋ GitHub URL。全文は read 系で取得する。
-
-索引更新は 3 経路（issue #2, #6 の決定）:
-- shiori_ingest ツール: エージェント／ユーザーによるオンデマンド更新。
-- SHIORI_SYNC_INTERVAL_SECONDS: serve プロセス内のバックグラウンド自動同期（保険）。
-  イベント駆動が主になったため推奨値は 3600 秒。
-- self-hosted runner: push / issue / PR イベントで即時差分同期（issue #6）。
-  同期の実体は _do_sync()。PostgreSQL advisory lock でプロセス横断の排他を保証。
-
-同期が成功するたびに sync_runs へ完了時刻と経路（mcp / auto。runner / cli は
-ingest.py 側で記録）を残し、shiori_status で照会できる（issue #22）。
-
-code 索引（issue #33）は SHIORI_INDEX_CODE=true で有効化。sync_docs と同一クローンを
-共有し、sha デルタで変化ファイルのみ再索引する。
-
-セキュリティ（issue #63）:
-- _do_sync の repo 引数は settings.repos と照合し、allowlist 外は拒否。
-- shiori_ingest の rebuild=True は SHIORI_ALLOW_REBUILD=true 時のみ許可。
-
-バルク経路最適化（issue #72）:
-  初回または rebuild では、重い索引（HNSW／pgroonga）をロード後に一括作成し、
-  埋め込みをファイル横断バッチ化、チャンク挿入をバルク化する。
+"""MCP server implementation.
+~1100 lines: setup (1-90), helpers (90-310), tools (310-1100). Each tool typically <100 lines.
 """
 
 from __future__ import annotations
@@ -69,11 +33,11 @@ _embedder: Embedder | None = None
 _embedder_lock = threading.Lock()
 _sync_lock = threading.Lock()
 
-# PostgreSQL advisory lock キー（プロセス横断排他。ingest.py と共有）
-# 'SHIO' の ASCII コード列を 32bit に詰めた値
+# PostgreSQL advisory lock key (cross-process mutex, shared with ingest.py)
+# ASCII codes for 'SHIO' packed into 32 bits
 SYNC_LOCK_KEY = 0x5348494F
 
-# バルク経路の ChunkBuffer フラッシュ閾値（issue #72）
+# ChunkBuffer flush threshold for bulk path (issue #72)
 _BULK_BUFFER_SIZE = 500
 
 
@@ -95,7 +59,7 @@ def _resolve_repo(repo: str | None) -> str:
     if len(settings.repos) == 1:
         return settings.repos[0]
     raise ValueError(
-        f"repo を指定してください。設定済み: {', '.join(settings.repos) or '(なし)'}"
+        f"Please specify a repo. Configured: {', '.join(settings.repos) or '(none)'}"
     )
 
 
@@ -120,7 +84,7 @@ def _make_filters(
 
 
 def _is_bulk_path(conn, rebuild: bool) -> bool:
-    """バルク経路か判定する: rebuild=True または chunks テーブルが空／未存在（issue #72）。"""
+    """Determine bulk path: rebuild=True or chunks empty/missing (issue #72)."""
     if rebuild:
         return True
     with conn.cursor() as cur:
@@ -136,57 +100,49 @@ def _do_sync(
     rebuild: bool = False,
     route: str = "mcp",
 ) -> dict[str, Any]:
-    """差分同期の実体。ingest ツールと自動同期ループの両方から呼ばれる。
-
-    プロセス内排他: _sync_lock（threading.Lock）で早期 skip。
-    プロセス横断排他: PostgreSQL advisory lock (pg_try_advisory_lock) で、
-    runner ジョブ（別プロセス）との同時実行を防ぐ。
-    どちらも非ブロッキング（取得失敗 = skip）。
-    リポジトリごとの完了時に sync_runs へ完了時刻と経路を記録する（issue #22 / #33）。
-
-    初回／rebuild はバルク経路: 重量索引をロード後に一括作成し、埋め込みをバッチ化する（issue #72）。
-    """
-    # allowlist 検証: 明示的に指定された repo が settings.repos に含まれるか（issue #63）
+    """Incremental sync body. Called by both ingest tool and auto-sync loop.
+    Process-level exclusion via _sync_lock (threading.Lock)."""
+    # Allowlist validation: ensure specified repo is in settings.repos (issue #63)
     if repos is not None:
         allowed = set(settings.repos)
         invalid = sorted(set(repos) - allowed)
         if invalid:
             raise ValueError(
-                f"指定されたリポジトリは SHIORI_REPOS に含まれていません: "
+                f"Specified repos not in SHIORI_REPOS: "
                 f"{', '.join(invalid)}"
             )
 
     if not _sync_lock.acquire(blocking=False):
-        return {"status": "skipped", "reason": "同期が既に実行中です"}
+        return {"status": "skipped", "reason": "sync already running"}
     try:
         targets = repos or settings.repos
         if not targets:
-            return {"status": "error", "reason": "SHIORI_REPOS が未設定です"}
+            return {"status": "error", "reason": "SHIORI_REPOS not set"}
         provider = build_token_provider(settings)
         embedder = _get_embedder()
         result: dict[str, Any] = {"status": "ok", "repos": {}}
         with _conn() as conn:
-            # --- バルク経路判定（新規DB対応。issue #72） ---
+            # --- Bulk path detection (handles fresh DB. Issue #72) ---
             is_bulk = _is_bulk_path(conn, rebuild)
 
-            # --- スキーマ準備: migrate_light は冪等なのでロック外でOK ---
+            # --- Schema prep: migrate_light is idempotent, safe outside lock ---
             if is_bulk:
                 log.info("bulk path detected (rebuild=%s), using light schema + deferred indexes", rebuild)
                 db.migrate_light(conn, settings)
             else:
                 db.migrate(conn, settings)
 
-            # --- プロセス横断排他: advisory lock ---
+            # --- Cross-process mutex: advisory lock ---
             with conn.cursor() as cur:
                 cur.execute("SELECT pg_try_advisory_lock(%s)", (SYNC_LOCK_KEY,))
                 acquired = cur.fetchone()[0]
             if not acquired:
-                return {"status": "skipped", "reason": "別プロセスで同期が実行中です"}
+                return {"status": "skipped", "reason": "sync already running in another process"}
             try:
-                # --- バルク経路: 破壊的操作はロック内で（issue #72） ---
+                # --- Bulk path: destructive operations inside the lock (issue #72) ---
                 if is_bulk:
                     if rebuild:
-                        log.warning("rebuild: 既存の索引と同期カーソルを破棄します")
+                        log.warning("rebuild: discarding existing index and sync cursors")
                         with conn.cursor() as cur:
                             cur.execute(
                                 "TRUNCATE chunks, doc_files, issue_items, sync_state"
@@ -204,21 +160,21 @@ def _do_sync(
                     )
                     if is_bulk:
                         buffer.flush()
-                        conn.commit()  # メタデータをコミット
+                        conn.commit()  # Commit metadata
                     n_items = sync_issues(
                         settings, conn, embedder, repo, provider,
                         buffer=buffer if is_bulk else None,
                     )
                     if is_bulk:
                         buffer.flush()
-                        conn.commit()  # メタデータをコミット
+                        conn.commit()  # Commit metadata
                     n_code = sync_code(
                         settings, conn, embedder, repo, provider,
                         buffer=buffer if is_bulk else None,
                     )
                     if is_bulk:
                         buffer.flush()
-                        conn.commit()  # メタデータをコミット
+                        conn.commit()  # Commit metadata
                     finished_at = db.record_sync_run(
                         conn, repo, route, n_docs, n_items, n_code
                     )
@@ -233,7 +189,7 @@ def _do_sync(
                         repo, n_docs, n_items, n_code, route,
                     )
 
-                # --- バルク経路: 重量索引を一括作成（issue #72） ---
+                # --- Bulk path: create heavy indexes in batch (issue #72) ---
                 if is_bulk:
                     db.create_heavy_indexes(conn)
 
@@ -254,12 +210,12 @@ def _auto_sync_loop(interval: int) -> None:
             log.exception("auto sync failed")
 
 
-# ── _walk_code_files: コードファイル収集 ──
+# ── _walk_code_files: collect code files ──
 
-# ドキュメント拡張子（大文字小文字無視）。doc_files テーブルが担当するため walk から除外
+# Document extensions (case-insensitive). Excluded from walk; handled by doc_files table
 _DOC_EXTENSIONS = {".md", ".mdx", ".markdown"}
 
-# os.walk でスキップするディレクトリ名（設計 10 決定 7: 量と質の両面でノイズ除去）
+# Directory names to skip in os.walk (design 10 decision 7: noise reduction for quality and quantity)
 _EXCLUDE_DIRS = {
     ".git",
     "node_modules",
@@ -271,8 +227,8 @@ _EXCLUDE_DIRS = {
     "target",  # Rust
 }
 
-# コードリストに含めないファイル拡張子（大文字小文字無視）
-# バイナリ・アセット・ロックファイル等、LLM が読んでも有益でないもの
+# File extensions excluded from code listing (case-insensitive)
+# Binary/asset/lock files that are not useful for LLM reading
 _EXCLUDE_EXTENSIONS = {
     ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".webp",
     ".woff", ".woff2", ".ttf", ".eot", ".otf",
@@ -280,38 +236,32 @@ _EXCLUDE_EXTENSIONS = {
     ".so", ".dylib", ".dll", ".wasm",
     ".zip", ".tar", ".gz", ".bz2", ".xz", ".7z",
     ".pdf",
-    ".lock",  # package-lock.json, yarn.lock, Gemfile.lock 等
+    ".lock",  # package-lock.json, yarn.lock, Gemfile.lock etc.
     ".min.js", ".min.css",  # minified
 }
 
 
 def _is_doc_file(filename: str) -> bool:
-    """ファイル名がドキュメント拡張子か（大文字小文字無視）。"""
+    """Check if filename has a document extension (case-insensitive)."""
     return any(filename.lower().endswith(ext) for ext in _DOC_EXTENSIONS)
 
 
 def _is_excluded_file(filename: str) -> bool:
-    """ファイル名が除外拡張子か（大文字小文字無視）。"""
+    """Check if filename has an excluded extension (case-insensitive)."""
     lower = filename.lower()
     return any(lower.endswith(ext) for ext in _EXCLUDE_EXTENSIONS)
 
 
 def _match_extension(path: str, extension: str) -> bool:
-    """拡張子が指定値にマッチするか（大文字小文字無視、'.' 有無両対応）。"""
+    """Check if extension matches given value (case-insensitive, with/without leading dot)."""
     ext = extension if extension.startswith(".") else "." + extension
     return path.lower().endswith(ext.lower())
 
 
 def _walk_code_files(base: str, prefix: str, extension: str | None = None) -> set[str]:
-    """クローンを walk し、コードファイルの相対パス集合を返す。
-
-    - .git / node_modules / .venv / __pycache__ 等のノイズディレクトリをスキップ
-    - .md / .mdx / .markdown は doc_files テーブルが担当するため除外
-    - バイナリ・アセット・ロックファイル等の非テキスト拡張子も除外
-    - prefix が指定された場合はそのパス自身またはその配下のファイルのみを返す
-      （例: prefix="src" は "src/main.py" にマッチ、"src2/main.py" にはマッチしない）
-    - extension が指定された場合はウォーク中に拡張子フィルタを適用（大文字小文字無視）
-    """
+    """Walk clone and return code file relative paths.
+    Skips .git/node_modules/.venv, binary extensions.
+    Only extensions in _CODE_EXTENSIONS."""
     paths: set[str] = set()
     if not os.path.isdir(base):
         return paths
@@ -339,35 +289,35 @@ mcp = FastMCP(
     host=settings.mcp_host,
     port=settings.mcp_port,
     instructions=(
-        "GitHub リポジトリの知識（Markdown ドキュメントと issue/PR の議論、"
-        "およびソースコード）へのハイブリッド検索。"
-        "まず shiori_search で検索し、ポインタ＋スニペットを得て、"
-        "必要な範囲だけ shiori_read_file / shiori_read_issue で取得すること。"
-        "固有名詞・API 名・エラーコード・関数名等の厳密一致には shiori_keyword_search を使う。"
-        "索引が古い・未索引と思われる場合（直近の変更がヒットしない等）は"
-        "shiori_ingest を呼んで差分同期する。索引が最新かどうかの確認は shiori_status。"
-        "コードファイルは shiori_list_tree で発見し shiori_read_file で読める"
-        "（path, start_line, end_line 指定可）。"
-        "shiori_list_tree は source_type='doc'/'code' や extension='.py' で絞り込み可能。"
-        "コードの検索は shiori_search / shiori_keyword_search で可能"
-        "（source_type='code' で絞り込み可、prog_lang フィルタで言語指定も可）。"
-        "PR の変更ファイルマップは shiori_pr_changes で取得できる。"
-        "PR head のファイル内容は shiori_read_pr_file で透過的に取得できる（issue #81）。"
+        "Hybrid search of GitHub repository knowledge (Markdown docs, issue/PR discussions,"
+        "and source code)."
+        "First search with shiori_search to get pointers + snippets, then fetch"
+        "only the needed range via shiori_read_file / shiori_read_issue."
+        "For exact match of proper nouns, API names, error codes, function names, use shiori_keyword_search."
+        "If the index seems stale (recent changes not found), call shiori_ingest for diff sync."
+        "Check index freshness with shiori_status."
+        "Code files can be discovered via shiori_list_tree and read via shiori_read_file"
+        "(supports path, start_line, end_line)."
+        "shiori_list_tree supports filtering by source_type='doc'/'code' and extension='.py'."
+        "Code can be searched via shiori_search / shiori_keyword_search"
+        "(filter by source_type='code' and prog_lang filter)."
+        "PR change file maps are available via shiori_pr_changes."
+        "PR head file content can be read transparently via shiori_read_pr_file (issue #81)."
         "\n"
-        "■ 二ストア・モデル（情報の出所）\n"
-        "shiori は 2 つの独立したデータソースを持つ:\n"
-        "1. 索引（Postgres/pgvector/pgroonga）\n"
-        "   - shiori_search / shiori_keyword_search: 埋め込み＋全文検索\n"
-        "   - shiori_read_issue: issue/PR スレッド（索引済みのもののみ）\n"
-        "   - shiori_list_tree (source_type='doc'): 索引済み doc_files テーブル\n"
-        "   - shiori_pr_changes: PR 変更ファイルマップ（索引済みメタデータ）\n"
-        "   - 鮮度は shiori_ingest / 自動同期に依存\n"
-        "2. クローン（ディスク、main ブランチ固定）\n"
-        "   - shiori_read_file: 実ファイルを直接読み取り（索引不要、クローンがあれば読める）\n"
-        "   - shiori_read_pr_file: PR head のファイルを git 経由で取得（ワーキングツリー非破壊）\n"
-        "   - shiori_list_tree (source_type='code'): os.walk で物理的に存在するコードファイル\n"
-        "   - クローンは sync_docs が clone --depth=1 + reset --hard origin/HEAD で維持\n"
-        "   - shiori_read_pr_file はクローンを起点に git fetch で PR head を取得して読む"
+        "\u25a0 Two-store model (information sources)\n"
+        "shiori has 2 independent data sources:\n"
+        "1. Index (Postgres/pgvector/pgroonga)\n"
+        "   - shiori_search / shiori_keyword_search: embedding + full-text search\n"
+        "   - shiori_read_issue: issue/PR threads (indexed only)\n"
+        "   - shiori_list_tree (source_type='doc'): indexed doc_files table\n"
+        "   - shiori_pr_changes: PR change file maps (indexed metadata)\n"
+        "   - Freshness depends on shiori_ingest / auto-sync\n"
+        "2. Clone (disk, pinned to main branch)\n"
+        "   - shiori_read_file: read real files directly (no index needed, works if clone exists)\n"
+        "   - shiori_read_pr_file: get PR head files via git (non-destructive to working tree)\n"
+        "   - shiori_list_tree (source_type='code'): physically existing code files via os.walk\n"
+        "   - Clone is maintained by sync_docs via clone --depth=1 + reset --hard origin/HEAD\n"
+        "   - shiori_read_pr_file fetches PR head via git fetch starting from the clone"
     ),
 )
 
@@ -386,18 +336,8 @@ def semantic_search(
     sort_by: str = "score",
     sort_order: str = "desc",
 ) -> list[dict[str, Any]]:
-    """意味ベースの検索（入口ツール）。言い換え・概念・クロスリンガル（日本語クエリで英語ドキュメント）に強い。
-    内部でキーワード検索とのハイブリッド融合 (RRF) を行う。
-    ポインタ（path / heading_path / issue_no）＋スニペット＋URL を返す。全文は read 系で取得すること。
-    filters: source_type は doc / issue / pr_review / code、language は ja / en、
-    state は open / closed、prog_lang は python / go / rust 等、
-    updated_after は ISO8601 日付。
-    sort_by: "score"（既定）/ "updated_at" / "created_at"。
-      後方互換のため受け付けるが、ランキングは常に関連度主に固定（issue #69）。
-      一次ソース（doc/code）は RRF スコア順、
-      二次ソース（issue/pr_review）は RRF スコア＋state/updated_at tie-break。
-      純粋な日付置換ソートは行わず、既定（score）のまま使うことを推奨。
-    sort_order: "desc"（既定）/ "asc"（asc 時は複合キー全体が反転）。"""
+    """Semantic search (entry). Strong for paraphrasing, concept, cross-lingual queries.
+    Hybrid with keyword search internally."""
     with _conn() as conn:
         return search.semantic_search(
             settings, conn, _get_embedder(), query,
@@ -422,17 +362,8 @@ def keyword_search(
     sort_by: str = "score",
     sort_order: str = "desc",
 ) -> list[dict[str, Any]]:
-    """キーワード検索（日本語対応トークナイズ）。関数名・API 名・エラーコード・設定キーなど
-    固有の文字列の厳密一致に強い。通常は shiori_search を使い、厳密一致が必要なときに
-    このツールを使うこと。
-    code チャンクは content（シグネチャ＋docstring）と symbols（識別子分割済み文字列）の
-    OR 検索になるため、camelCase/snake_case の部分一致でも発見できる。
-    sort_by: "score"（既定）/ "updated_at" / "created_at"。
-      後方互換のため受け付けるが、ランキングは常に関連度主に固定（issue #69）。
-      一次ソース（doc/code）はスコア順、
-      二次ソース（issue/pr_review）はスコア＋state/updated_at tie-break。
-      純粋な日付置換ソートは行わず、既定（score）のまま使うことを推奨。
-    sort_order: "desc"（既定）/ "asc"（asc 時は複合キー全体が反転）。"""
+    """Keyword search (Japanese tokenize). Strong for exact matches: function names, API names, error codes, config keys.
+    Usually called via semantic_search."""
     with _conn() as conn:
         return search.keyword_search(
             settings, conn, query,
@@ -443,7 +374,7 @@ def keyword_search(
         )
 
 
-# list_tree の source_type で有効な値
+# Valid values for list_tree source_type
 _VALID_SOURCE_TYPES = {"doc", "code"}
 
 
@@ -454,37 +385,20 @@ def list_tree(
     extension: str | None = None,
     repo: str | None = None,
 ) -> list[dict[str, Any]]:
-    """索引済みドキュメント＋コードファイルのパス一覧。path を渡すとその配下に絞る。
-    リポジトリの構造を把握し、当たりをつけるのに使う。
-
-    ■ 二ストア・モデルと source_type の意味:
-      - source_type='doc' (索引): doc_files テーブル（Postgres に索引済みの Markdown のみ）。
-        索引されていないドキュメントは返らない。
-      - source_type='code' (クローン): ディスク上のクローン（main 固定）を os.walk した結果。
-        索引前でも物理的に存在すれば返る。バイナリ・ロックファイル等は除外。
-      - 省略時: 両方を返すが、各エントリの source フィールドで出所を区別できる。
-
-    コードファイル（.py, .ts, .go 等）もクローンファイルシステムから返す。
-    コードは索引前でも発見可能。
-
-    戻り値は [{"path": ..., "source": "doc"|"code"}, ...] のリスト（path でソート済み）。
-
-    source_type: 'doc'（索引済み Markdown）/'code'（クローンのコードファイル）で絞り込み。
-                 省略時は両方を返す。無効な値はエラー。
-    extension:   '.py' や '.md' 等の拡張子でフィルタ（先頭ドットの有無は自由）。
-                 大文字小文字無視。各取得経路でフィルタするため効率的。"""
-    # バリデーション
+    """List indexed doc/code file paths. Filter by path/source_type/extension.
+    Understand repo structure and locate files."""
+    # Validation
     if source_type is not None and source_type not in _VALID_SOURCE_TYPES:
         raise ValueError(
-            f"無効な source_type '{source_type}' です。"
-            f"有効な値: {', '.join(sorted(_VALID_SOURCE_TYPES))}"
+            f"Invalid source_type: '{source_type}'."
+            f"Valid values: {', '.join(sorted(_VALID_SOURCE_TYPES))}"
         )
 
     target = _resolve_repo(repo)
     entries: list[dict[str, Any]] = []
     seen: set[str] = set()
 
-    # 1. 索引済みドキュメント（doc_files テーブル）
+    # 1. Indexed documents (doc_files table)
     if source_type is None or source_type == "doc":
         with _conn() as conn, conn.cursor() as cur:
             if path:
@@ -508,18 +422,18 @@ def list_tree(
                     seen.add(p)
                     entries.append({"path": p, "source": "doc"})
 
-    # 2. コードファイル（クローンファイルシステム）
+    # 2. Code files (clone filesystem)
     if source_type is None or source_type == "code":
         base = os.path.realpath(settings.repo_dir(target))
         prefix = path.rstrip("/") if path else ""
         code_paths = _walk_code_files(base, prefix, extension=extension)
-        # 最終ソートがあるためコード側だけの事前ソートは不要
+        # No pre-sort needed on code side; final sort handles it
         for p in code_paths:
             if p not in seen:
                 seen.add(p)
                 entries.append({"path": p, "source": "code"})
 
-    # path でソート（doc と code が混在する場合）
+    # Sort by path (when doc and code are interleaved)
     entries.sort(key=lambda e: e["path"])
     return entries
 
@@ -531,20 +445,15 @@ def read_file(
     end_line: int | None = None,
     repo: str | None = None,
 ) -> dict[str, Any]:
-    """指定ファイルの全文（または start_line〜end_line の範囲）を取得する。
-    検索結果のポインタから本当に必要な範囲だけ読むこと。
-    ドキュメントだけでなくコードファイルも読める。
-
-    このツールは索引（Postgres）ではなく、ローカルクローン（main ブランチ固定）の
-    実ファイルを直接読み取る。索引が存在しなくても、クローンがあれば読める。
-    PR head / 別 ref / diff の取得は GitHub MCP または shiori_read_pr_file に委譲すること。"""
+    """Read full file (or range) from clone (not index).
+    PR head files via read_pr_file or GitHub MCP."""
     target = _resolve_repo(repo)
     base = os.path.realpath(settings.repo_dir(target))
     full = os.path.realpath(os.path.join(base, path))
     if not full.startswith(base + os.sep):
-        raise ValueError("リポジトリ外のパスは読めません")
+        raise ValueError("cannot read path outside repository")
     if not os.path.isfile(full):
-        raise FileNotFoundError(f"{path} はクローンに存在しません（同期が必要かもしれません）")
+        raise FileNotFoundError(f"{path} does not exist in clone (sync may be needed)")
     with open(full, encoding="utf-8", errors="replace") as fp:
         lines = fp.read().splitlines()
     total = len(lines)
@@ -573,7 +482,7 @@ def read_file(
 
 
 def _read_issue_single(target: str, number: int, exclude_noise_bots: bool) -> dict[str, Any]:
-    """1 件の issue を取得（内部ヘルパー）。未索引の場合は ValueError。"""
+    """Fetch single issue (internal helper). Raises ValueError if not indexed."""
     with _conn() as conn, conn.cursor() as cur:
         cur.execute(
             """
@@ -587,8 +496,8 @@ def _read_issue_single(target: str, number: int, exclude_noise_bots: bool) -> di
         )
         rows = cur.fetchall()
     if not rows:
-        raise ValueError(f"#{number} は索引されていません（ingest 済みですか？）")
-    # allowlist 外の bot を除外（issue #44）
+        raise ValueError(f"#{number} is not indexed (has ingest been run?)")
+    # Exclude bots outside the allowlist (issue #44)
     if exclude_noise_bots:
         allowlist = settings.index_bot_logins
         rows = [
@@ -596,7 +505,7 @@ def _read_issue_single(target: str, number: int, exclude_noise_bots: bool) -> di
             if not r[4] or (r[3] and r[3].lower() in allowlist)
         ]
         if not rows:
-            raise ValueError(f"#{number} の全項目が allowlist 外の bot です")
+            raise ValueError(f"#{number}: all items are bots outside the allowlist")
     head = rows[0]
     return {
         "repo": target,
@@ -627,21 +536,14 @@ def read_issue(
     exclude_noise_bots: bool = False,
     numbers: list[int] | None = None,
 ) -> dict[str, Any] | list[dict[str, Any]]:
-    """issue / PR のスレッド全体（本文＋コメント＋レビューコメント）を時系列で取得する。
-    bot コメントも含まれる（is_bot で識別可能）。
-
-    number: issue または PR 番号（単発取得。numbers と排他）。
-    repo: リポジトリ名（"owner/name"）。省略時は SHIORI_REPOS の最初のリポジトリ。
-    exclude_noise_bots: True で allowlist 外の bot（CI / dependabot 等）を除外する（既定 False）。
-        allowlist（SHIORI_INDEX_BOT_LOGINS）登録済み bot の投稿は残る（issue #44）。
-    numbers: 複数の issue/PR 番号（バッチ取得）。指定時は配列を返す。
-"""
+    """Fetch full issue/PR thread chronologically (body + comments + review).
+    Bot comments included (identifiable via is_bot)."""
     if number is not None and numbers is not None:
-        raise ValueError("number と numbers は同時に指定できません")
+        raise ValueError("number and numbers cannot be specified together")
     target = _resolve_repo(repo)
     if numbers is not None:
         if len(numbers) > 50:
-            raise ValueError(f"numbers は最大50件までです（{len(numbers)}件指定されました）")
+            raise ValueError(f"numbers supports up to 50 items ({len(numbers)} specified)")
         results: list[dict[str, Any]] = []
         for n in numbers:
             try:
@@ -657,7 +559,7 @@ def read_issue(
                 })
         return results
     if number is None:
-        raise ValueError("number または numbers を指定してください")
+        raise ValueError("specify number or numbers")
     return _read_issue_single(target, number, exclude_noise_bots)
 
 
@@ -667,24 +569,16 @@ def pr_changes(
     repo: str | None = None,
     include_diff: bool = False,
 ) -> dict[str, Any]:
-    """PR の変更ファイルマップ（メタデータ）を返す。ポインタ層のツール（issue #54, #100）。
-
-    保持するもの（メタデータ）:
-      - head_sha: PR の head コミット SHA（force-push 追従用）
-      - ファイル一覧: path / status / additions / deletions / changes / blob_url
-      - diff: include_diff=True 時、unified diff（issue #100）
-
-    number: PR 番号
-    repo: リポジトリ名（"owner/name"）。省略時は SHIORI_REPOS の最初のリポジトリ。
-    include_diff: True で unified diff も取得する（既定 False）。GitHub の
-        refs/pull/{N}/head から git fetch し、merge-base との間の diff を返す。"""
+    """PR change file map (metadata pointer; issue #54, #100).
+    Stored: head_sha / path / status / additions / deletions / changes / blob_url
+    Not stored: patch hunks (via GitHub MCP) and PR head files (via shiori_read_pr_file)."""
     target = _resolve_repo(repo)
     with _conn() as conn:
         files, head_sha = db.get_pr_changes(conn, target, number)
     if head_sha is None:
         raise ValueError(
-            f"PR #{number} の変更ファイルマップが見つかりません。"
-            "shiori_ingest で同期してください。"
+            f"PR #{number} change file map not found."
+            "Please sync with shiori_ingest."
         )
     result: dict[str, Any] = {
         "repo": target,
@@ -696,7 +590,7 @@ def pr_changes(
         base = os.path.realpath(settings.repo_dir(target))
         if not os.path.isdir(os.path.join(base, ".git")):
             raise FileNotFoundError(
-                f"{target} のクローンが存在しません。shiori_ingest で同期してください。"
+                f"Clone for {target} does not exist. Please run shiori_ingest to sync."
             )
         ref = f"pull/{number}/head"
         tmp_ref = None
@@ -720,23 +614,13 @@ def read_pr_file(
     end_line: int | None = None,
     repo: str | None = None,
 ) -> dict[str, Any]:
-    """PR head のファイル内容（または start_line〜end_line の範囲）を取得する。
-    shiori_pr_changes で変更ファイル一覧を取得した後、このツールで各ファイルの中身を読む。
-    shiori_read_file と違い、PR の head ブランチのファイルを透過的に読める。
-    GitHub の refs/pull/{N}/head から git fetch し、ワーキングツリーを変更せずに
-    ファイル内容を取り出す。一時 ref は自動クリーンアップされる。
-
-    number: PR 番号
-    path: ファイルパス（例: "src/main.py"）
-    repo: リポジトリ名（"owner/name"）。省略時は SHIORI_REPOS の最初のリポジトリ。
-    start_line: 開始行（1-indexed）
-    end_line: 終了行（1-indexed、省略時は最終行）"""
+    """Read PR head file content (or range). Delegated from read_file with PR-specific fetch."""
     target = _resolve_repo(repo)
     base = os.path.realpath(settings.repo_dir(target))
 
     if not os.path.isdir(os.path.join(base, ".git")):
         raise FileNotFoundError(
-            f"{target} のクローンが存在しません。shiori_ingest で同期してください。"
+            f"Clone for {target} does not exist. Please run shiori_ingest to sync."
         )
 
     ref = f"pull/{number}/head"
@@ -745,12 +629,12 @@ def read_pr_file(
         provider = build_token_provider(settings)
         tmp_ref = _git_fetch_ref(ref, cwd=base, provider=provider)
 
-        # git show でファイル内容を取得
+        # Get file content via git show
         try:
             content = _git(["show", f"{tmp_ref}:{path}"], cwd=base)
         except RuntimeError as exc:
             raise FileNotFoundError(
-                f"PR #{number} に {path} が見つかりません: {exc}"
+                f"PR #{number}: {path} not found: {exc}"
             )
 
         lines = content.splitlines()
@@ -785,26 +669,20 @@ def read_pr_file(
 
 @mcp.tool(name="shiori_ingest")
 def ingest(rebuild: bool = False, repo: str | None = None) -> dict[str, Any]:
-    """docs / issue/PR / code を GitHub から同期し索引を更新する（差分同期なので通常は数秒）。
-    検索結果が古い・未索引と思われる場合（直近の変更がヒットしない、ユーザーが
-    最近の変更に言及している等）に呼ぶ。rebuild=True で索引を破棄して全件作り直す
-    （埋め込みモデル変更時のみ）。repo 省略時は設定済みの全リポジトリを同期する。
-    code 索引は SHIORI_INDEX_CODE=true で有効化。
-
-    rebuild=True は MCP ツールからは既定で無効化されている。使用するには
-    環境変数 SHIORI_ALLOW_REBUILD=true の設定が必要（issue #63）。
-    repo は SHIORI_REPOS に含まれるもののみ有効。"""
+    """Sync docs/issues/code from GitHub and update index (diff sync, typically seconds).
+    rebuild=True: discard and full rebuild (requires SHIORI_ALLOW_REBUILD=true; issue #63).
+    Also treated as rebuild when chunks table is empty."""
     if rebuild and not settings.allow_rebuild:
         raise ValueError(
-            "rebuild=True は MCP ツールからは実行できません。"
-            "CLI（python -m shiori ingest --rebuild）を使用するか、"
-            "環境変数 SHIORI_ALLOW_REBUILD=true を設定してください。"
+            "rebuild=True cannot be executed from the MCP tool."
+            "Use the CLI (python -m shiori ingest --rebuild) or"
+            "set the environment variable SHIORI_ALLOW_REBUILD=true."
         )
     return _do_sync(repos=[repo] if repo else None, rebuild=rebuild, route="mcp")
 
 
-_STALE_SECONDS = 86400  # 24 時間
-_LARGE_FILE_THRESHOLD = 500  # この行数を超えるファイルに range 指定 hint を表示
+_STALE_SECONDS = 86400  # 24 hours
+_LARGE_FILE_THRESHOLD = 500  # Show range hint for files exceeding this line count
 
 
 def _build_warnings(
@@ -813,33 +691,33 @@ def _build_warnings(
     items_in_db: int,
     cursors: dict[str, str | None],
 ) -> list[str]:
-    """索引の異常を検出して警告リストを返す（issue #31）。"""
+    """Detect index anomalies and return warning list (issue #31)."""
     warnings: list[str] = []
 
-    # 鮮度: 最終同期から長時間経過
+    # Freshness: long time since last sync
     age = info.get("age_seconds")
     if age is not None and age > _STALE_SECONDS:
         hours = age // 3600
         warnings.append(
-            f"最終同期から {hours} 時間経過。索引が古い可能性があります"
+            f"{hours} hours since last sync. Index may be stale"
         )
 
-    # 構造的欠落: issue_items はあるが chunks が極端に少ない
-    # pr_review を含めて比較する（review comment 比率の高いリポジトリでの過検知防止。issue #35）
+    # Structural gap: issue_items exists but chunks are extremely few
+    # Include pr_review in comparison (prevent false positives on high-review repos. Issue #35)
     total_issue_chunks = chunk_counts.get("issue", 0) + chunk_counts.get("pr_review", 0)
     if items_in_db > 0 and total_issue_chunks < items_in_db // 2:
         warnings.append(
-            f"issue_items は {items_in_db} 件あるが chunks[issue]+chunks[pr_review] は {total_issue_chunks} 件。"
-            "bot 除外（SHIORI_INDEX_BOT_LOGINS）または索引欠落の可能性があります"
+            f"issue_items has {items_in_db} rows but chunks[issue]+chunks[pr_review] has {total_issue_chunks}."
+            "Bot exclusion (SHIORI_INDEX_BOT_LOGINS) or indexing gap possible"
         )
 
-    # 未同期カテゴリ: sync_state にカーソルがない種類
+    # Unsynced categories: kinds without cursor in sync_state
     all_kinds = {"docs", "issues", "issue_comments", "pr_review_comments"}
     missing = [k for k in all_kinds if k not in cursors]
     if missing:
         warnings.append(
-            f"未同期の種類があります: {', '.join(missing)}。"
-            "shiori_ingest で差分同期してください"
+            f"Unsynced categories: {', '.join(missing)}."
+            "Please run shiori_ingest for diff sync"
         )
 
     return warnings
@@ -847,13 +725,7 @@ def _build_warnings(
 
 @mcp.tool(name="shiori_status")
 def status() -> dict[str, Any]:
-    """索引の鮮度と健全性を返す。リポジトリごとに最終同期の完了時刻（last_synced_at）・
-    経過秒数（age_seconds）・実行経路（cli / runner / mcp / auto）・直近の追加件数
-    （docs_updated / issues_indexed / code_added）・チャンク総数内訳（chunks）・
-    code_chunks・issue_items 全件数・差分同期カーソル・警告（warnings）を返す。
-    「索引は最新か?」の判断に使う:
-    age_seconds が小さければ同期済み、大きい／last_synced_at が null なら
-    shiori_ingest で差分同期すること。warnings があれば索引に異常がある可能性。"""
+    """Index freshness and health. Per-repo: last_synced_at, age_seconds, route, counts, items, cursor, warnings."""
     with _conn() as conn:
         runs = db.get_sync_runs(conn)
         repos: dict[str, Any] = {}

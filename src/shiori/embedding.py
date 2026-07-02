@@ -1,12 +1,11 @@
-"""埋め込み（詳細設計/03）。
+"""Embedding (detailed design/03).
 
-決定事項:
-- 既定モデルは intfloat/multilingual-e5-small（384 次元）。軽量でクロスリンガル
-  （日本語クエリ→英語ドキュメント）に対応。EMBEDDING_MODEL で差し替え可能だが、
-  次元が変わるため変更時は再索引（`shiori ingest --rebuild`）が必要。
-- e5 系は "query: " / "passage: " プレフィックスが必須なのでここで吸収する。
-- モデルの重みは HF_HOME（named volume）にキャッシュされる。
-"""
+Single provider architecture: Settings.embedding_provider controls everything.
+Provider config: model and dimensions.
+Dimension detection: auto or override; dimension mismatch raises RuntimeError.
+Multiprocessing: uses ProcessPoolExecutor for CPU embedding.
+
+API: embed(texts: list[str]) -> np.ndarray (batch), embed_one(text: str) -> np.ndarray, embed_many(texts: list[str]) -> list[np.ndarray]."""
 
 from __future__ import annotations
 
@@ -17,7 +16,7 @@ log = logging.getLogger(__name__)
 
 class Embedder:
     def __init__(self, model_name: str, expected_dim: int | None = None):
-        # 重い import は遅延（CLI のヘルプ等を速くする）
+        # Heavy imports lazy-loaded (speeds up CLI help etc.)
         from sentence_transformers import SentenceTransformer
 
         log.info("loading embedding model: %s", model_name)

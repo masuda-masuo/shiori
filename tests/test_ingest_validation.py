@@ -1,4 +1,4 @@
-"""_do_sync の allowlist 検証と ingest の rebuild ガードの単体テスト（issue #63）。"""
+"""Unit tests for _do_sync allowlist validation and ingest rebuild guard (issue #63)."""
 
 from __future__ import annotations
 
@@ -10,31 +10,31 @@ from shiori.mcp_server import _do_sync, ingest
 
 
 # ===================================================================
-# _do_sync: allowlist 検証
+# _do_sync: allowlist validation
 # ===================================================================
 
 
 class TestDoSyncAllowlist:
-    """_do_sync の repo 引数 allowlist 検証。
+    """_do_sync repo argument allowlist validation.
 
-    allowlist 検証はロック取得前に行われるため、settings のモックのみでテスト可能。
+    Allowlist validation runs before lock acquisition, so only settings mock is needed.
     """
 
     def test_valid_repo_passes_validation(self):
-        """settings.repos に含まれる repo は検証通過（ロック取得以降で失敗しても ValueError は出ない）。"""
+        """repo in settings.repos passes validation (failure after lock does not raise ValueError)."""
         with (
             patch("shiori.mcp_server.settings") as mock_settings,
             patch("shiori.mcp_server._sync_lock") as mock_lock,
         ):
             mock_settings.repos = ["owner/repo", "owner2/repo2"]
-            mock_lock.acquire.return_value = False  # ロック取得失敗 → skipped
+            mock_lock.acquire.return_value = False  # lock acquisition failed → skipped
 
             result = _do_sync(repos=["owner/repo"])
             assert result["status"] == "skipped"
-            assert result["reason"] == "同期が既に実行中です"
+            assert result["reason"] == "sync already running"
 
     def test_invalid_repo_raises_value_error(self):
-        """settings.repos に含まれない repo は ValueError。"""
+        """repo not in settings.repos raises ValueError."""
         with patch("shiori.mcp_server.settings") as mock_settings:
             mock_settings.repos = ["owner/repo"]
 
@@ -42,7 +42,7 @@ class TestDoSyncAllowlist:
                 _do_sync(repos=["evil/repo"])
 
     def test_partially_invalid_raises(self):
-        """一部だけ無効な repo が混ざっていても ValueError。"""
+        """Raises ValueError even if only some repos are invalid."""
         with patch("shiori.mcp_server.settings") as mock_settings:
             mock_settings.repos = ["owner/repo"]
 
@@ -50,7 +50,7 @@ class TestDoSyncAllowlist:
                 _do_sync(repos=["owner/repo", "evil/repo"])
 
     def test_repos_none_skips_validation(self):
-        """repos=None は検証不要（settings.repos を使うため）。"""
+        """repos=None skips validation (uses settings.repos)."""
         with (
             patch("shiori.mcp_server.settings") as mock_settings,
             patch("shiori.mcp_server._sync_lock") as mock_lock,
@@ -59,7 +59,7 @@ class TestDoSyncAllowlist:
             mock_lock.acquire.return_value = False
 
             result = _do_sync(repos=None)
-            assert result["status"] == "skipped"  # 検証通過、ロックで skip
+            assert result["status"] == "skipped"  # validation passed, skipped by lock
 
     def test_error_message_includes_invalid_repo(self):
         """エラーメッセージに無効な repo 名が含まれる。"""
@@ -105,7 +105,7 @@ class TestIngestRebuildGuard:
     """
 
     def test_rebuild_true_blocked_by_default(self):
-        """allow_rebuild=False（既定）では rebuild=True は ValueError。"""
+        """rebuild=True raises ValueError when allow_rebuild=False (default)."""
         with (
             patch("shiori.mcp_server.settings") as mock_settings,
             patch("shiori.mcp_server._do_sync") as mock_do_sync,

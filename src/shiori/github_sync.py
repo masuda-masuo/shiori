@@ -1,24 +1,15 @@
-'''データ取り込みと同期（詳細設計/01）。
+'''Data fetching and sync (detailed design/01).
 
-決定事項:
-- docs は git clone / pull。ファイル単位の content ハッシュを doc_files に保持し、
-  変化したファイルだけ再チャンク・再埋め込みする。削除されたファイルの索引も消す。
-- issue/PR は REST API の repo 横断エンドポイント＋ `since`（updated_at カーソル）で差分同期:
-    - GET /repos/{o}/{r}/issues            (PR を含む。本文)
-    - GET /repos/{o}/{r}/issues/comments    (issue/PR コメント)
-    - GET /repos/{o}/{r}/pulls/comments     (レビューコメント。path/line/diff_hunk 付き)
-- bot コメント（user.type == "Bot" または login が "[bot]" で終わる）は索引から除外する。
-  ただし SHIORI_INDEX_BOT_LOGINS に列挙された login は allowlist として索引対象にする（issue #25）。
-  生データは issue_items に is_bot=true で保持する（read_issue では表示する）。
-- PR の diff 自体は索引しない。レビューコメントには diff_hunk を文脈として付与する。
-- code は sync_docs と同一クローンを共有し、sha デルタで変化ファイルのみ再索引する（issue #33）。
-- PR 変更ファイルマップはメタデータのみ同期・保持し、コンテンツ（patch）は GitHub MCP に委譲する（issue #54）。
-- 初回／rebuild のバルク経路では、ChunkBuffer により埋め込みをファイル横断でバッチ化し、
-  チャンク挿入をバルク化＋commit を粗くする（issue #72）。
-- _git_fetch_ref / _git_delete_ref は PR head ファイル取得のための共通プリミティブ（issue #81）。
-  ワーキングツリーを変更せずに任意の ref からファイルを読み取るために使う。
-認証は TokenProvider 抽象経由（詳細設計/09）。git は http.extraHeader でトークンを注入し、
-API は httpx の Auth フックでリクエスト毎に注入する。
+Decisions:
+- docs: git clone/pull; changed files re-chunked/re-embedded; deleted files removed from index.
+- issue/PR: REST API cross-repo endpoints + `since` (updated_at cursor) incremental sync.
+- Bot comments excluded; allowlist via SHIORI_INDEX_BOT_LOGINS (issue #25).
+- PR diffs not indexed; review comments include diff_hunk as context.
+- code: shares same clone; sha-delta re-indexes only changed files (issue #33).
+- PR change file maps: metadata only; content delegated to GitHub MCP (issue #54).
+- Bulk path: ChunkBuffer batches across files, bulk-inserts chunks, coarsens commits (issue #72).
+- _git_fetch_ref / _git_delete_ref: PR head file primitives (issue #81).
+Auth via TokenProvider (detailed design/09); git via http.extraHeader; API via httpx Auth hook.
 '''
 
 from __future__ import annotations
@@ -68,7 +59,7 @@ def _is_bot(user: dict | None) -> bool:
 
 
 def _should_index(is_bot: bool, author: str | None, settings: Settings) -> bool:
-    """bot でも allowlist に含まれていれば索引対象とする（issue #25）。"""
+    """Allow indexing even for bot comments if login is in allowlist (issue #25)."""
     if not is_bot:
         return True
     if author and author.lower() in settings.index_bot_logins:
@@ -76,30 +67,26 @@ def _should_index(is_bot: bool, author: str | None, settings: Settings) -> bool:
     return False
 
 
-# 制御文字除去用の正規表現: 改行(\n=0x0A)とタブ(\t=0x09)以外の制御文字(0x00-0x1F)にマッチ
+# Regex for control char removal: matches control chars (0x00-0x1F) except newline (\n=0x0A) and tab (\t=0x09)
 _CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0B-\x1F]")
 
 
 def _clean_text(s: str | None) -> str:
-    """GitHub API から取得したテキストの制御文字を正規化する（issue #73）。
-
-    PostgreSQL の text 型は NUL (0x00) を格納できず、埋め込みモデルの
-    入力としても制御文字はノイズとなるため、改行・タブ以外の制御文字を除去する。
-    """
+    """Normalize control characters from GitHub API text (issue #73).
+"""
     if not s:
         return ""
     return _CONTROL_CHARS_RE.sub("", s)
 
 
 # ---------------------------------------------------------------------------
-# ChunkBuffer: バルク経路用の埋め込み・挿入バッファ（issue #72）
+# ChunkBuffer: batch embed/insert buffer for bulk path (issue #72)
 # ---------------------------------------------------------------------------
 
 class ChunkBuffer:
-    """チャンクを蓄積し、バッチ埋め込み＋バルク挿入＋粗粒度 commit で高速化する。
-
-    増分経路では使わず、初回／rebuild（バルク経路）でのみ使用する。
-    """
+    """Accumulate chunks, batch-embed, bulk-insert, coarse-commit for high throughput.
+    Incremental path unused; initial/rebuild only (detailed design/01, 02, 10).
+"""
 
     def __init__(
         self,
@@ -123,7 +110,7 @@ class ChunkBuffer:
             prog_lang: str | None = None, symbols: str | None = None,
             created_at=None, updated_at=None, url: str | None = None,
     ) -> None:
-        """チャンクをバッファに追加する。batch_size に達したら自動 flush。"""
+        """Add chunk to buffer. Auto-flushes at batch_size."""
         self._items.append({
             "chunk_key": chunk_key, "chunk_index": chunk_index,
             "source_type": source_type, "repo": repo, "content": content,
@@ -134,7 +121,7 @@ class ChunkBuffer:
             "prog_lang": prog_lang, "symbols": symbols,
             "created_at": created_at, "updated_at": updated_at,
             "url": url,
-            # embedding プレースホルダ（flush 時に埋める）
+            # Embedding placeholder (filled at flush time)
             "embedding": None,
         })
         self._texts.append(content)
@@ -142,7 +129,7 @@ class ChunkBuffer:
             self.flush()
 
     def flush(self) -> int:
-        """バッファをフラッシュ: 一括埋め込み → バルク挿入 → commit。返り値は挿入件数。"""
+        """Flush buffer: batch embed → bulk insert → commit. Returns insert count."""
         if not self._items:
             return 0
         n = len(self._items)
@@ -165,14 +152,14 @@ class ChunkBuffer:
 
 
 def _redact(text: str) -> str:
-    """URL に埋め込まれた認証情報（x-access-token:...@ 等）をマスクする。"""
+    """Mask auth credentials embedded in URLs (x-access-token:...@ etc.)."""
     return re.sub(r"https://[^@\s/]+@", "https://", text)
 
 
 def _git(args: list[str], cwd: str | None = None) -> str:
-    # cwd が指定されている場合、安全のため safe.directory を明示的に設定する。
-    # app/ingest（root）と runner（非root）が /data/repos を共有する構成で
-    # git の dubious ownership エラーを防ぐ（issue #48）。
+    # When cwd is specified, explicitly set safe.directory for security.
+    # app/ingest (root) and runner (non-root) share /data/repos;
+    # prevents git dubious ownership errors (issue #48).
     cmd = ["git"]
     if cwd:
         cmd += ["-c", f"safe.directory={cwd}"]
@@ -188,8 +175,8 @@ def _git(args: list[str], cwd: str | None = None) -> str:
         err = _redact(out.stderr.strip())
         hint = ""
         if "Authentication failed" in err or "could not read Username" in err:
-            hint = ("（private リポジトリには GITHUB_TOKEN が必要です。"
-                    "公開リポジトリの場合はリポジトリ名を確認してください）")
+            hint = ("Private repos require GITHUB_TOKEN."
+                    "For public repos, verify the repository name.")
         raise RuntimeError(
             f"git {args[0]} failed (exit {out.returncode}): {err}{hint}"
         )
@@ -197,12 +184,8 @@ def _git(args: list[str], cwd: str | None = None) -> str:
 
 
 def _auth_args(provider: TokenProvider) -> list[str]:
-    """git の認証ヘッダを `-c http.extraHeader=...` 引数として返す。
-
-    トークンを clone URL に埋め込むと `.git/config` に平文で永続化され、短期トークンでは
-    次回 fetch 時に失効済みトークンが残る。毎回ヘッダで注入することでこれを避ける。
-    認証不要（匿名）なら空リストを返す。
-    """
+    """Return git auth header as `-c http.extraHeader=...` args.
+    Token clipped from clone URL."""
     token = provider.get_token()
     if not token:
         return []
@@ -216,15 +199,8 @@ def _git_fetch_ref(
     provider: TokenProvider | None = None,
     tmp_ref: str | None = None,
 ) -> str:
-    """指定 ref を shallow fetch し、一時 ref 名を返す（issue #81）。
-
-    tmp_ref が None の場合は ``refs/shiori/tmp-{uuid}`` を自動生成。
-    呼び出し元は使用後に _git_delete_ref(tmp_ref) を呼ぶこと。
-    ワーキングツリーを変更しないため checkout 不要。
-
-    並行リクエストで FETCH_HEAD が上書きされる問題を避けるため、
-    固定名ではなく UUID を含む一時 ref に fetch する。
-    """
+    """Shallow-fetch a ref and return a temp ref name (issue #81).
+    tmp_ref=None skips fetch. Returns SHA of fetched ref."""
     resolved = tmp_ref or f"refs/shiori/tmp-{uuid.uuid4().hex}"
     auth = _auth_args(provider) if provider else []
     _git(auth + ["fetch", "origin", f"{ref}:{resolved}", "--depth=1"], cwd=cwd)
@@ -232,18 +208,16 @@ def _git_fetch_ref(
 
 
 def _git_delete_ref(tmp_ref: str, cwd: str | None = None) -> None:
-    """一時 ref を削除する。存在しない場合は無視（issue #81）。"""
+    """Delete a temporary ref (issue #81). No-op if not found."""
     try:
         _git(["update-ref", "-d", tmp_ref], cwd=cwd)
     except RuntimeError:
-        pass  # 既に削除済み等
+        pass  # Already deleted etc.
 
 
 class _GitHubAuth(httpx.Auth):
-    """httpx の Auth フック。リクエストごとに provider からトークンを得て注入する。
-
-    長時間の ingest でも、ページネーション途中で provider が自動再発行するため失効しない。
-    """
+    """httpx Auth hook. Gets token from provider per request.
+    Refreshes token near expiry to survive long ingests."""
 
     def __init__(self, provider: TokenProvider) -> None:
         self._provider = provider
@@ -263,16 +237,13 @@ def sync_docs(
     provider: TokenProvider,
     buffer: ChunkBuffer | None = None,
 ) -> int:
-    """リポジトリの Markdown を同期し、変化分だけ索引する。返り値は更新ファイル数。
-
-    buffer が指定された場合（バルク経路）、埋め込み・挿入をバッファに委譲し、
-    commit もバッファ側で行う。
-    """
+    """Sync repo Markdown; index only changed files. Returns update count.
+    When buffer specified (bulk path), uses ChunkBuffer for batch embedding."""
     repo_dir = settings.repo_dir(repo)
     remote = f"https://github.com/{repo}.git"
     auth = _auth_args(provider)
     if os.path.isdir(os.path.join(repo_dir, ".git")):
-        # 旧方式でトークン入り URL が .git/config に残っていても上書きする（冪等）。
+        # Overwrite even if old token-embedded URL remains in .git/config (idempotent).
         _git(["remote", "set-url", "origin", remote], cwd=repo_dir)
         _git(auth + ["fetch", "--depth=1", "origin"], cwd=repo_dir)
         _git(["reset", "--hard", "origin/HEAD"], cwd=repo_dir)
@@ -281,7 +252,7 @@ def sync_docs(
         _git(auth + ["clone", "--depth=1", remote, repo_dir])
     head = _git(["rev-parse", "HEAD"], cwd=repo_dir)
 
-    # 現在のファイル集合と既存索引を突き合わせる
+    # Diff current file set against existing index
     current: dict[str, str] = {}
     for root, dirs, files in os.walk(repo_dir):
         dirs[:] = [d for d in dirs if d != ".git"]
@@ -377,10 +348,10 @@ def sync_docs(
 
 
 # ---------------------------------------------------------------------------
-# code（git 同一クローン共有、sha デルタ）
+# code (shares same git clone, sha delta)
 # ---------------------------------------------------------------------------
 
-# os.walk でスキップするディレクトリ名
+# Directory names to skip in os.walk
 _EXCLUDE_DIRS = {
     ".git",
     "node_modules",
@@ -392,7 +363,7 @@ _EXCLUDE_DIRS = {
     "target",
 }
 
-# コード索引から除外するファイル拡張子（バイナリ・アセット等）
+# File extensions excluded from code indexing (binary/asset etc.)
 _EXCLUDE_EXTENSIONS = {
     ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".webp",
     ".woff", ".woff2", ".ttf", ".eot", ".otf",
@@ -406,12 +377,8 @@ _EXCLUDE_EXTENSIONS = {
 
 
 def _is_code_file(filename: str, settings: Settings) -> bool:
-    """コード索引対象のファイルか判定する。
-
-    - ドキュメント拡張子（.md / .mdx / .markdown）は除外
-    - バイナリ・アセット拡張子は除外
-    - SHIORI_CODE_EXTENSIONS が設定されていれば、その拡張子のみ対象
-    """
+    """Determine if the relative path is a code file that should be indexed.
+"""
     lower = filename.lower()
     if lower.endswith((".md", ".mdx", ".markdown")):
         return False
@@ -423,7 +390,7 @@ def _is_code_file(filename: str, settings: Settings) -> bool:
 
 
 def _is_excluded_by_glob(rel_path: str, settings: Settings) -> bool:
-    """除外 glob パターンにマッチするか。"""
+    """Check if path matches excluded glob patterns."""
     for pattern in settings.code_exclude_globs:
         if fnmatch.fnmatch(rel_path, pattern):
             return True
@@ -438,37 +405,25 @@ def sync_code(
     provider: TokenProvider,
     buffer: ChunkBuffer | None = None,
 ) -> int:
-    """リポジトリのソースコードを同期し、変化分だけ索引する（詳細設計/10 Step 3）。
-
-    sync_docs と同一クローンを共有するため、git pull は sync_docs 側で完了済み。
-    sha デルタで変化したファイルのみ再チャンク・再埋め込みする。
-    HEAD sha を sync_state(kind='code') カーソルに保存し、HEAD 不変時は walk を
-    スキップする（設計 10 決定 8 のカーソル管理）。
-
-    buffer が指定された場合（バルク経路）、埋め込み・挿入をバッファに委譲する。
-
-    Returns
-    -------
-    int
-        更新（追加・変更・削除）したファイル数。
-    """
+    """Sync source code; index only changed files (detailed design/10 Step 3).
+    Shares clone with sync_docs."""
     if not settings.index_code:
         return 0
 
     repo_dir = settings.repo_dir(repo)
 
     if not os.path.isdir(repo_dir):
-        log.warning("sync_code: クローンが存在しません（sync_docs 未実行?）")
+        log.warning("sync_code: clone not found (sync_docs not run?)")
         return 0
 
     head = _git(["rev-parse", "HEAD"], cwd=repo_dir)
 
-    # カーソルチェック: HEAD が前回と同じなら walk をスキップ
+    # Cursor check: skip walk if HEAD unchanged since last run
     prev_head = get_cursor(conn, repo, "code")
     if prev_head == head:
         return 0
 
-    # 現在のコードファイル集合（sha 付き）
+    # Current code file set (with sha)
     current: dict[str, str] = {}
     for root, dirs, files in os.walk(repo_dir):
         dirs[:] = [d for d in dirs if d not in _EXCLUDE_DIRS]
@@ -482,7 +437,7 @@ def sync_code(
             with open(abspath, "rb") as fp:
                 current[rel] = hashlib.sha256(fp.read()).hexdigest()
 
-    # 既存索引（kind='code' の doc_files 行）
+    # Existing index (doc_files rows with kind='code')
     with conn.cursor() as cur:
         cur.execute(
             "SELECT path, content_sha FROM doc_files WHERE repo = %s AND kind = 'code'",
@@ -493,7 +448,7 @@ def sync_code(
     removed = set(indexed) - set(current)
     changed = [p for p, sha in current.items() if indexed.get(p) != sha]
 
-    # 削除
+    # Delete removed files
     for path in removed:
         delete_chunks_by_key(conn, f"code:{repo}:{path}")
         with conn.cursor() as cur:
@@ -503,7 +458,7 @@ def sync_code(
             )
         log.info("removed code %s", path)
 
-    # 変更・追加ファイルの再索引
+    # Re-index changed/added files
     for path in changed:
         abspath = os.path.join(repo_dir, path)
         try:
@@ -521,7 +476,7 @@ def sync_code(
             prog_lang = _detect_prog_lang(path)
             if buffer is not None:
                 for c in chunks:
-                    # permalink は commit_sha を使用（行ズレに強い。should-fix #5）
+                    # Permalink uses commit_sha (resilient to line drift. Should-fix #5)
                     url = (
                         f"https://github.com/{repo}/blob/{head}/{path}"
                         f"#L{c.start_line}-L{c.end_line}"
@@ -534,7 +489,7 @@ def sync_code(
                         source_type="code",
                         repo=repo,
                         path=path,
-                        language=None,  # code は language=NULL（決定4）
+                        language=None,  # code uses language=NULL (decision 4)
                         heading_path=c.heading_path,
                         content=c.content,
                         line=c.start_line,
@@ -547,7 +502,7 @@ def sync_code(
             else:
                 vectors = embedder.embed_passages([c.content for c in chunks])
                 for c, v in zip(chunks, vectors):
-                    # permalink は commit_sha を使用（行ズレに強い。should-fix #5）
+                    # Permalink uses commit_sha (resilient to line drift. Should-fix #5)
                     url = (
                         f"https://github.com/{repo}/blob/{head}/{path}"
                         f"#L{c.start_line}-L{c.end_line}"
@@ -561,7 +516,7 @@ def sync_code(
                         source_type="code",
                         repo=repo,
                         path=path,
-                        language=None,  # code は language=NULL（決定4）
+                        language=None,  # code uses language=NULL (decision 4)
                         heading_path=c.heading_path,
                         content=c.content,
                         embedding=v,
@@ -573,7 +528,7 @@ def sync_code(
                         url=url,
                     )
 
-        # doc_files に kind='code' で記録
+        # Record in doc_files with kind='code'
         with conn.cursor() as cur:
             cur.execute(
                 """
@@ -599,7 +554,7 @@ def sync_code(
 # ---------------------------------------------------------------------------
 
 def _api_pages(client: httpx.Client, url: str, params: dict) -> "list[dict]":
-    """Link ヘッダに従って全ページを集める。"""
+    """Paginate all pages via Link header."""
     items: list[dict] = []
     next_params: dict | None = params
     while url:
@@ -607,7 +562,7 @@ def _api_pages(client: httpx.Client, url: str, params: dict) -> "list[dict]":
         resp.raise_for_status()
         items.extend(resp.json())
         url = resp.links.get("next", {}).get("url")
-        next_params = None   # ← {} ではなく None。next URL の query をそのまま使う
+        next_params = None   # None not {}; preserves next URL query params as-is
     return items
 
 
@@ -651,11 +606,8 @@ def _issue_title_state(
 def _propagate_issue_state(
     conn: psycopg.Connection, repo: str, issue_no: int, state: str | None
 ) -> None:
-    """issue_items の state 変更を chunks に伝播する（issue #56）。
-
-    _should_index の結果やコメント/レビューの再取得有無に関わらず、
-    親 issue/PR の state が変わったら全チャンクの state を一括更新する。
-    """
+    """Propagate issue_items state changes to chunks (issue #56).
+"""
     with conn.cursor() as cur:
         cur.execute(
             "UPDATE chunks SET state = %s WHERE repo = %s AND issue_no = %s",
@@ -743,34 +695,28 @@ def _sync_pr_changes(
     repo: str,
     issue_no: int,
 ) -> None:
-    """PR の変更ファイルマップを同期する（issue #54）。
-
-    GET /repos/{repo}/pulls/{issue_no} で head_sha を取得し、
-    保存済みの head_sha と比較。変化があるか未保存の場合のみ
-    GET /repos/{repo}/pulls/{issue_no}/files でファイル一覧を取得して upsert する。
-
-    コンテンツ（patch）は取得・保持しない（GitHub MCP に委譲）。
-    """
-    # 1. PR 詳細を取得して head_sha を確認
+    """Sync PR change file maps (issue #54).
+    GET /repos/{repo}/pulls/{issue_number}/files"""
+    # 1. Fetch PR details to get head_sha
     try:
         resp = client.get(f"{API}/repos/{repo}/pulls/{issue_no}")
         resp.raise_for_status()
         pr_data = resp.json()
         head_sha = pr_data.get("head", {}).get("sha")
         if not head_sha:
-            log.debug("PR #%d: head_sha が取得できませんでした", issue_no)
+            log.debug("PR #%d: could not obtain head_sha", issue_no)
             return
     except httpx.HTTPError as exc:
-        log.warning("PR #%d の詳細取得に失敗: %s", issue_no, exc)
+        log.warning("PR #%d: failed to fetch details: %s", issue_no, exc)
         return
 
-    # 2. head_sha が前回と同じならスキップ
+    # 2. Skip if head_sha unchanged
     prev_sha = get_pr_head_sha(conn, repo, issue_no)
     if prev_sha == head_sha:
-        log.debug("PR #%d: head_sha 変更なし、スキップ", issue_no)
+        log.debug("PR #%d: head_sha unchanged, skipping", issue_no)
         return
 
-    # 3. ファイル一覧を取得
+    # 3. Fetch file list
     try:
         files = _api_pages(
             client,
@@ -779,12 +725,12 @@ def _sync_pr_changes(
         )
         log.debug("PR #%d: %d files fetched", issue_no, len(files))
     except httpx.HTTPError as exc:
-        log.warning("PR #%d のファイル一覧取得に失敗: %s", issue_no, exc)
+        log.warning("PR #%d: failed to fetch file list: %s", issue_no, exc)
         return
 
     # 4. upsert
     upsert_pr_changes(conn, repo, issue_no, head_sha, files)
-    log.info("PR #%d: 変更ファイルマップを更新（head_sha=%s, %d files）",
+    log.info("PR #%d: updated change file map (head_sha=%s, %d files)",
              issue_no, head_sha[:7], len(files))
 
 
@@ -796,11 +742,8 @@ def sync_issues(
     provider: TokenProvider,
     buffer: ChunkBuffer | None = None,
 ) -> int:
-    """issue / PR / コメント / レビューコメントを差分同期し索引する。
-
-    buffer が指定された場合（バルク経路）、埋め込み・挿入をバッファに委譲し、
-    commit 粒度を粗くする。
-    """
+    """Incremental sync of issues/PRs/comments/reviews.
+    When buffer specified (bulk path), uses ChunkBuffer for batch embedding."""
     headers = {
         "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
@@ -810,7 +753,7 @@ def sync_issues(
     with httpx.Client(
         headers=headers, auth=_GitHubAuth(provider), timeout=30.0
     ) as client:
-        # --- 本文 (issues endpoint は PR も含む) ---
+        # --- Body (issues endpoint includes PRs) ---
         since = get_cursor(conn, repo, "issues")
         params = {
             "state": "all",
@@ -860,7 +803,7 @@ def sync_issues(
                     buffer=buffer,
                 )
                 n_indexed += 1
-            # PR の場合は変更ファイルマップも同期
+            # Sync change file maps for PRs
             if kind == "pr":
                 _sync_pr_changes(client, conn, repo, no)
             if buffer is None:
@@ -868,7 +811,7 @@ def sync_issues(
         if items:
             set_cursor(conn, repo, "issues", items[-1]["updated_at"])
 
-        # --- issue/PR コメント ---
+        # --- Issue/PR comments ---
         since = get_cursor(conn, repo, "issue_comments")
         params = {"sort": "updated", "direction": "asc", "per_page": 100}
         if since:
@@ -905,7 +848,7 @@ def sync_issues(
         if comments:
             set_cursor(conn, repo, "issue_comments", comments[-1]["updated_at"])
 
-        # --- PR レビューコメント (path/line/diff_hunk 付き) ---
+        # --- PR review comments (with path/line/diff_hunk) ---
         since = get_cursor(conn, repo, "pr_review_comments")
         params = {"sort": "updated", "direction": "asc", "per_page": 100}
         if since:
@@ -917,7 +860,7 @@ def sync_issues(
             author = (c.get("user") or {}).get("login")
             is_bot = _is_bot(c.get("user"))
             line = c.get("line") or c.get("original_line")
-            # diff_hunk を文脈として本文に付与する（diff 自体は索引しない決定の範囲内）
+            # Append diff_hunk to body as context (within decision not to index diffs themselves)
             body = _clean_text(c.get("body") or "")
             diff_hunk = c.get("diff_hunk")
             if diff_hunk:

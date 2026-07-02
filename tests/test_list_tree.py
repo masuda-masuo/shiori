@@ -99,7 +99,7 @@ class TestWalkCodeFiles:
             result = _walk_code_files(tmp, "")
             assert "main.py" in result
             assert "utils.py" in result
-            assert "README.md" not in result  # ドキュメントは除外
+            assert "README.md" not in result  # docs excluded
 
     def test_exclude_dirs(self):
         """除外ディレクトリ内のファイルはスキップされる"""
@@ -176,8 +176,8 @@ class TestWalkCodeFiles:
             assert "tests/test_main.py" in result
             assert "pyproject.toml" in result
             assert "docs/guide.md" not in result  # ドキュメント
-            assert "node_modules/pkg/index.js" not in result  # 除外ディレクトリ
-            assert "dist/bundle.min.js" not in result  # 除外ディレクトリ+min.js
+            assert "node_modules/pkg/index.js" not in result  # excluded dir
+            assert "dist/bundle.min.js" not in result  # excluded dir+min.js
 
     def test_extension_filter_dot(self):
         """extension 指定（ドット付き）でウォーク中にフィルタされる"""
@@ -243,34 +243,34 @@ class TestListTreeSourceTypeValidation:
         self._call_list_tree(None)
 
     def test_invalid_raises(self):
-        """無効な source_type は ValueError"""
+        """Invalid source_type raises ValueError"""
         with (
             patch("shiori.mcp_server.settings"),
             patch("shiori.mcp_server._conn"),
-            pytest.raises(ValueError, match="無効な source_type"),
+            pytest.raises(ValueError, match="Invalid source_type"),
         ):
             list_tree(source_type="issue")
 
     def test_empty_string_raises(self):
-        """空文字列も無効"""
+        """Empty string is also invalid"""
         with (
             patch("shiori.mcp_server.settings"),
             patch("shiori.mcp_server._conn"),
-            pytest.raises(ValueError, match="無効な source_type"),
+            pytest.raises(ValueError, match="Invalid source_type"),
         ):
             list_tree(source_type="")
 
     def test_random_string_raises(self):
-        """任意の文字列は無効"""
+        """Arbitrary string is also invalid"""
         with (
             patch("shiori.mcp_server.settings"),
             patch("shiori.mcp_server._conn"),
-            pytest.raises(ValueError, match="無効な source_type"),
+            pytest.raises(ValueError, match="Invalid source_type"),
         ):
             list_tree(source_type="xyz")
 
 
-# ── helpers for end-to-end tests ──
+# ── Helpers for end-to-end tests ──
 
 
 def _entries_to_paths(entries: list[dict]) -> list[str]:

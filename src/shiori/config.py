@@ -1,7 +1,6 @@
 """shiori configuration.
 
-すべて環境変数から読む。docker compose の `.env` 経由で渡す想定。
-"""
+Everything reads from environment variables. Passed via docker compose `.env`."""
 
 from __future__ import annotations
 
@@ -15,41 +14,25 @@ def _repos_from_env() -> list[str]:
 
 
 def _index_bot_logins_from_env() -> set[str]:
-    """SHIORI_INDEX_BOT_LOGINS を小文字の set で返す。
-
-    カンマ区切り。例: ``mcp-launcher-masuda[bot]``
-    ここに列挙された bot login は is_bot=true でも索引対象にする（allowlist）。
-    """
+    """Return SHIORI_INDEX_BOT_LOGINS as a lowercase set."""
     raw = os.environ.get("SHIORI_INDEX_BOT_LOGINS", "")
     return {s.strip().lower() for s in raw.split(",") if s.strip()}
 
 
 def _code_extensions_from_env() -> set[str]:
-    """SHIORI_CODE_EXTENSIONS を小文字の set で返す。
-
-    カンマ区切り（ドット付き）。例: ``.py,.js,.ts,.go,.rs``
-    未設定なら None（= 全コード拡張子が対象）。
-    """
+    """Return SHIORI_CODE_EXTENSIONS as a lowercase set."""
     raw = os.environ.get("SHIORI_CODE_EXTENSIONS", "")
     return {s.strip().lower() for s in raw.split(",") if s.strip()}
 
 
 def _code_exclude_globs_from_env() -> list[str]:
-    """SHIORI_CODE_EXCLUDE_GLOBS をリストで返す。
-
-    カンマ区切り。glob パターン（例: ``**/test_*, **/migrations/*``）。
-    """
+    """Return SHIORI_CODE_EXCLUDE_GLOBS as a list."""
     raw = os.environ.get("SHIORI_CODE_EXCLUDE_GLOBS", "")
     return [s.strip() for s in raw.split(",") if s.strip()]
 
 
 def _allow_rebuild_from_env() -> bool:
-    """SHIORI_ALLOW_REBUILD を bool で返す。
-
-    MCP ツール shiori_ingest からの rebuild=True（全 TRUNCATE）を許可するか。
-    既定 false。運用上必要な場合のみ true に設定する（issue #63）。
-    CLI 経路（python -m shiori ingest --rebuild）はこの設定に依らず常に許可。
-    """
+    """Return SHIORI_ALLOW_REBUILD as a bool."""
     return os.environ.get("SHIORI_ALLOW_REBUILD", "").lower() in (
         "1", "true", "yes"
     )
@@ -63,28 +46,28 @@ class Settings:
             "DATABASE_URL", "postgresql://shiori:shiori@db:5432/shiori"
         )
     )
-    # 非公開リポジトリ用。公開リポジトリのみなら未設定でも動く（レート制限は厳しくなる）
+    # For private repos. Works unset with public repos only (stricter rate limits).
     github_token: str | None = field(
         default_factory=lambda: os.environ.get("GITHUB_TOKEN") or None
     )
-    # GitHub App 認証（短期トークン。詳細設計/09）。
-    # 3 つ揃えば App を優先、無ければ github_token、どちらも無ければ匿名。
+    # GitHub App authentication (short-lived token. See detailed design/09).
+    # App preferred if all 3 present; fall back to github_token; then anonymous.
     github_app_id: str | None = field(
         default_factory=lambda: os.environ.get("GITHUB_APP_ID") or None
     )
     github_app_installation_id: str | None = field(
         default_factory=lambda: os.environ.get("GITHUB_APP_INSTALLATION_ID") or None
     )
-    # 秘密鍵は PATH 優先、無ければ本文（PEM）を直接。読み込みは github_app_private_key()。
+    # Private key: PATH first, then inline PEM. Read via github_app_private_key().
     github_app_private_key_path: str | None = field(
         default_factory=lambda: os.environ.get("GITHUB_APP_PRIVATE_KEY_PATH") or None
     )
     github_app_private_key_pem: str | None = field(
         default_factory=lambda: os.environ.get("GITHUB_APP_PRIVATE_KEY") or None
     )
-    # 対象リポジトリ。"owner/name" をカンマ区切りで複数指定可
+    # Target repos. "owner/name" comma-separated, multiple allowed.
     repos: list[str] = field(default_factory=_repos_from_env)
-    # 埋め込みモデル。変更したら再索引（ingest --rebuild）が必要
+    # Embedding model. Re-index (ingest --rebuild) required after change.
     embedding_model: str = field(
         default_factory=lambda: os.environ.get(
             "EMBEDDING_MODEL", "intfloat/multilingual-e5-small"
@@ -93,54 +76,54 @@ class Settings:
     embedding_dim: int = field(
         default_factory=lambda: int(os.environ.get("EMBEDDING_DIM", "384"))
     )
-    # クローン先・作業データ
+    # Clone destination and working data.
     data_dir: str = field(
         default_factory=lambda: os.environ.get("SHIORI_DATA_DIR", "/data")
     )
-    # チャンクの最大文字数（文字基準。詳細設計/02 の決定を参照）
+    # Max chunk characters (character-based. See detailed design/02 decisions).
     chunk_max_chars: int = field(
         default_factory=lambda: int(os.environ.get("SHIORI_CHUNK_MAX_CHARS", "1200"))
     )
-    # 検索結果の既定値（詳細設計/05・06 の決定を参照）
+    # Search result defaults (see detailed design/05 and 06 decisions).
     default_top_k: int = field(
         default_factory=lambda: int(os.environ.get("SHIORI_TOP_K", "8"))
     )
     snippet_chars: int = field(
         default_factory=lambda: int(os.environ.get("SHIORI_SNIPPET_CHARS", "400"))
     )
-    # serve プロセス内のバックグラウンド自動同期間隔（秒）。0 で無効（既定）。
-    # 差分同期は数秒で終わるため、この値が「索引の古さの上限」になる。
+    # Background auto-sync interval in serve process (seconds). 0 disables (default).
+    # Diff sync finishes in seconds, so this value caps index staleness.
     sync_interval_seconds: int = field(
         default_factory=lambda: int(
             os.environ.get("SHIORI_SYNC_INTERVAL_SECONDS", "0")
         )
     )
-    # MCP サーバー (streamable HTTP)
+    # MCP server (streamable HTTP)
     mcp_host: str = field(
         default_factory=lambda: os.environ.get("SHIORI_MCP_HOST", "0.0.0.0")
     )
     mcp_port: int = field(
         default_factory=lambda: int(os.environ.get("SHIORI_MCP_PORT", "8765"))
     )
-    # bot でも索引する login の allowlist（カンマ区切り。issue #25）
-    # GitHub App 経由の投稿は [bot] 扱いになるが、ユーザーの代理として
-    # 価値のある投稿を行う bot をここに列挙することで索引対象にできる。
+    # Allowlist for indexing bot logins (comma-separated. Issue #25).
+    # Posts via GitHub App get [bot] suffix, but bots acting on
+    # behalf of users can be allowlisted here for indexing.
     index_bot_logins: set[str] = field(default_factory=_index_bot_logins_from_env)
-    # --- ソースコード索引（詳細設計/10 決定 7） ---
-    # マスタスイッチ。off だとコード索引をスキップする。
+    # --- Source code indexing (detailed design/10, decision 7) ---
+    # Master switch. Off skips code indexing entirely.
     index_code: bool = field(
         default_factory=lambda: os.environ.get("SHIORI_INDEX_CODE", "").lower()
         in ("1", "true", "yes")
     )
-    # コードとして扱う拡張子（小文字）。空/未設定 = 全コード拡張子が対象。
+    # Code file extensions (lowercase). Empty/unset = all code extensions.
     code_extensions: set[str] = field(default_factory=_code_extensions_from_env)
-    # 除外 glob パターン（カンマ区切り）。例: "**/test_*, **/migrations/*"
+    # Exclude glob patterns (comma-separated). E.g. "**/test_*, **/migrations/*"
     code_exclude_globs: list[str] = field(
         default_factory=_code_exclude_globs_from_env
     )
-    # MCP ツール shiori_ingest からの rebuild=True（全 TRUNCATE）を許可するか（issue #63）。
-    # 既定 false。運用上必要な場合のみ true に設定する。
-    # CLI 経路（python -m shiori ingest --rebuild）はこの設定に依らず常に許可。
+    # Allow rebuild=True from MCP tool shiori_ingest (full TRUNCATE). Issue #63.
+    # Default false. Set true only when operationally required.
+    # CLI path (python -m shiori ingest --rebuild) always allowed regardless.
     allow_rebuild: bool = field(default_factory=_allow_rebuild_from_env)
 
     def repo_dir(self, repo: str) -> str:
@@ -148,7 +131,7 @@ class Settings:
         return os.path.join(self.data_dir, "repos", f"{owner}__{name}")
 
     def github_app_private_key(self) -> str | None:
-        """GitHub App の秘密鍵 PEM を返す。PATH 優先、無ければ本文、どちらも無ければ None。"""
+        """Return the GitHub App private key PEM. PATH preferred, then inline text, else None."""
         if self.github_app_private_key_path:
             with open(self.github_app_private_key_path, encoding="utf-8") as fp:
                 return fp.read()
