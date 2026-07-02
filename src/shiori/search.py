@@ -185,9 +185,11 @@ def _sort_hits(
     """Sort result list by specified key and order (backward compat wrapper).
     Stable ordering: sort by PK, dedup by (target_type, target_id)."""
     if sort_by == "score":
-        key = lambda h: h.get("score", 0.0)
+        def key(h):
+            return h.get("score", 0.0)
     elif sort_by in ("updated_at", "created_at"):
-        key = lambda h: h.get(sort_by, "")
+        def key(h):
+            return h.get(sort_by, "")
     else:
         return hits
     return sorted(hits, key=key, reverse=(sort_order != "asc"))
