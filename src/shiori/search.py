@@ -21,19 +21,19 @@ _RESULT_COLS = (
     "heading_path, content, state, author, line, created_at, updated_at, url"
 )
 
-# _RESULT_COLS のカラム位置（row タプルのインデックス）
+# _RESULT_COLS column positions (row tuple indices)
 _COL_SOURCE_TYPE = 1
 _COL_STATE = 9
 _COL_UPDATED_AT = 13
 
-# 一次ソース（doc/code）の複合キー用 sentinel。
-# 二次ソースの -sp 最大値は 0（open の -0）。desc ソートで一次が前に来るには
-# sentinel > 0 が必要 → 1。_PRIMARY_DATE（"9999"）は第2要素で決着するため
-# 実質到達しない保険（inert）。
+# Sentinel for primary source (doc/code) compound key.
+# Secondary source -sp max is 0 (open is -0). For desc sort, primary comes first
+# needs sentinel > 0 → 1. _PRIMARY_DATE ("9999") is insurance;
+# effectively unreachable (inert).
 _PRIMARY_SP = 1
 _PRIMARY_DATE = "9999"
 
-# 欠損 row 用フォールバック。防御的に最下位へ沈める。
+# Fallback for missing rows. Defensively sink to lowest rank.
 _MISSING_SP = -999
 _MISSING_DATE = ""
 
@@ -118,8 +118,8 @@ def _keyword_candidates(
     conn: psycopg.Connection, query: str, filters: dict | None, limit: int
 ) -> list[tuple]:
     fsql, fparams = _filter_sql(filters)
-    # code チャンクは content（シグネチャ＋docstring）と symbols（識別子分割文字列）の
-    # 両方を pgroonga 検索する。OR 検索で片方にヒットすれば候補になる。
+    # Code chunks search both content (signature + docstring) and symbols (identifier-split text)
+    # via pgroonga. OR search: hit either to become candidate.
     with conn.cursor() as cur:
         cur.execute(
             f"""
@@ -149,18 +149,18 @@ def _rank_candidates(
         rid, score = item
         row = rows_by_id.get(rid)
         if row is None:
-            # 防御的フォールバック: 欠損行は最下位へ沈める
+            # Defensive fallback: sink missing rows to lowest rank
             return (score, _MISSING_SP, _MISSING_DATE)
 
         source_type = row[_COL_SOURCE_TYPE]
 
-        # 一次ソース（doc / code）: スコアのみ。
-        # スコア以外の tie-break 要素は sentinel で中立化し、
-        # 二次ソースの state / updated_at により不当に後回しされないようにする。
+        # Primary source (doc / code): score only.
+        # Non-score tie-break elements neutralized by sentinel,
+        # so secondary source state/updated_at does not unfairly demote them.
         if source_type in ("doc", "code"):
             return (score, _PRIMARY_SP, _PRIMARY_DATE)
 
-        # 二次ソース（issue / pr_review）: 複合 tie-break
+        # Secondary source (issue / pr_review): compound tie-break
         st = row[_COL_STATE]
         if st == "open":
             sp = 0
@@ -175,24 +175,6 @@ def _rank_candidates(
 
     result = sorted(ranked, key=_key, reverse=reverse)
     return result, "rrf"
-
-
-# 後方互換用の薄いラッパー。_sort_hits は pool 段非対応のため、
-# 新コードでは _rank_candidates を使うこと。
-def _sort_hits(
-    hits: list[dict[str, Any]], sort_by: str, sort_order: str
-) -> list[dict[str, Any]]:
-    """Sort result list by specified key and order (backward compat wrapper).
-    Stable ordering: sort by PK, dedup by (target_type, target_id)."""
-    if sort_by == "score":
-        def key(h):
-            return h.get("score", 0.0)
-    elif sort_by in ("updated_at", "created_at"):
-        def key(h):
-            return h.get(sort_by, "")
-    else:
-        return hits
-    return sorted(hits, key=key, reverse=(sort_order != "asc"))
 
 
 def keyword_search(
@@ -211,7 +193,7 @@ def keyword_search(
     pool = max(k * 4, 20)
     rows = _keyword_candidates(conn, query, filters, pool)
 
-    # 候補を (row_id, score) に分解
+    # Decompose candidates into (row_id, score)
     rows_by_id: dict[int, tuple] = {}
     scored: list[tuple[int, float]] = []
     for r in rows:
@@ -241,7 +223,7 @@ def semantic_search(
     sort_order: str = "desc",
 ) -> list[dict]:
     """Hybrid search. Fuses vector and keyword ranks via RRF.
-    Identical filtering to keyword_search."""
+    Same filtering as keyword_search."""
     k = top_k or settings.default_top_k
     pool = max(k * 4, 20)
     qvec = embedder.embed_query(query)
@@ -250,7 +232,7 @@ def semantic_search(
         kw_rows = _keyword_candidates(conn, query, filters, pool)
     except psycopg.Error:
         conn.rollback()
-        kw_rows = []  # pgroonga クエリ構文エラー等は無視して意味検索のみで返す
+        kw_rows = []  # Ignore pgroonga query syntax errors; return semantic-only results
 
     scores: dict[int, float] = {}
     rows_by_id: dict[int, tuple] = {}
@@ -263,13 +245,13 @@ def semantic_search(
         rows_by_id.setdefault(rid, row[:-1])
         scores[rid] = scores.get(rid, 0.0) + 1.0 / (RRF_K + rank + 1)
 
-    # RRF スコアで候補を並べる
+    # Sort candidates by RRF score
     ranked = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
 
-    # pool 段で source-aware な複合 tie-break を適用（issue #69）
+    # Apply source-aware compound tie-break at pool stage (issue #69)
     ranked, method = _rank_candidates(ranked, rows_by_id, sort_by, sort_order)
 
-    # tie-break 後に top-k 切り詰め
+    # Truncate to top-k after tie-break
     hits = []
     for rid, score in ranked[:k]:
         h = _row_to_hit(rows_by_id[rid], settings.snippet_chars, score)

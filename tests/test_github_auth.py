@@ -1,7 +1,7 @@
-"""github_auth のユニットテスト（詳細設計/09）。
+"""Unit tests for github_auth (detailed design/09).
 
-httpx をモックして installation token の取得・キャッシュ・再発行を検証する。
-RS256 の鍵はテスト内で生成する。
+Mocks httpx to verify installation token acquisition, caching, and re-issuance.
+RS256 keys are generated inside the test.
 """
 
 from __future__ import annotations
@@ -80,7 +80,7 @@ def test_provider_app_preferred_over_pat(clean_env, rsa_pem):
 
 
 def test_provider_app_incomplete_raises(clean_env):
-    clean_env.setenv("GITHUB_APP_ID", "123")  # installation/key 欠け
+    clean_env.setenv("GITHUB_APP_ID", "123")  # missing installation/key
     with pytest.raises(ValueError):
         build_token_provider(Settings())
 
@@ -122,10 +122,10 @@ def test_refresh_and_cache(monkeypatch, rsa_pem):
 
     assert prov.get_token() == "ghs_tok"
     assert calls["n"] == 1
-    # キャッシュ有効中は再発行しない
+    # do not re-issue while cache is valid
     assert prov.get_token() == "ghs_tok"
     assert calls["n"] == 1
-    # expiry 5 分前を過ぎたら再発行
+    # re-issue once past 5 minutes before expiry
     prov._expires_at = time.time() + 100
     prov.get_token()
     assert calls["n"] == 2
@@ -133,7 +133,7 @@ def test_refresh_and_cache(monkeypatch, rsa_pem):
 
 @pytest.mark.parametrize(
     "code,fragment",
-    [(401, "JWT が拒否"), (404, "Installation が見つかり"), (403, "権限不足")],
+    [(401, "JWT was rejected"), (404, "Installation not found"), (403, "Insufficient permissions")],
 )
 def test_refresh_error_messages(monkeypatch, rsa_pem, code, fragment):
     _mock_post(monkeypatch, lambda req: httpx.Response(code, json={"message": "x"}))

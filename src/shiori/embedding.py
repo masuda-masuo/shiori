@@ -16,7 +16,7 @@ log = logging.getLogger(__name__)
 
 class Embedder:
     def __init__(self, model_name: str, expected_dim: int | None = None):
-        # 重い import は遅延（CLI のヘルプ等を速くする）
+        # Heavy imports lazy-loaded (speeds up CLI help etc.)
         from sentence_transformers import SentenceTransformer
 
         log.info("loading embedding model: %s", model_name)

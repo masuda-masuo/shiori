@@ -19,7 +19,7 @@ _HEADING_RE = re.compile(r"^(#{1,6})\s+(.*)$")
 _SENTENCE_END_RE = re.compile(r"(?<=[。．！？!?\\.])\s*|\n{2,}")
 _JA_CHAR_RE = re.compile(r"[\u3040-\u30ff\u4e00-\u9fff]")
 
-# --- tree-sitter (0.23 系。0.24+ は API 激変のため非対応) ---
+# --- tree-sitter (0.23 series. 0.24+ not supported due to API changes) ---
 _TS_AVAILABLE = False
 _TS_PARSER_CACHE: dict[str, object] = {}
 _TS_FAILED: set[str] = set()
@@ -215,7 +215,7 @@ def split_issue_text(title: str | None, body: str, max_chars: int = 1200) -> lis
 
 
 # ---------------------------------------------------------------------------
-# Step 2: ソースコード分割
+# Step 2: Source code splitting
 # ---------------------------------------------------------------------------
 
 _SYMBOL_SPLIT_RE = re.compile(
@@ -308,34 +308,34 @@ def _build_heading_path(path_prefix: str, name: str, kind: str) -> str:
     return f"{path_prefix} ({kind_label} {name})" if path_prefix else f"({kind_label} {name})"
 
 
-def split_code(file_path: str, source: str, max_chars: int = _CODE_MAX_CHARS) -> list[Chunk]:
+def split_code(file_path: str, content: str, max_chars: int = _CODE_MAX_CHARS) -> list[Chunk]:
     """Chunk source code by function/method/class (detailed design/10 Step 2).
 """
     prog_lang = _detect_prog_lang(file_path)
     if not prog_lang:
-        return _split_code_fallback(source, file_path, max_chars)
+        return _split_code_fallback(content, file_path, max_chars)
 
     parser = _ts_get_parser(prog_lang)
     if parser is None:
-        return _split_code_fallback(source, file_path, max_chars)
+        return _split_code_fallback(content, file_path, max_chars)
 
     try:
-        tree = parser.parse(bytes(source, "utf-8"))
+        tree = parser.parse(bytes(content, "utf-8"))
     except Exception:
-        return _split_code_fallback(source, file_path, max_chars)
+        return _split_code_fallback(content, file_path, max_chars)
 
     root = tree.root_node
-    source_lines = source.splitlines()
+    source_lines = content.splitlines()
 
     query_src = _TREE_SITTER_QUERIES.get(prog_lang)
     if query_src is None:
-        return _split_code_fallback(source, file_path, max_chars)
+        return _split_code_fallback(content, file_path, max_chars)
 
     try:
         from tree_sitter import Query
         query = Query(parser.language, query_src)
     except Exception:
-        return _split_code_fallback(source, file_path, max_chars)
+        return _split_code_fallback(content, file_path, max_chars)
 
     # tree-sitter 0.23: query.matches(root) → list[tuple[int, dict[str, list[Node]]]]
     def_nodes_raw: list[tuple[str, object]] = []
@@ -349,7 +349,7 @@ def split_code(file_path: str, source: str, max_chars: int = _CODE_MAX_CHARS) ->
         pass
 
     if not def_nodes_raw:
-        return _split_code_fallback(source, file_path, max_chars)
+        return _split_code_fallback(content, file_path, max_chars)
 
     def_nodes_raw.sort(key=lambda x: x[1].start_point[0])
 

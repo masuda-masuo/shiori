@@ -67,7 +67,7 @@ def _should_index(is_bot: bool, author: str | None, settings: Settings) -> bool:
     return False
 
 
-# 制御文字除去用の正規表現: 改行(\n=0x0A)とタブ(\t=0x09)以外の制御文字(0x00-0x1F)にマッチ
+# Regex for control char removal: matches control chars (0x00-0x1F) except newline (\n=0x0A) and tab (\t=0x09)
 _CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0B-\x1F]")
 
 
@@ -80,7 +80,7 @@ def _clean_text(s: str | None) -> str:
 
 
 # ---------------------------------------------------------------------------
-# ChunkBuffer: バルク経路用の埋め込み・挿入バッファ（issue #72）
+# ChunkBuffer: batch embed/insert buffer for bulk path (issue #72)
 # ---------------------------------------------------------------------------
 
 class ChunkBuffer:
@@ -121,7 +121,7 @@ class ChunkBuffer:
             "prog_lang": prog_lang, "symbols": symbols,
             "created_at": created_at, "updated_at": updated_at,
             "url": url,
-            # embedding プレースホルダ（flush 時に埋める）
+            # Embedding placeholder (filled at flush time)
             "embedding": None,
         })
         self._texts.append(content)
@@ -157,9 +157,9 @@ def _redact(text: str) -> str:
 
 
 def _git(args: list[str], cwd: str | None = None) -> str:
-    # cwd が指定されている場合、安全のため safe.directory を明示的に設定する。
-    # app/ingest（root）と runner（非root）が /data/repos を共有する構成で
-    # git の dubious ownership エラーを防ぐ（issue #48）。
+    # When cwd is specified, explicitly set safe.directory for security.
+    # app/ingest (root) and runner (non-root) share /data/repos;
+    # prevents git dubious ownership errors (issue #48).
     cmd = ["git"]
     if cwd:
         cmd += ["-c", f"safe.directory={cwd}"]
@@ -175,8 +175,8 @@ def _git(args: list[str], cwd: str | None = None) -> str:
         err = _redact(out.stderr.strip())
         hint = ""
         if "Authentication failed" in err or "could not read Username" in err:
-            hint = ("（private リポジトリには GITHUB_TOKEN が必要です。"
-                    "公開リポジトリの場合はリポジトリ名を確認してください）")
+            hint = ("Private repos require GITHUB_TOKEN."
+                    "For public repos, verify the repository name.")
         raise RuntimeError(
             f"git {args[0]} failed (exit {out.returncode}): {err}{hint}"
         )
@@ -212,7 +212,7 @@ def _git_delete_ref(tmp_ref: str, cwd: str | None = None) -> None:
     try:
         _git(["update-ref", "-d", tmp_ref], cwd=cwd)
     except RuntimeError:
-        pass  # 既に削除済み等
+        pass  # Already deleted etc.
 
 
 class _GitHubAuth(httpx.Auth):
@@ -243,7 +243,7 @@ def sync_docs(
     remote = f"https://github.com/{repo}.git"
     auth = _auth_args(provider)
     if os.path.isdir(os.path.join(repo_dir, ".git")):
-        # 旧方式でトークン入り URL が .git/config に残っていても上書きする（冪等）。
+        # Overwrite even if old token-embedded URL remains in .git/config (idempotent).
         _git(["remote", "set-url", "origin", remote], cwd=repo_dir)
         _git(auth + ["fetch", "--depth=1", "origin"], cwd=repo_dir)
         _git(["reset", "--hard", "origin/HEAD"], cwd=repo_dir)
@@ -252,7 +252,7 @@ def sync_docs(
         _git(auth + ["clone", "--depth=1", remote, repo_dir])
     head = _git(["rev-parse", "HEAD"], cwd=repo_dir)
 
-    # 現在のファイル集合と既存索引を突き合わせる
+    # Diff current file set against existing index
     current: dict[str, str] = {}
     for root, dirs, files in os.walk(repo_dir):
         dirs[:] = [d for d in dirs if d != ".git"]
@@ -348,10 +348,10 @@ def sync_docs(
 
 
 # ---------------------------------------------------------------------------
-# code（git 同一クローン共有、sha デルタ）
+# code (shares same git clone, sha delta)
 # ---------------------------------------------------------------------------
 
-# os.walk でスキップするディレクトリ名
+# Directory names to skip in os.walk
 _EXCLUDE_DIRS = {
     ".git",
     "node_modules",
@@ -363,7 +363,7 @@ _EXCLUDE_DIRS = {
     "target",
 }
 
-# コード索引から除外するファイル拡張子（バイナリ・アセット等）
+# File extensions excluded from code indexing (binary/asset etc.)
 _EXCLUDE_EXTENSIONS = {
     ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".webp",
     ".woff", ".woff2", ".ttf", ".eot", ".otf",
@@ -413,17 +413,17 @@ def sync_code(
     repo_dir = settings.repo_dir(repo)
 
     if not os.path.isdir(repo_dir):
-        log.warning("sync_code: クローンが存在しません（sync_docs 未実行?）")
+        log.warning("sync_code: clone not found (sync_docs not run?)")
         return 0
 
     head = _git(["rev-parse", "HEAD"], cwd=repo_dir)
 
-    # カーソルチェック: HEAD が前回と同じなら walk をスキップ
+    # Cursor check: skip walk if HEAD unchanged since last run
     prev_head = get_cursor(conn, repo, "code")
     if prev_head == head:
         return 0
 
-    # 現在のコードファイル集合（sha 付き）
+    # Current code file set (with sha)
     current: dict[str, str] = {}
     for root, dirs, files in os.walk(repo_dir):
         dirs[:] = [d for d in dirs if d not in _EXCLUDE_DIRS]
@@ -437,7 +437,7 @@ def sync_code(
             with open(abspath, "rb") as fp:
                 current[rel] = hashlib.sha256(fp.read()).hexdigest()
 
-    # 既存索引（kind='code' の doc_files 行）
+    # Existing index (doc_files rows with kind='code')
     with conn.cursor() as cur:
         cur.execute(
             "SELECT path, content_sha FROM doc_files WHERE repo = %s AND kind = 'code'",
@@ -448,7 +448,7 @@ def sync_code(
     removed = set(indexed) - set(current)
     changed = [p for p, sha in current.items() if indexed.get(p) != sha]
 
-    # 削除
+    # Delete removed files
     for path in removed:
         delete_chunks_by_key(conn, f"code:{repo}:{path}")
         with conn.cursor() as cur:
@@ -458,7 +458,7 @@ def sync_code(
             )
         log.info("removed code %s", path)
 
-    # 変更・追加ファイルの再索引
+    # Re-index changed/added files
     for path in changed:
         abspath = os.path.join(repo_dir, path)
         try:
@@ -476,7 +476,7 @@ def sync_code(
             prog_lang = _detect_prog_lang(path)
             if buffer is not None:
                 for c in chunks:
-                    # permalink は commit_sha を使用（行ズレに強い。should-fix #5）
+                    # Permalink uses commit_sha (resilient to line drift. Should-fix #5)
                     url = (
                         f"https://github.com/{repo}/blob/{head}/{path}"
                         f"#L{c.start_line}-L{c.end_line}"
@@ -489,7 +489,7 @@ def sync_code(
                         source_type="code",
                         repo=repo,
                         path=path,
-                        language=None,  # code は language=NULL（決定4）
+                        language=None,  # code uses language=NULL (decision 4)
                         heading_path=c.heading_path,
                         content=c.content,
                         line=c.start_line,
@@ -502,7 +502,7 @@ def sync_code(
             else:
                 vectors = embedder.embed_passages([c.content for c in chunks])
                 for c, v in zip(chunks, vectors):
-                    # permalink は commit_sha を使用（行ズレに強い。should-fix #5）
+                    # Permalink uses commit_sha (resilient to line drift. Should-fix #5)
                     url = (
                         f"https://github.com/{repo}/blob/{head}/{path}"
                         f"#L{c.start_line}-L{c.end_line}"
@@ -516,7 +516,7 @@ def sync_code(
                         source_type="code",
                         repo=repo,
                         path=path,
-                        language=None,  # code は language=NULL（決定4）
+                        language=None,  # code uses language=NULL (decision 4)
                         heading_path=c.heading_path,
                         content=c.content,
                         embedding=v,
@@ -528,7 +528,7 @@ def sync_code(
                         url=url,
                     )
 
-        # doc_files に kind='code' で記録
+        # Record in doc_files with kind='code'
         with conn.cursor() as cur:
             cur.execute(
                 """
@@ -562,7 +562,7 @@ def _api_pages(client: httpx.Client, url: str, params: dict) -> "list[dict]":
         resp.raise_for_status()
         items.extend(resp.json())
         url = resp.links.get("next", {}).get("url")
-        next_params = None   # ← {} ではなく None。next URL の query をそのまま使う
+        next_params = None   # None not {}; preserves next URL query params as-is
     return items
 
 
@@ -697,26 +697,26 @@ def _sync_pr_changes(
 ) -> None:
     """Sync PR change file maps (issue #54).
     GET /repos/{repo}/pulls/{issue_number}/files"""
-    # 1. PR 詳細を取得して head_sha を確認
+    # 1. Fetch PR details to get head_sha
     try:
         resp = client.get(f"{API}/repos/{repo}/pulls/{issue_no}")
         resp.raise_for_status()
         pr_data = resp.json()
         head_sha = pr_data.get("head", {}).get("sha")
         if not head_sha:
-            log.debug("PR #%d: head_sha が取得できませんでした", issue_no)
+            log.debug("PR #%d: could not obtain head_sha", issue_no)
             return
     except httpx.HTTPError as exc:
-        log.warning("PR #%d の詳細取得に失敗: %s", issue_no, exc)
+        log.warning("PR #%d: failed to fetch details: %s", issue_no, exc)
         return
 
-    # 2. head_sha が前回と同じならスキップ
+    # 2. Skip if head_sha unchanged
     prev_sha = get_pr_head_sha(conn, repo, issue_no)
     if prev_sha == head_sha:
-        log.debug("PR #%d: head_sha 変更なし、スキップ", issue_no)
+        log.debug("PR #%d: head_sha unchanged, skipping", issue_no)
         return
 
-    # 3. ファイル一覧を取得
+    # 3. Fetch file list
     try:
         files = _api_pages(
             client,
@@ -725,12 +725,12 @@ def _sync_pr_changes(
         )
         log.debug("PR #%d: %d files fetched", issue_no, len(files))
     except httpx.HTTPError as exc:
-        log.warning("PR #%d のファイル一覧取得に失敗: %s", issue_no, exc)
+        log.warning("PR #%d: failed to fetch file list: %s", issue_no, exc)
         return
 
     # 4. upsert
     upsert_pr_changes(conn, repo, issue_no, head_sha, files)
-    log.info("PR #%d: 変更ファイルマップを更新（head_sha=%s, %d files）",
+    log.info("PR #%d: updated change file map (head_sha=%s, %d files)",
              issue_no, head_sha[:7], len(files))
 
 
@@ -753,7 +753,7 @@ def sync_issues(
     with httpx.Client(
         headers=headers, auth=_GitHubAuth(provider), timeout=30.0
     ) as client:
-        # --- 本文 (issues endpoint は PR も含む) ---
+        # --- Body (issues endpoint includes PRs) ---
         since = get_cursor(conn, repo, "issues")
         params = {
             "state": "all",
@@ -803,7 +803,7 @@ def sync_issues(
                     buffer=buffer,
                 )
                 n_indexed += 1
-            # PR の場合は変更ファイルマップも同期
+            # Sync change file maps for PRs
             if kind == "pr":
                 _sync_pr_changes(client, conn, repo, no)
             if buffer is None:
@@ -811,7 +811,7 @@ def sync_issues(
         if items:
             set_cursor(conn, repo, "issues", items[-1]["updated_at"])
 
-        # --- issue/PR コメント ---
+        # --- Issue/PR comments ---
         since = get_cursor(conn, repo, "issue_comments")
         params = {"sort": "updated", "direction": "asc", "per_page": 100}
         if since:
@@ -848,7 +848,7 @@ def sync_issues(
         if comments:
             set_cursor(conn, repo, "issue_comments", comments[-1]["updated_at"])
 
-        # --- PR レビューコメント (path/line/diff_hunk 付き) ---
+        # --- PR review comments (with path/line/diff_hunk) ---
         since = get_cursor(conn, repo, "pr_review_comments")
         params = {"sort": "updated", "direction": "asc", "per_page": 100}
         if since:
@@ -860,7 +860,7 @@ def sync_issues(
             author = (c.get("user") or {}).get("login")
             is_bot = _is_bot(c.get("user"))
             line = c.get("line") or c.get("original_line")
-            # diff_hunk を文脈として本文に付与する（diff 自体は索引しない決定の範囲内）
+            # Append diff_hunk to body as context (within decision not to index diffs themselves)
             body = _clean_text(c.get("body") or "")
             diff_hunk = c.get("diff_hunk")
             if diff_hunk:

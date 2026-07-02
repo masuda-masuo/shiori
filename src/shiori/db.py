@@ -26,20 +26,20 @@ CREATE EXTENSION IF NOT EXISTS pgroonga;
 CREATE TABLE IF NOT EXISTS sync_state (
     repo TEXT NOT NULL,
     kind TEXT NOT NULL,           -- 'docs' | 'issues' | 'issue_comments' | 'pr_review_comments'
-    cursor TEXT,                  -- docs: HEAD sha / API: 最終 updated_at (ISO8601)
+    cursor TEXT,                  -- docs: HEAD sha / API: last updated_at (ISO8601)
     PRIMARY KEY (repo, kind)
 );
 
--- 同期実行の記録（索引の鮮度確認用。issue #22）
--- sync_state のカーソルは「最後に取り込んだアイテムの updated_at」であり実行時刻ではない。
--- こちらは変更が 0 件でも同期が成功するたびに更新されるため、鮮度の指標になる。
+-- Sync execution record (for checking index freshness. Issue #22)
+-- sync_state cursor is the "last ingested item updated_at", NOT execution time.
+-- Updated on every successful sync (even 0 changes), so it indicates freshness.
 CREATE TABLE IF NOT EXISTS sync_runs (
     repo TEXT PRIMARY KEY,
     route TEXT,                   -- 'cli' | 'runner' | 'mcp' | 'auto'
     finished_at TIMESTAMPTZ NOT NULL,
     docs_updated INTEGER,
     issues_indexed INTEGER,
-    code_indexed INTEGER   -- API では code_added として返される（キー名の方が実態を正確に表すため）
+    code_indexed INTEGER   -- Returned as code_added via API (key name reflects actual semantics)
 );
 
 CREATE TABLE IF NOT EXISTS doc_files (
@@ -51,18 +51,18 @@ CREATE TABLE IF NOT EXISTS doc_files (
     PRIMARY KEY (repo, path)
 );
 
--- read_issue 用の生データ（チャンクとは独立に全文を保持）
+-- Raw data for read_issue (full text stored independently of chunks)
 CREATE TABLE IF NOT EXISTS issue_items (
     repo TEXT NOT NULL,
     issue_no INTEGER NOT NULL,
-    comment_id BIGINT NOT NULL DEFAULT 0,  -- 0 = issue/PR 本文
+    comment_id BIGINT NOT NULL DEFAULT 0,  -- 0 = issue/PR body
     kind TEXT NOT NULL,            -- 'issue' | 'pr' | 'comment' | 'pr_review_comment'
     title TEXT,
     author TEXT,
     is_bot BOOLEAN NOT NULL DEFAULT FALSE,
     state TEXT,                    -- open | closed
-    path TEXT,                     -- pr_review_comment のみ
-    line INTEGER,                  -- pr_review_comment のみ
+    path TEXT,                     -- pr_review_comment only
+    line INTEGER,                  -- pr_review_comment only
     body TEXT,
     url TEXT,
     created_at TIMESTAMPTZ,
@@ -70,10 +70,10 @@ CREATE TABLE IF NOT EXISTS issue_items (
     PRIMARY KEY (repo, issue_no, comment_id)
 );
 
--- PR 変更ファイルマップ（メタデータのみ。issue #54）
--- コンテンツ（patch hunk 全文）は保持せず、GitHub MCP に委譲する。
--- head_sha で force-push を追従し、変更があれば再取得する。
--- ファイル0件の PR でも head_sha を保持するため、path='' の sentinel 行が挿入される。
+-- PR change file map (metadata only. Issue #54)
+-- Does not store content (full patch hunks); delegates to GitHub MCP.
+-- Tracks force-push via head_sha; re-fetches when changed.
+-- Preserves head_sha for 0-file PRs via sentinel row with path=''.
 CREATE TABLE IF NOT EXISTS pr_changes (
     repo TEXT NOT NULL,
     issue_no INTEGER NOT NULL,
@@ -83,13 +83,13 @@ CREATE TABLE IF NOT EXISTS pr_changes (
     additions INTEGER,
     deletions INTEGER,
     changes INTEGER,
-    blob_url TEXT,                -- GitHub のファイル blob URL
+    blob_url TEXT,                -- GitHub file blob URL
     PRIMARY KEY (repo, issue_no, path)
 );
 
 CREATE TABLE IF NOT EXISTS chunks (
     id BIGSERIAL PRIMARY KEY,
-    chunk_key TEXT NOT NULL,       -- 由来を表す自然キー（doc:repo:path 等）
+    chunk_key TEXT NOT NULL,       -- Natural key identifying origin (doc:repo:path etc.)
     chunk_index INTEGER NOT NULL DEFAULT 0,
     source_type TEXT NOT NULL CHECK (source_type IN ('doc', 'issue', 'pr_review', 'code')),
     repo TEXT NOT NULL,
@@ -103,10 +103,10 @@ CREATE TABLE IF NOT EXISTS chunks (
     state TEXT,
     author TEXT,
     line INTEGER,
-    end_line INTEGER,             -- code の行範囲終端（source_type='code' 以外は NULL）
-    commit_sha TEXT,              -- コードの permalink 用 SHA
-    prog_lang TEXT,               -- プログラミング言語（source_type='code' 以外は NULL）
-    symbols TEXT,                 -- 識別子分割済み文字列（pgroonga 検索用）
+    end_line INTEGER,             -- Code line range end (NULL if source_type != 'code')
+    commit_sha TEXT,              -- SHA for code permalink
+    prog_lang TEXT,               -- Programming language (NULL if source_type != 'code')
+    symbols TEXT,                 -- Identifier-split string (for pgroonga search)
     created_at TIMESTAMPTZ,
     updated_at TIMESTAMPTZ,
     url TEXT,
@@ -119,7 +119,7 @@ CREATE INDEX IF NOT EXISTS chunks_updated_at_idx ON chunks (updated_at);
 CREATE INDEX IF NOT EXISTS chunks_repo_issue_no_idx ON chunks (repo, issue_no);
 """
 
-# 重い索引の名前（DROP / CREATE をバルク経路で制御するため定数化。issue #72）
+# Heavy index names (constants for DROP/CREATE via bulk path. Issue #72)
 _HNSW_INDEX = "chunks_embedding_hnsw"
 _PGROONGA_CONTENT_INDEX = "chunks_content_pgroonga"
 _PGROONGA_SYMBOLS_INDEX = "chunks_symbols_pgroonga"
@@ -127,7 +127,7 @@ _PGROONGA_SYMBOLS_INDEX = "chunks_symbols_pgroonga"
 
 def _run_alter_statements(conn: psycopg.Connection) -> None:
     """Idempotent ALTER for existing DB. CREATE TABLE IF NOT EXISTS does not add new columns."""
-    # 1. source_type CHECK 制約に 'code' を追加（既存制約を置き換え）
+    # 1. Add 'code' to source_type CHECK constraint (replace existing)
     with conn.cursor() as cur:
         cur.execute("ALTER TABLE chunks DROP CONSTRAINT IF EXISTS chunks_source_type_check")
         cur.execute(
@@ -136,7 +136,7 @@ def _run_alter_statements(conn: psycopg.Connection) -> None:
         )
     conn.commit()
 
-    # 2. 新しいカラムを追加
+    # 2. Add new columns
     with conn.cursor() as cur:
         for col, typ in [
             ("end_line", "INTEGER"),
@@ -147,12 +147,12 @@ def _run_alter_statements(conn: psycopg.Connection) -> None:
             cur.execute(f"ALTER TABLE chunks ADD COLUMN IF NOT EXISTS {col} {typ}")
     conn.commit()
 
-    # 3. doc_files.kind 追加（既存行は 'doc' のまま）
+    # 3. Add doc_files.kind (existing rows stay 'doc')
     with conn.cursor() as cur:
         cur.execute("ALTER TABLE doc_files ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'doc'")
     conn.commit()
 
-    # 4. sync_runs.code_indexed 追加（API では code_added として返される）
+    # 4. Add sync_runs.code_indexed (returned as code_added via API)
     with conn.cursor() as cur:
         cur.execute("ALTER TABLE sync_runs ADD COLUMN IF NOT EXISTS code_indexed INTEGER")
     conn.commit()
@@ -348,7 +348,7 @@ def get_pr_changes(
             "blob_url": r[5],
         }
         for r in rows
-        if r[0]  # path が空文字の sentinel 行を除外
+        if r[0]  # Exclude sentinel rows with empty path
     ]
     return files, head_sha
 
@@ -386,7 +386,7 @@ def upsert_pr_changes(
                     ),
                 )
         else:
-            # ファイル0件の PR でも head_sha を保持（sentinel 行。path='' で識別）
+            # Preserve head_sha even for PR with 0 files (sentinel row, path='')
             cur.execute(
                 """
                 INSERT INTO pr_changes (repo, issue_no, head_sha, path, status,
