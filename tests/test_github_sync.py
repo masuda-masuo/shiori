@@ -513,17 +513,24 @@ class TestSyncPrReviews:
             "html_url": f"https://github.com/o/r/pull/42#pullrequestreview-{rid}",
         }
 
+    def _setup_api_pages(self, client, reviews):
+        """Configure client mock so _api_pages returns the given reviews."""
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status.return_value = None
+        mock_resp.json.return_value = reviews
+        mock_resp.links = {}
+        client.get.return_value = mock_resp
+
     def test_stores_review_with_negative_comment_id(self):
         client = MagicMock()
         conn = MagicMock()
         embedder = MagicMock()
         settings = Settings()
 
-        client.get.return_value.raise_for_status.return_value = None
-        client.get.return_value.json.return_value = [
+        self._setup_api_pages(client, [
             self._review(111, body="Looks good", state="APPROVED"),
             self._review(222, body="Needs changes", state="CHANGES_REQUESTED"),
-        ]
+        ])
 
         with (
             patch("shiori.github_sync._upsert_issue_item") as mock_upsert,
@@ -551,10 +558,9 @@ class TestSyncPrReviews:
         embedder = MagicMock()
         settings = Settings()
 
-        client.get.return_value.raise_for_status.return_value = None
-        client.get.return_value.json.return_value = [
+        self._setup_api_pages(client, [
             self._review(333, body="LGTM", state="APPROVED"),
-        ]
+        ])
 
         with (
             patch("shiori.github_sync._upsert_issue_item"),
@@ -575,8 +581,7 @@ class TestSyncPrReviews:
         embedder = MagicMock()
         settings = Settings()
 
-        client.get.return_value.raise_for_status.return_value = None
-        client.get.return_value.json.return_value = []
+        self._setup_api_pages(client, [])
 
         with (
             patch("shiori.github_sync._upsert_issue_item") as mock_upsert,
@@ -593,7 +598,9 @@ class TestSyncPrReviews:
         embedder = MagicMock()
         settings = Settings()
 
-        client.get.return_value.raise_for_status.side_effect = httpx.HTTPError("500")
+        def _raise(*args, **kwargs):
+            raise httpx.HTTPError("500")
+        client.get = _raise
 
         with (
             patch("shiori.github_sync._upsert_issue_item") as mock_upsert,
@@ -611,11 +618,10 @@ class TestSyncPrReviews:
         embedder = MagicMock()
         settings = Settings()
 
-        client.get.return_value.raise_for_status.return_value = None
-        client.get.return_value.json.return_value = [
+        self._setup_api_pages(client, [
             self._review(444, body="auto-review", state="COMMENTED",
                          login="dependabot[bot]", bot=True),
-        ]
+        ])
 
         with (
             patch("shiori.github_sync._upsert_issue_item") as mock_upsert,
@@ -634,11 +640,10 @@ class TestSyncPrReviews:
         settings = Settings()
         settings.index_bot_logins = {"my-bot[bot]"}
 
-        client.get.return_value.raise_for_status.return_value = None
-        client.get.return_value.json.return_value = [
+        self._setup_api_pages(client, [
             self._review(555, body="approved", state="APPROVED",
                          login="my-bot[bot]", bot=True),
-        ]
+        ])
 
         with (
             patch("shiori.github_sync._upsert_issue_item"),
@@ -656,10 +661,9 @@ class TestSyncPrReviews:
         embedder = MagicMock()
         settings = Settings()
 
-        client.get.return_value.raise_for_status.return_value = None
-        client.get.return_value.json.return_value = [
+        self._setup_api_pages(client, [
             self._review(666, body="", state="COMMENTED"),
-        ]
+        ])
 
         with (
             patch("shiori.github_sync._upsert_issue_item") as mock_upsert,
@@ -680,10 +684,9 @@ class TestSyncPrReviews:
         embedder = MagicMock()
         settings = Settings()
 
-        client.get.return_value.raise_for_status.return_value = None
-        client.get.return_value.json.return_value = [
+        self._setup_api_pages(client, [
             self._review(777, body=None, state="APPROVED"),
-        ]
+        ])
 
         with (
             patch("shiori.github_sync._upsert_issue_item") as mock_upsert,
@@ -705,10 +708,9 @@ class TestSyncPrReviews:
         embedder = MagicMock()
         settings = Settings()
 
-        client.get.return_value.raise_for_status.return_value = None
-        client.get.return_value.json.return_value = [
+        self._setup_api_pages(client, [
             self._review(888, body="via buffer", state="COMMENTED"),
-        ]
+        ])
 
         buffer = MagicMock()
 
@@ -731,12 +733,11 @@ class TestSyncPrReviews:
         embedder = MagicMock()
         settings = Settings()
 
-        client.get.return_value.raise_for_status.return_value = None
-        client.get.return_value.json.return_value = [
+        self._setup_api_pages(client, [
             self._review(1, body="a"),
             self._review(2, body="b"),
             self._review(999999, body="c"),
-        ]
+        ])
 
         with (
             patch("shiori.github_sync._upsert_issue_item") as mock_upsert,

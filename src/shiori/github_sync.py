@@ -755,9 +755,11 @@ def _sync_pr_reviews(
     Store with comment_id = -(review_id) to avoid collision with inline reviews.
     """
     try:
-        resp = client.get(f"{API}/repos/{repo}/pulls/{issue_no}/reviews")
-        resp.raise_for_status()
-        reviews = resp.json()
+        reviews = _api_pages(
+            client,
+            f"{API}/repos/{repo}/pulls/{issue_no}/reviews",
+            {"per_page": 100},
+        )
     except httpx.HTTPError as exc:
         log.info("PR #%d: could not fetch reviews: %s", issue_no, exc)
         return
