@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
+import httpx
 import pytest
 
 from shiori.config import Settings
@@ -22,6 +23,7 @@ from shiori.github_sync import (
     _propagate_issue_state,
     _should_index,
     _sync_pr_changes,
+    _sync_pr_reviews,
 )
 
 
@@ -483,3 +485,269 @@ class TestGitFetchRef:
 
         # 例外を出さない
         _git_delete_ref("refs/shiori/nonexistent", cwd="/r")
+
+
+# ===================================================================
+# _sync_pr_reviews (issue #103)
+# ===================================================================
+
+
+class TestSyncPrReviews:
+    """_sync_pr_reviews: PR review submissions from pulls/reviews."""
+
+    @staticmethod
+    def _review(
+        rid: int,
+        body: str = "looks good",
+        state: str = "COMMENTED",
+        login: str = "alice",
+        bot: bool = False,
+        submitted_at: str = "2024-01-01T00:00:00Z",
+    ) -> dict:
+        return {
+            "id": rid,
+            "user": {"login": login, "type": "Bot" if bot else "User"},
+            "state": state,
+            "body": body,
+            "submitted_at": submitted_at,
+            "html_url": f"https://github.com/o/r/pull/42#pullrequestreview-{rid}",
+        }
+
+    def _setup_api_pages(self, client, reviews):
+        """Configure client mock so _api_pages returns the given reviews."""
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status.return_value = None
+        mock_resp.json.return_value = reviews
+        mock_resp.links = {}
+        client.get.return_value = mock_resp
+
+    def test_stores_review_with_negative_comment_id(self):
+        client = MagicMock()
+        conn = MagicMock()
+        embedder = MagicMock()
+        settings = Settings()
+
+        self._setup_api_pages(client, [
+            self._review(111, body="Looks good", state="APPROVED"),
+            self._review(222, body="Needs changes", state="CHANGES_REQUESTED"),
+        ])
+
+        with (
+            patch("shiori.github_sync._upsert_issue_item") as mock_upsert,
+            patch("shiori.github_sync._should_index", return_value=True),
+            patch("shiori.github_sync._issue_title_state_kind", return_value=("Title", "open", "pr")),
+            patch("shiori.github_sync._index_item"),
+        ):
+            _sync_pr_reviews(client, conn, embedder, settings, "o/r", 42)
+
+        assert mock_upsert.call_count == 2
+        c1 = mock_upsert.call_args_list[0][0][1]
+        assert c1["comment_id"] == -111
+        assert c1["kind"] == "pr_review"
+        assert c1["state"] == "APPROVED"
+        assert c1["body"] == "Looks good"
+
+        c2 = mock_upsert.call_args_list[1][0][1]
+        assert c2["comment_id"] == -222
+        assert c2["state"] == "CHANGES_REQUESTED"
+        assert c2["body"] == "Needs changes"
+
+    def test_indexes_body_with_state_prefix(self):
+        client = MagicMock()
+        conn = MagicMock()
+        embedder = MagicMock()
+        settings = Settings()
+
+        self._setup_api_pages(client, [
+            self._review(333, body="LGTM", state="APPROVED"),
+        ])
+
+        with (
+            patch("shiori.github_sync._upsert_issue_item"),
+            patch("shiori.github_sync._should_index", return_value=True),
+            patch("shiori.github_sync._issue_title_state_kind", return_value=("T", "open", "pr")),
+            patch("shiori.github_sync._index_item") as mock_index,
+        ):
+            _sync_pr_reviews(client, conn, embedder, settings, "o/r", 42)
+
+        mock_index.assert_called_once()
+        kwargs = mock_index.call_args[1]
+        assert "[APPROVED]" in kwargs["body"]
+        assert "LGTM" in kwargs["body"]
+
+    def test_no_reviews_returns_early(self):
+        client = MagicMock()
+        conn = MagicMock()
+        embedder = MagicMock()
+        settings = Settings()
+
+        self._setup_api_pages(client, [])
+
+        with (
+            patch("shiori.github_sync._upsert_issue_item") as mock_upsert,
+            patch("shiori.github_sync._index_item") as mock_index,
+        ):
+            _sync_pr_reviews(client, conn, embedder, settings, "o/r", 42)
+
+        mock_upsert.assert_not_called()
+        mock_index.assert_not_called()
+
+    def test_api_error_caught_and_returns(self):
+        client = MagicMock()
+        conn = MagicMock()
+        embedder = MagicMock()
+        settings = Settings()
+
+        def _raise(*args, **kwargs):
+            raise httpx.HTTPError("500")
+        client.get = _raise
+
+        with (
+            patch("shiori.github_sync._upsert_issue_item") as mock_upsert,
+            patch("shiori.github_sync._index_item") as mock_index,
+        ):
+            _sync_pr_reviews(client, conn, embedder, settings, "o/r", 42)
+
+        mock_upsert.assert_not_called()
+        mock_index.assert_not_called()
+
+    def test_bot_review_upserted_but_not_indexed(self):
+        """Bot review outside allowlist: upsert happens, _should_index=False -> no index."""
+        client = MagicMock()
+        conn = MagicMock()
+        embedder = MagicMock()
+        settings = Settings()
+
+        self._setup_api_pages(client, [
+            self._review(444, body="auto-review", state="COMMENTED",
+                         login="dependabot[bot]", bot=True),
+        ])
+
+        with (
+            patch("shiori.github_sync._upsert_issue_item") as mock_upsert,
+            patch("shiori.github_sync._should_index", return_value=False),
+            patch("shiori.github_sync._index_item") as mock_index,
+        ):
+            _sync_pr_reviews(client, conn, embedder, settings, "o/r", 42)
+
+        assert mock_upsert.call_count == 1
+        mock_index.assert_not_called()
+
+    def test_bot_in_allowlist_is_indexed(self):
+        client = MagicMock()
+        conn = MagicMock()
+        embedder = MagicMock()
+        settings = Settings()
+        settings.index_bot_logins = {"my-bot[bot]"}
+
+        self._setup_api_pages(client, [
+            self._review(555, body="approved", state="APPROVED",
+                         login="my-bot[bot]", bot=True),
+        ])
+
+        with (
+            patch("shiori.github_sync._upsert_issue_item"),
+            patch("shiori.github_sync._should_index", return_value=True),
+            patch("shiori.github_sync._issue_title_state_kind", return_value=("T", "open", "pr")),
+            patch("shiori.github_sync._index_item") as mock_index,
+        ):
+            _sync_pr_reviews(client, conn, embedder, settings, "o/r", 42)
+
+        mock_index.assert_called_once()
+
+    def test_empty_body_upserted_but_not_indexed(self):
+        client = MagicMock()
+        conn = MagicMock()
+        embedder = MagicMock()
+        settings = Settings()
+
+        self._setup_api_pages(client, [
+            self._review(666, body="", state="COMMENTED"),
+        ])
+
+        with (
+            patch("shiori.github_sync._upsert_issue_item") as mock_upsert,
+            patch("shiori.github_sync._should_index") as mock_should,
+            patch("shiori.github_sync._index_item") as mock_index,
+        ):
+            _sync_pr_reviews(client, conn, embedder, settings, "o/r", 42)
+
+        assert mock_upsert.call_count == 1
+        c1 = mock_upsert.call_args_list[0][0][1]
+        assert c1["body"] == ""
+        mock_index.assert_not_called()
+        mock_should.assert_not_called()
+
+    def test_none_body_cleaned_and_not_indexed(self):
+        client = MagicMock()
+        conn = MagicMock()
+        embedder = MagicMock()
+        settings = Settings()
+
+        self._setup_api_pages(client, [
+            self._review(777, body=None, state="APPROVED"),
+        ])
+
+        with (
+            patch("shiori.github_sync._upsert_issue_item") as mock_upsert,
+            patch("shiori.github_sync._should_index") as mock_should,
+            patch("shiori.github_sync._index_item") as mock_index,
+        ):
+            _sync_pr_reviews(client, conn, embedder, settings, "o/r", 42)
+
+        assert mock_upsert.call_count == 1
+        c1 = mock_upsert.call_args_list[0][0][1]
+        assert c1["body"] == ""
+        mock_index.assert_not_called()
+        mock_should.assert_not_called()
+
+    def test_pass_through_chunk_buffer(self):
+        """When buffer is provided, _index_item receives it."""
+        client = MagicMock()
+        conn = MagicMock()
+        embedder = MagicMock()
+        settings = Settings()
+
+        self._setup_api_pages(client, [
+            self._review(888, body="via buffer", state="COMMENTED"),
+        ])
+
+        buffer = MagicMock()
+
+        with (
+            patch("shiori.github_sync._upsert_issue_item"),
+            patch("shiori.github_sync._should_index", return_value=True),
+            patch("shiori.github_sync._issue_title_state_kind", return_value=("T", "open", "pr")),
+            patch("shiori.github_sync._index_item") as mock_index,
+        ):
+            _sync_pr_reviews(client, conn, embedder, settings, "o/r", 42, buffer=buffer)
+
+        mock_index.assert_called_once()
+        kwargs = mock_index.call_args[1]
+        assert kwargs["buffer"] is buffer
+
+    def test_negative_comment_id_avoids_collision(self):
+        """All review comment_ids must be negative to avoid collision with inline comments."""
+        client = MagicMock()
+        conn = MagicMock()
+        embedder = MagicMock()
+        settings = Settings()
+
+        self._setup_api_pages(client, [
+            self._review(1, body="a"),
+            self._review(2, body="b"),
+            self._review(999999, body="c"),
+        ])
+
+        with (
+            patch("shiori.github_sync._upsert_issue_item") as mock_upsert,
+            patch("shiori.github_sync._should_index", return_value=True),
+            patch("shiori.github_sync._issue_title_state_kind", return_value=("T", "open", "pr")),
+            patch("shiori.github_sync._index_item"),
+        ):
+            _sync_pr_reviews(client, conn, embedder, settings, "o/r", 42)
+
+        for call_args in mock_upsert.call_args_list:
+            comment_id = call_args[0][1]["comment_id"]
+            assert comment_id < 0, f"comment_id {comment_id} must be negative"
+

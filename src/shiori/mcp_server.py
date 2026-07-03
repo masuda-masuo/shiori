@@ -527,6 +527,7 @@ def _read_issue_single(target: str, number: int, exclude_noise_bots: bool) -> di
                 "author": r[3],
                 "is_bot": r[4],
                 "kind": r[1],
+                "state": r[5],
                 **( {"path": r[6], "line": r[7]} if r[6] else {}),
                 "created_at": r[10].isoformat() if r[10] else None,
                 "body": r[8],
@@ -545,7 +546,10 @@ def read_issue(
     numbers: list[int] | None = None,
 ) -> dict[str, Any] | list[dict[str, Any]]:
     """Fetch full issue/PR thread chronologically (body + comments + review).
-    Bot comments included (identifiable via is_bot)."""
+    Bot comments included (identifiable via is_bot).
+    Each item has a state field: for kind='pr_review' it is the review
+    submission state (APPROVED/COMMENTED/CHANGES_REQUESTED); for other
+    kinds it is the overall issue state (open/closed)."""
     if number is not None and numbers is not None:
         raise ValueError("number and numbers cannot be specified together")
     target = _resolve_repo(repo)

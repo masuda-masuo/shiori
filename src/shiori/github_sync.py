@@ -739,6 +739,78 @@ def _sync_pr_changes(
              issue_no, head_sha[:7], len(files))
 
 
+def _sync_pr_reviews(
+    client: httpx.Client,
+    conn: psycopg.Connection,
+    embedder: Embedder,
+    settings: Settings,
+    repo: str,
+    issue_no: int,
+    buffer: ChunkBuffer | None = None,
+) -> None:
+    """Sync PR review submissions from pulls/{issue_no}/reviews (issue #103).
+
+    Review submissions (body + state like COMMENTED/APPROVED/CHANGES_REQUESTED)
+    are not returned by pulls/comments (which only has inline review comments).
+    Store with comment_id = -(review_id) to avoid collision with inline reviews.
+    """
+    try:
+        reviews = _api_pages(
+            client,
+            f"{API}/repos/{repo}/pulls/{issue_no}/reviews",
+            {"per_page": 100},
+        )
+    except httpx.HTTPError as exc:
+        log.info("PR #%d: could not fetch reviews: %s", issue_no, exc)
+        return
+
+    if not reviews:
+        return
+
+    pr_state = _issue_title_state_kind(conn, repo, issue_no)[1]
+
+    for r in reviews:
+        rid = r["id"]
+        author = (r.get("user") or {}).get("login")
+        is_bot = _is_bot(r.get("user"))
+        state = r.get("state")
+        body = _clean_text(r.get("body") or "")
+        submitted_at = r.get("submitted_at")
+
+        _upsert_issue_item(conn, {
+            "repo": repo,
+            "issue_no": issue_no,
+            "comment_id": -rid,
+            "kind": "pr_review",
+            "title": None,
+            "author": author,
+            "is_bot": is_bot,
+            "state": state,
+            "path": None,
+            "line": None,
+            "body": body,
+            "url": r.get("html_url"),
+            "created_at": submitted_at,
+            "updated_at": submitted_at,
+        })
+
+        if body and _should_index(is_bot, author, settings):
+            _index_item(
+                settings, conn, embedder,
+                chunk_key=f"pr_review_submission:{repo}:{issue_no}:r{rid}",
+                source_type="pr_review",
+                repo=repo, issue_no=issue_no, comment_id=-rid,
+                kind="pr",
+                title=None,
+                body=f"[{state}] {body}" if state else body,
+                state=pr_state, author=author,
+                path=None, line=None,
+                created_at=submitted_at, updated_at=submitted_at,
+                url=r.get("html_url"),
+                buffer=buffer,
+            )
+
+
 def sync_issues(
     settings: Settings,
     conn: psycopg.Connection,
@@ -809,9 +881,10 @@ def sync_issues(
                     buffer=buffer,
                 )
                 n_indexed += 1
-            # Sync change file maps for PRs
+            # Sync change file maps and review submissions for PRs
             if kind == "pr":
                 _sync_pr_changes(client, conn, repo, no)
+                _sync_pr_reviews(client, conn, embedder, settings, repo, no, buffer=buffer)
             if buffer is None:
                 conn.commit()
         if items:
