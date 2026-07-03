@@ -227,6 +227,7 @@ _EXCLUDE_DIRS = {
     ".tox", ".eggs",
     ".next",  # Next.js
     "target",  # Rust
+    ".cache",
 }
 
 # File extensions excluded from code listing (case-insensitive)

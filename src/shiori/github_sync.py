@@ -364,6 +364,7 @@ _EXCLUDE_DIRS = {
     ".tox", ".eggs",
     ".next",
     "target",
+    ".cache",
 }
 
 # File extensions excluded from code indexing (binary/asset etc.)
