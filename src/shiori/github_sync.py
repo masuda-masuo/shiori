@@ -287,6 +287,7 @@ def sync_docs(
     for path in changed:
         with open(os.path.join(repo_dir, path), encoding="utf-8", errors="replace") as fp:
             text = fp.read()
+        text = _clean_text(text)  # Remove NUL etc. (issue #111)
         language = detect_language(text)
         chunks = split_markdown(text, settings.chunk_max_chars)
         chunk_key = f"doc:{repo}:{path}"
@@ -466,6 +467,7 @@ def sync_code(
         try:
             with open(abspath, encoding="utf-8", errors="replace") as fp:
                 text = fp.read()
+            text = _clean_text(text)  # Remove NUL etc. (issue #111)
         except Exception as exc:
             log.warning("sync_code: skip %s (%s)", path, exc)
             continue

@@ -427,6 +427,11 @@ def vec_literal(vec) -> str:
     return "[" + ",".join(f"{float(x):.6f}" for x in vec) + "]"
 
 
+def _sanitize_content(text: str) -> str:
+    """Remove NUL (0x00) bytes that PostgreSQL text fields cannot contain (issue #111)."""
+    return text.replace("\x00", "")
+
+
 def delete_chunks_by_key(conn: psycopg.Connection, chunk_key: str) -> None:
     with conn.cursor() as cur:
         cur.execute("DELETE FROM chunks WHERE chunk_key = %s", (chunk_key,))
@@ -458,6 +463,7 @@ def insert_chunk(
     updated_at=None,
     url: str | None = None,
 ) -> None:
+    content = _sanitize_content(content)
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -542,7 +548,7 @@ def bulk_insert_chunks(conn: psycopg.Connection, rows: list[dict]) -> None:
                 r.get("kind"),
                 r.get("language"),
                 r.get("heading_path"),
-                r["content"],
+                _sanitize_content(r["content"]),
                 vec_literal(r["embedding"]),
                 r.get("state"),
                 r.get("author"),
