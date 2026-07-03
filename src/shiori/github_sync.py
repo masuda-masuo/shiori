@@ -767,6 +767,8 @@ def _sync_pr_reviews(
     if not reviews:
         return
 
+    pr_state = _issue_title_state_kind(conn, repo, issue_no)[1]
+
     for r in reviews:
         rid = r["id"]
         author = (r.get("user") or {}).get("login")
@@ -793,7 +795,6 @@ def _sync_pr_reviews(
         })
 
         if body and _should_index(is_bot, author, settings):
-            title, pr_state, issue_kind = _issue_title_state_kind(conn, repo, issue_no)
             _index_item(
                 settings, conn, embedder,
                 chunk_key=f"pr_review_submission:{repo}:{issue_no}:r{rid}",
