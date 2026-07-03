@@ -546,7 +546,10 @@ def read_issue(
     numbers: list[int] | None = None,
 ) -> dict[str, Any] | list[dict[str, Any]]:
     """Fetch full issue/PR thread chronologically (body + comments + review).
-    Bot comments included (identifiable via is_bot)."""
+    Bot comments included (identifiable via is_bot).
+    Each item has a state field: for kind='pr_review' it is the review
+    submission state (APPROVED/COMMENTED/CHANGES_REQUESTED); for other
+    kinds it is the overall issue state (open/closed)."""
     if number is not None and numbers is not None:
         raise ValueError("number and numbers cannot be specified together")
     target = _resolve_repo(repo)
