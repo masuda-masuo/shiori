@@ -428,7 +428,16 @@ def vec_literal(vec) -> str:
 
 
 def _sanitize_content(text: str) -> str:
-    """Remove NUL (0x00) bytes that PostgreSQL text fields cannot contain (issue #111)."""
+    """Remove NUL (0x00) bytes that PostgreSQL text fields cannot contain (issue #111).
+
+    Unlike _clean_text() in github_sync.py (which removes all control chars 0x00-0x1F),
+    this only strips NUL because PostgreSQL text columns accept other control characters.
+    Call sites that read raw files (sync_docs/sync_code) additionally pass through
+    _clean_text() for full control-char sanitisation; the NUL-only guard here is the
+    last line of defence for any code path that feeds content into the DB.
+
+    New chunk-insertion functions must call this on content before writing to the DB.
+    """
     return text.replace("\x00", "")
 
 
