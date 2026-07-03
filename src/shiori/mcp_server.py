@@ -527,6 +527,7 @@ def _read_issue_single(target: str, number: int, exclude_noise_bots: bool) -> di
                 "author": r[3],
                 "is_bot": r[4],
                 "kind": r[1],
+                "state": r[5],
                 **( {"path": r[6], "line": r[7]} if r[6] else {}),
                 "created_at": r[10].isoformat() if r[10] else None,
                 "body": r[8],
