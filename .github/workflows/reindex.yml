@@ -1,0 +1,39 @@
+# self-hosted runner によるイベント駆動索引更新（issue #6）。
+# push / issue / PR の各イベントを受け取り、差分同期を実行する。
+# self-hosted runner は private リポジトリ専用。
+# if: github.event.repository.private == true により、public 化時はジョブが自動スキップされる（issue #15）。
+# public 化する場合はプロファイル無効化 + config.sh remove + 本ガードにより自動停止。
+# 根本的な代替は Webhook + Cloudflare Tunnel + HMAC。
+name: reindex
+
+on:
+  push:
+    branches: [main]
+  issues:
+    types: [opened, edited, closed, reopened, deleted]
+  issue_comment:
+    types: [created, edited, deleted]
+  pull_request:
+    types: [opened, edited, closed, reopened, synchronize]
+  pull_request_review:
+    types: [submitted, edited]
+  pull_request_review_comment:
+    types: [created, edited, deleted]
+
+concurrency:
+  group: shiori-reindex
+  # false = 実行中のジョブはキャンセルせず待機。差分同期なので最後の 1 回で全変更を拾える。
+  cancel-in-progress: false
+
+jobs:
+  ingest:
+    if: github.event.repository.private == true
+    runs-on: [self-hosted, shiori]
+    timeout-minutes: 15   # 初回: 埋め込みモデルダウンロードを考慮した値
+    steps:
+      - name: 差分同期
+        run: python -m shiori ingest
+        env:
+          # sync_runs の経路記録（issue #22）。既定は 'cli' のため runner を明示する。
+          SHIORI_INGEST_ROUTE: runner
+        # actions/checkout は不要（ingest が自前で clone/fetch する）
