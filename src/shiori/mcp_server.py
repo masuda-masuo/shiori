@@ -606,25 +606,49 @@ def pr_changes(
     if base_sha is not None:
         result["base_sha"] = base_sha
     if include_diff:
-        base = os.path.realpath(settings.repo_dir(target))
-        if not os.path.isdir(os.path.join(base, ".git")):
-            raise FileNotFoundError(
-                f"Clone for {target} does not exist. Please run shiori_ingest to sync."
-            )
-        ref = f"pull/{number}/head"
-        tmp_ref = None
-        try:
-            provider = build_token_provider(settings)
-            tmp_ref = _git_fetch_ref(ref, cwd=base, provider=provider)
-            # Prefer base_sha from DB for accurate diff; fall back to HEAD for legacy rows
-            merge_base = base_sha if base_sha else "HEAD"
-            result["diff"] = _git(
-                ["diff", f"{merge_base}...{tmp_ref}", "--unified=3"], cwd=base
-            )
-        finally:
-            if tmp_ref:
-                _git_delete_ref(tmp_ref, cwd=base)
+        diff_text, stat_text = _compute_pr_diff(
+            number, target, base_sha, path=None
+        )
+        result["diff"] = diff_text
+        if stat_text:
+            result["stats"] = stat_text
     return result
+
+
+def _compute_pr_diff(
+    number: int,
+    target: str,
+    base_sha: str | None,
+    path: str | None = None,
+) -> tuple[str, str]:
+    """Fetch PR head and compute unified diff + stat (issue #96).
+
+    Returns (diff_text, stat_text). Raises FileNotFoundError if clone
+    is missing, or ValueError if the PR is not in the DB.
+    """
+    git_dir = os.path.realpath(settings.repo_dir(target))
+    if not os.path.isdir(os.path.join(git_dir, ".git")):
+        raise FileNotFoundError(
+            f"Clone for {target} does not exist. Please run shiori_ingest to sync."
+        )
+
+    ref = f"pull/{number}/head"
+    tmp_ref = None
+    try:
+        provider = build_token_provider(settings)
+        tmp_ref = _git_fetch_ref(ref, cwd=git_dir, provider=provider)
+        merge_base = base_sha if base_sha else "HEAD"
+        args = ["diff", f"{merge_base}...{tmp_ref}", "--unified=3"]
+        if path:
+            args.extend(["--", path])
+        diff_text = _git(args, cwd=git_dir)
+        stat_text = _git(
+            ["diff", f"{merge_base}...{tmp_ref}", "--stat"], cwd=git_dir
+        )
+        return diff_text, stat_text.strip() if stat_text else ""
+    finally:
+        if tmp_ref:
+            _git_delete_ref(tmp_ref, cwd=git_dir)
 
 
 @mcp.tool(name="shiori_pr_diff")
@@ -643,19 +667,8 @@ def pr_diff(
     repo: リポジトリ名
     """
     target = _resolve_repo(repo)
-    git_dir = os.path.realpath(settings.repo_dir(target))
-    if not os.path.isdir(os.path.join(git_dir, ".git")):
-        raise FileNotFoundError(
-            f"Clone for {target} does not exist. Please run shiori_ingest to sync."
-        )
-
-    # Get base_sha from DB
-    base_sha = None
-    head_sha = None
     with _conn() as conn:
-        _, stored_head, stored_base = db.get_pr_changes(conn, target, number)
-        head_sha = stored_head
-        base_sha = stored_base
+        _, head_sha, base_sha = db.get_pr_changes(conn, target, number)
 
     if head_sha is None:
         raise ValueError(
@@ -663,33 +676,16 @@ def pr_diff(
             "Please sync with shiori_ingest."
         )
 
-    ref = f"pull/{number}/head"
-    tmp_ref = None
-    try:
-        provider = build_token_provider(settings)
-        tmp_ref = _git_fetch_ref(ref, cwd=git_dir, provider=provider)
-        merge_base = base_sha if base_sha else "HEAD"
-        args = ["diff", f"{merge_base}...{tmp_ref}", "--unified=3"]
-        if path:
-            args.extend(["--", path])
-        diff_text = _git(args, cwd=git_dir)
+    diff_text, stat_text = _compute_pr_diff(number, target, base_sha, path)
 
-        # Compute stats
-        stat_text = _git(
-            ["diff", f"{merge_base}...{tmp_ref}", "--stat"], cwd=git_dir
-        )
-
-        return {
-            "repo": target,
-            "number": number,
-            "head_sha": head_sha,
-            "base_sha": base_sha,
-            "diff": diff_text,
-            "stats": stat_text.strip() if stat_text else "",
-        }
-    finally:
-        if tmp_ref:
-            _git_delete_ref(tmp_ref, cwd=git_dir)
+    return {
+        "repo": target,
+        "number": number,
+        "head_sha": head_sha,
+        "base_sha": base_sha,
+        "diff": diff_text,
+        "stats": stat_text,
+    }
 
 
 @mcp.tool(name="shiori_pr_review_comments")
@@ -828,6 +824,9 @@ def _build_warnings(
     return warnings
 
 
+# Type precedence for cross-reference merging (closes > duplicate > refs > mention)
+_TYPE_PRECEDENCE = {"closes": 0, "duplicate": 1, "refs": 2, "mention": 3}
+
 # Patterns for issue reference classification (issue #97)
 _CLOSES_RE = re.compile(
     r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+(?:#([0-9]+)|https://github\.com/[\w.-]+/[\w.-]+/(?:issues|pull)/([0-9]+))",
@@ -891,7 +890,9 @@ def issue_links(number: int, repo: str | None = None) -> dict[str, Any]:
     for b in bodies:
         for ref in _extract_refs(b["body"]):
             n = ref["issue_no"]
-            if n != number and n not in outbound_refs:
+            if n == number:
+                continue
+            if n not in outbound_refs or _TYPE_PRECEDENCE.get(ref["type"], 99) < _TYPE_PRECEDENCE.get(outbound_refs[n]["type"], 99):
                 outbound_refs[n] = ref
 
     # Look up referenced issue details

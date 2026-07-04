@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch, ANY
+from unittest.mock import MagicMock, patch, ANY, call
 
 import pytest
 
@@ -32,6 +32,8 @@ class TestPrChangesIncludeDiff:
 
     def test_include_diff_true_returns_diff(self):
         """include_diff=True で unified diff が返される。"""
+        diff_text = "diff --git a/src/a.py b/src/a.py\n@@ -1,3 +1,4 @@\n+new line"
+        stat_text = " src/a.py | 1 +\n 1 file changed, 1 insertion(+)"
         with (
             patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
             patch("shiori.mcp_server._conn"),
@@ -44,7 +46,7 @@ class TestPrChangesIncludeDiff:
                   return_value="refs/shiori/tmp-abc") as mock_git_fetch,
             patch("shiori.mcp_server._git_delete_ref") as mock_git_delete,
             patch("shiori.mcp_server._git",
-                  return_value="diff --git a/src/a.py b/src/a.py\n@@ -1,3 +1,4 @@\n+new line") as mock_git,
+                  side_effect=[diff_text, stat_text]) as mock_git,
             patch("shiori.mcp_server.settings") as mock_settings,
             patch("shiori.mcp_server.os.path.isdir", return_value=True),
             patch("shiori.mcp_server.os.path.realpath",
@@ -60,14 +62,17 @@ class TestPrChangesIncludeDiff:
         assert result["head_sha"] == "abc1234"
         assert len(result["files"]) == 1
         assert "diff --git a/src/a.py b/src/a.py" in result["diff"]
+        assert "stats" in result
+        assert "1 file changed" in result["stats"]
 
         mock_git_fetch.assert_called_once_with(
             "pull/42/head", cwd="/data/repos/o/r", provider=mock_build.return_value
         )
-        mock_git.assert_called_once_with(
-            [ANY, ANY, "--unified=3"],
-            cwd="/data/repos/o/r",
-        )
+        assert mock_git.call_count == 2
+        mock_git.assert_has_calls([
+            call([ANY, ANY, "--unified=3"], cwd="/data/repos/o/r"),
+            call([ANY, ANY, "--stat"], cwd="/data/repos/o/r"),
+        ])
 
     def test_include_diff_true_raises_when_clone_missing(self):
         """FileNotFoundError when clone is missing with include_diff=True."""

@@ -53,3 +53,20 @@ class TestExtractRefs:
         refs = _extract_refs("See https://example.com/page#anchor and #55")
         assert len(refs) >= 1
         assert {"issue_no": 55, "type": "mention"} in refs
+
+    def test_github_url_closes(self):
+        refs = _extract_refs("Fix https://github.com/o/r/issues/42")
+        assert len(refs) == 1
+        assert refs[0] == {"issue_no": 42, "type": "closes"}
+
+    def test_github_url_duplicate(self):
+        refs = _extract_refs("Duplicate of https://github.com/o/r/pull/10")
+        assert refs == [{"issue_no": 10, "type": "duplicate"}]
+
+    def test_github_url_refs(self):
+        refs = _extract_refs("See https://github.com/o/r/issues/30")
+        assert refs == [{"issue_no": 30, "type": "refs"}]
+
+    def test_github_url_with_hyphenated_repo(self):
+        refs = _extract_refs("See https://github.com/my-org/my-repo/issues/42")
+        assert refs == [{"issue_no": 42, "type": "refs"}]

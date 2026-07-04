@@ -685,7 +685,6 @@ def find_inbound_refs(
     Searches issue_items body for '#{issue_no}' pattern and returns
     the referencing items.
     """
-    pattern = f"#{issue_no}"
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -693,10 +692,10 @@ def find_inbound_refs(
             FROM issue_items
             WHERE repo = %s
               AND issue_no != %s
-              AND body LIKE %s
+              AND body ~ %s
             ORDER BY issue_no, (comment_id = 0) DESC
             """,
-            (repo, issue_no, f"%{pattern}%"),
+            (repo, issue_no, f"(?<![\\w\\d])#{issue_no}(?![\\d])"),
         )
         rows = cur.fetchall()
     return [
