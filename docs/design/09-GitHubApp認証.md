@@ -12,7 +12,8 @@
 MCP サーバーは GitHub に触れない」という前提だったが、issue #6 で serve プロセス内の
 自動同期（`SHIORI_SYNC_INTERVAL_SECONDS`）と `shiori_ingest` ツールを追加したため、
 現在は常駐 `app` も `GITHUB_TOKEN`（PAT）で GitHub に触れる。本設計では、
-**App 秘密鍵だけ**を ingest / runner に限定する形に整理する（PAT は app にも渡す）。
+すべてのサービス（app / ingest / runner）で App 認証を使う。`build_token_provider()` が
+環境変数の有無に応じて App / PAT / anonymous を自動選択する。
 ジョブ内でトークンを取得し、長時間ジョブに備えてリクエスト単位で再発行できれば十分、
 という基本方針自体は変わらない。
 
@@ -27,11 +28,10 @@ MCP サーバーは GitHub に触れない」という前提だったが、issue
 4. **git の認証は clone URL 埋め込みをやめ、`http.extraHeader` で毎回注入する。**
    理由: 現行方式は `.git/config` にトークンが平文で永続化され（named volume 上に残る）、
    短期トークンでは次回 pull 時に失効済みトークンが残って失敗する。
-5. **GitHub App の秘密鍵は ingest / runner にだけ渡す。** 常駐 `app` サービスには
-   App 秘密鍵を渡さない（`github_app_key` secret と `GITHUB_APP_*` を持たせない。
-   compose をサービス分割し、「App 秘密鍵が MCP サーバーに届かない」性質を
-   コンテナ境界で実現する）。PAT 運用時の `GITHUB_TOKEN` は自動同期・`shiori_ingest`
-   ツールのため `app` にも渡す。
+5. **GitHub App の秘密鍵は app / ingest / runner の全サービスに渡す。**
+   compose 上では secrets + environment で全サービスに同一設定を共有する。
+   `build_token_provider()` が App → PAT → anonymous の優先順位で認証方式を選択する。
+   PAT 運用時も `GITHUB_TOKEN` は全サービスに渡す。
 6. **依存追加: `pyjwt[crypto]`**（RS256 署名に cryptography が必要）。
 
 ## 設定（環境変数）
@@ -241,7 +241,15 @@ secrets:
     file: ./secrets/github-app.private-key.pem
 
 services:
-  app:            # 常駐 MCP サーバー。GITHUB_TOKEN(PAT) は持つが App 秘密鍵は持たない
+  app:            # 常駐 MCP サーバー。全認証方式対応（App / PAT / anonymous）
+    environment:
+      # GitHub App 認証（GITHUB_TOKEN はフォールバック、未設定時は anonymous）
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      GITHUB_APP_ID: ${GITHUB_APP_ID:-}
+      GITHUB_APP_INSTALLATION_ID: ${GITHUB_APP_INSTALLATION_ID:-}
+      GITHUB_APP_PRIVATE_KEY_PATH: ${GITHUB_APP_PRIVATE_KEY_PATH:-/run/secrets/github_app_key}
+    secrets:
+      - github_app_key
     ...
   ingest:
     profiles: ["ingest"]   # `up` では起動しない
@@ -259,7 +267,7 @@ services:
 実行: `docker compose run --rm ingest`（cron からも同コマンド）。
 `./secrets/` は `.gitignore` に追加する。
 
-上記は App 秘密鍵の限定方針を示す抜粋であり、`app` + `ingest` のみを示している。
+上記は compose の基本構成を示す抜粋であり、`app` + `ingest` のみを示している。
 issue #6 で追加された `runner`（self-hosted runner、App 秘密鍵を保持）を含む
 最新の全サービス構成は `docker-compose.yml` を参照すること。
 
