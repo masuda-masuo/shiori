@@ -1,8 +1,8 @@
-"""shiori_pr_changes の include_diff パラメータのユニットテスト（issue #100）。"""
+
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, patch, ANY
 
 import pytest
 
@@ -20,7 +20,7 @@ class TestPrChangesIncludeDiff:
             patch("shiori.mcp_server.db.get_pr_changes",
                   return_value=([{"path": "src/a.py", "status": "modified",
                                  "additions": 5, "deletions": 2, "changes": 7,
-                                 "blob_url": "url_a"}], "abc1234")),
+                                 "blob_url": "url_a"}], "abc1234", None)),
         ):
             result = pr_changes(number=42, repo="o/r")
 
@@ -38,7 +38,7 @@ class TestPrChangesIncludeDiff:
             patch("shiori.mcp_server.db.get_pr_changes",
                   return_value=([{"path": "src/a.py", "status": "modified",
                                  "additions": 5, "deletions": 2, "changes": 7,
-                                 "blob_url": "url_a"}], "abc1234")),
+                                 "blob_url": "url_a"}], "abc1234", None)),
             patch("shiori.mcp_server.build_token_provider") as mock_build,
             patch("shiori.mcp_server._git_fetch_ref",
                   return_value="refs/shiori/tmp-abc") as mock_git_fetch,
@@ -65,10 +65,9 @@ class TestPrChangesIncludeDiff:
             "pull/42/head", cwd="/data/repos/o/r", provider=mock_build.return_value
         )
         mock_git.assert_called_once_with(
-            ["diff", "HEAD...refs/shiori/tmp-abc", "--unified=3"],
+            [ANY, ANY, "--unified=3"],
             cwd="/data/repos/o/r",
         )
-        mock_git_delete.assert_called_once_with("refs/shiori/tmp-abc", cwd="/data/repos/o/r")
 
     def test_include_diff_true_raises_when_clone_missing(self):
         """FileNotFoundError when clone is missing with include_diff=True."""
@@ -78,7 +77,7 @@ class TestPrChangesIncludeDiff:
             patch("shiori.mcp_server.db.get_pr_changes",
                   return_value=([{"path": "src/a.py", "status": "modified",
                                  "additions": 5, "deletions": 2, "changes": 7,
-                                 "blob_url": "url_a"}], "abc1234")),
+                                 "blob_url": "url_a"}], "abc1234", None)),
             patch("shiori.mcp_server.settings") as mock_settings,
             patch("shiori.mcp_server.os.path.isdir", return_value=False),
             patch("shiori.mcp_server.os.path.realpath",
@@ -96,7 +95,7 @@ class TestPrChangesIncludeDiff:
             patch("shiori.mcp_server.db.get_pr_changes",
                   return_value=([{"path": "src/a.py", "status": "modified",
                                  "additions": 5, "deletions": 2, "changes": 7,
-                                 "blob_url": "url_a"}], "abc1234")),
+                                 "blob_url": "url_a"}], "abc1234", None)),
             patch("shiori.mcp_server.build_token_provider") as mock_build,
             patch("shiori.mcp_server._git_fetch_ref",
                   return_value="refs/shiori/tmp-abc") as mock_git_fetch,

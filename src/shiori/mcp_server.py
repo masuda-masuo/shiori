@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import threading
 import time
 from typing import Any
@@ -590,7 +591,7 @@ def pr_changes(
     Not stored: patch hunks (via GitHub MCP) and PR head files (via shiori_read_pr_file)."""
     target = _resolve_repo(repo)
     with _conn() as conn:
-        files, head_sha = db.get_pr_changes(conn, target, number)
+        files, head_sha, base_sha = db.get_pr_changes(conn, target, number)
     if head_sha is None:
         raise ValueError(
             f"PR #{number} change file map not found."
@@ -602,6 +603,8 @@ def pr_changes(
         "head_sha": head_sha,
         "files": files,
     }
+    if base_sha is not None:
+        result["base_sha"] = base_sha
     if include_diff:
         base = os.path.realpath(settings.repo_dir(target))
         if not os.path.isdir(os.path.join(base, ".git")):
@@ -613,13 +616,99 @@ def pr_changes(
         try:
             provider = build_token_provider(settings)
             tmp_ref = _git_fetch_ref(ref, cwd=base, provider=provider)
+            # Prefer base_sha from DB for accurate diff; fall back to HEAD for legacy rows
+            merge_base = base_sha if base_sha else "HEAD"
             result["diff"] = _git(
-                ["diff", f"HEAD...{tmp_ref}", "--unified=3"], cwd=base
+                ["diff", f"{merge_base}...{tmp_ref}", "--unified=3"], cwd=base
             )
         finally:
             if tmp_ref:
                 _git_delete_ref(tmp_ref, cwd=base)
     return result
+
+
+@mcp.tool(name="shiori_pr_diff")
+def pr_diff(
+    number: int,
+    path: str | None = None,
+    repo: str | None = None,
+) -> dict[str, Any]:
+    """PR の変更差分を返す（issue #96）。
+
+    PRのheadとbaseの差分を取得する。git diff で計算し、ファイル単位の
+    差分を返す。path を指定すると特定ファイルの差分のみ返す。
+
+    number: PR番号
+    path: 特定ファイルのパスのみ取得（省略時は全ファイル）
+    repo: リポジトリ名
+    """
+    target = _resolve_repo(repo)
+    git_dir = os.path.realpath(settings.repo_dir(target))
+    if not os.path.isdir(os.path.join(git_dir, ".git")):
+        raise FileNotFoundError(
+            f"Clone for {target} does not exist. Please run shiori_ingest to sync."
+        )
+
+    # Get base_sha from DB
+    base_sha = None
+    head_sha = None
+    with _conn() as conn:
+        _, stored_head, stored_base = db.get_pr_changes(conn, target, number)
+        head_sha = stored_head
+        base_sha = stored_base
+
+    if head_sha is None:
+        raise ValueError(
+            f"PR #{number} change file map not found. "
+            "Please sync with shiori_ingest."
+        )
+
+    ref = f"pull/{number}/head"
+    tmp_ref = None
+    try:
+        provider = build_token_provider(settings)
+        tmp_ref = _git_fetch_ref(ref, cwd=git_dir, provider=provider)
+        merge_base = base_sha if base_sha else "HEAD"
+        args = ["diff", f"{merge_base}...{tmp_ref}", "--unified=3"]
+        if path:
+            args.extend(["--", path])
+        diff_text = _git(args, cwd=git_dir)
+
+        # Compute stats
+        stat_text = _git(
+            ["diff", f"{merge_base}...{tmp_ref}", "--stat"], cwd=git_dir
+        )
+
+        return {
+            "repo": target,
+            "number": number,
+            "head_sha": head_sha,
+            "base_sha": base_sha,
+            "diff": diff_text,
+            "stats": stat_text.strip() if stat_text else "",
+        }
+    finally:
+        if tmp_ref:
+            _git_delete_ref(tmp_ref, cwd=git_dir)
+
+
+@mcp.tool(name="shiori_pr_review_comments")
+def pr_review_comments(number: int, repo: str | None = None) -> dict[str, Any]:
+    """PR のレビューコメント一覧を返す（issue #96）。
+
+    issue_items テーブルに保存済みの kind='pr_review_comment' を取得する。
+    ファイルパス、行番号、本文、作成者、作成日時を含む。
+    レビュー履歴の確認や他のレビュアーのコメント把握に使う。
+    """
+    target = _resolve_repo(repo)
+    with _conn() as conn:
+        comments = db.get_pr_review_comments(conn, target, number)
+    return {
+        "repo": target,
+        "number": number,
+        "count": len(comments),
+        "comments": comments,
+    }
 
 
 @mcp.tool(name="shiori_read_pr_file")
@@ -737,6 +826,98 @@ def _build_warnings(
         )
 
     return warnings
+
+
+# Patterns for issue reference classification (issue #97)
+_CLOSES_RE = re.compile(
+    r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+(?:#([0-9]+)|https://github\.com/[\w.-]+/[\w.-]+/(?:issues|pull)/([0-9]+))",
+    re.IGNORECASE,
+)
+_DUPLICATE_RE = re.compile(
+    r"\bduplicate\s+(?:of\s+)?(?:#([0-9]+)|https://github\.com/[\w.-]+/[\w.-]+/(?:issues|pull)/([0-9]+))",
+    re.IGNORECASE,
+)
+_REFS_RE = re.compile(
+    r"\b(?:refs?|see|related(?:\s+to)?)\s+(?:#([0-9]+)|https://github\.com/[\w.-]+/[\w.-]+/(?:issues|pull)/([0-9]+))",
+    re.IGNORECASE,
+)
+_MENTION_RE = re.compile(
+    r"(?<!\w)#([0-9]+)"
+)
+
+
+def _extract_refs(text: str | None) -> list[dict]:
+    """Extract classified cross-references from body text (issue #97)."""
+    if not text:
+        return []
+    seen: dict[int, str] = {}
+    for m in _CLOSES_RE.finditer(text):
+        n = int(m.group(1) or m.group(2))
+        if n not in seen:
+            seen[n] = "closes"
+    for m in _DUPLICATE_RE.finditer(text):
+        n = int(m.group(1) or m.group(2))
+        if n not in seen:
+            seen[n] = "duplicate"
+    for m in _REFS_RE.finditer(text):
+        n = int(m.group(1) or m.group(2))
+        if n not in seen:
+            seen[n] = "refs"
+    for m in _MENTION_RE.finditer(text):
+        n = int(m.group(1))
+        if n not in seen:
+            seen[n] = "mention"
+    return [{"issue_no": no, "type": typ} for no, typ in seen.items()]
+
+
+@mcp.tool(name="shiori_issue_links")
+def issue_links(number: int, repo: str | None = None) -> dict[str, Any]:
+    """issue/PR の相互参照（inbound/outbound）を返す（issue #97）。
+
+    本文・コメント中の #N 参照を抽出し、種別（closes/duplicate/refs/mention）を
+    判定する。参照先のタイトル・state も合わせて返す。inbound はこの issue を
+    参照している他の issue/PR の一覧。
+
+    重複チェック、epic 構築、回帰追跡に使う。
+    """
+    target = _resolve_repo(repo)
+    with _conn() as conn:
+        bodies = db.get_issue_bodies(conn, target, number)
+    if not bodies:
+        raise ValueError(f"#{number} は索引されていません（ingest 済みですか？）")
+
+    # Extract outbound refs from all bodies
+    outbound_refs: dict[int, dict] = {}
+    for b in bodies:
+        for ref in _extract_refs(b["body"]):
+            n = ref["issue_no"]
+            if n != number and n not in outbound_refs:
+                outbound_refs[n] = ref
+
+    # Look up referenced issue details
+    outbound_nos = list(outbound_refs)
+    with _conn() as conn:
+        outbound_details = db.get_issues_by_numbers(conn, target, outbound_nos)
+        inbound = db.find_inbound_refs(conn, target, number)
+
+    outbound = []
+    for n, ref in outbound_refs.items():
+        detail = outbound_details.get(n, {})
+        outbound.append({
+            "issue_no": n,
+            "type": ref["type"],
+            "title": detail.get("title"),
+            "state": detail.get("state"),
+            "kind": detail.get("kind"),
+            "url": detail.get("url"),
+        })
+
+    return {
+        "repo": target,
+        "number": number,
+        "outbound": outbound,
+        "inbound": inbound,
+    }
 
 
 @mcp.tool(name="shiori_status")
