@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from shiori.search import _filter_sql, _rank_candidates
+from shiori.search import _filter_sql, _rank_candidates, _to_or_query
 
 # _RESULT_COLS indices (must match constants in search.py)
 _COL_SOURCE_TYPE = 1
@@ -245,3 +245,35 @@ class TestFilterSql:
         assert "kind" not in sql
         assert "state = %s" in sql
         assert params == ["open"]
+
+
+# ── _to_or_query tests (issue #99) ──
+
+class TestToOrQuery:
+    def test_single_token_passthrough(self):
+        assert _to_or_query("clone_dest") == "clone_dest"
+
+    def test_no_space_passthrough(self):
+        assert _to_or_query("日本語") == "日本語"
+
+    def test_two_tokens_or_joined(self):
+        assert _to_or_query("clone_dest repo_name") == "clone_dest OR repo_name"
+
+    def test_three_tokens_or_joined(self):
+        result = _to_or_query("clone_dest repo_name _try_clone_into_container")
+        assert result == "clone_dest OR repo_name OR _try_clone_into_container"
+
+    def test_leading_trailing_whitespace(self):
+        result = _to_or_query("  clone_dest repo_name  ")
+        assert result == "clone_dest OR repo_name"
+
+    def test_multiple_spaces_between_tokens(self):
+        result = _to_or_query("clone_dest    repo_name")
+        assert result == "clone_dest OR repo_name"
+
+    def test_empty_string_returns_empty(self):
+        assert _to_or_query("") == ""
+
+    def test_single_character_tokens(self):
+        result = _to_or_query("a b c")
+        assert result == "a OR b OR c"

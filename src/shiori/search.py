@@ -116,10 +116,19 @@ def _vector_candidates(
         return cur.fetchall()
 
 
+def _to_or_query(query: str) -> str:
+    terms = query.split()
+    if len(terms) <= 1:
+        return query
+    return " OR ".join(terms)
+
+
 def _keyword_candidates(
-    conn: psycopg.Connection, query: str, filters: dict | None, limit: int
+    conn: psycopg.Connection, query: str, filters: dict | None, limit: int,
+    match_all: bool = False,
 ) -> list[tuple]:
     fsql, fparams = _filter_sql(filters)
+    pgroonga_query = query if match_all else _to_or_query(query)
     # Code chunks search both content (signature + docstring) and symbols (identifier-split text)
     # via pgroonga. OR search: hit either to become candidate.
     with conn.cursor() as cur:
@@ -131,7 +140,7 @@ def _keyword_candidates(
             ORDER BY score DESC
             LIMIT %s
             """,
-            [query, query, *fparams, limit],
+            [pgroonga_query, pgroonga_query, *fparams, limit],
         )
         return cur.fetchall()
 
@@ -187,13 +196,16 @@ def keyword_search(
     top_k: int | None = None,
     sort_by: str = "score",
     sort_order: str = "desc",
+    match_all: bool = False,
 ) -> list[dict]:
     """Keyword search (Japanese tokenize). Strong for exact matches: function names, API names, error codes, config keys.
+    Multi-token queries use OR matching by default (any token can match); tokens that match more/strongly rank higher.
+    Pass match_all=True for AND behavior (all tokens must match the same chunk — very narrow).
     sort_by/sort_order for backward compat; ranking always relevance-based (issue #69).
     Returns list of Hit objects."""
     k = top_k or settings.default_top_k
     pool = max(k * 4, 20)
-    rows = _keyword_candidates(conn, query, filters, pool)
+    rows = _keyword_candidates(conn, query, filters, pool, match_all=match_all)
 
     # Decompose candidates into (row_id, score)
     rows_by_id: dict[int, tuple] = {}
