@@ -24,16 +24,17 @@ README や design.md の正規パターンを確認してから操作する。
 run_container_and_exec(
     image="python@sha256:...",       # 省略可（デフォルトイメージ）
     commands=[
-        "git clone https://github.com/user/repo.git /app",
         "cd /app && pip install -e '.[dev]'",
         "cd /app && pytest tests/ -v"
     ],
-    allow_network=True,              # git clone に必須
+    clone_repo="owner/repo",         # Shiori の既存クローンから cp -r（ネットワーク不要）
+    allow_network=True,              # pip install に必須
     inject_vcs_token=True            # private リポジトリの認証に必要
 )
 ```
 
-- git clone するときは必ず `allow_network=True` + `inject_vcs_token=True`
+- `clone_repo` を指定すると Shiori の既存クローンを `cp -r` でコピー（ネットワークなし、1秒未満）。詳細は `docs/design/12`。
+- clone_repo がない場合: 明示的に `git clone https://...` + `allow_network=True` + `inject_vcs_token=True`
 - clone できないときは `GIT_TERMINAL_PROMPT=0` で確認
 - コンテナには `ripgrep` / `ast-grep` / `fd` が同梱済み（コード検索に使える）
 - `sandbox_initialize` + `sandbox_exec` はセッションが長い場合のみ
