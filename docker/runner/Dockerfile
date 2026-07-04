@@ -1,18 +1,14 @@
 # self-hosted GitHub Actions runner（issue #6）。
-# app イメージ（shiori 本体・依存・Python 環境）をベースに Actions runner を追加する。
+# ghcr.io/masuda-masuo/shiori/app イメージをベースに Actions runner を追加する。
 # ジョブは `python -m shiori ingest` を直接実行するため、shiori は PATH に通っている。
 # セキュリティ注意: このイメージは private リポジトリ専用構成。
 # public リポジトリで self-hosted runner を使うと fork PR から任意コードが実行される。
-FROM python:3.12-slim AS shiori-base
+FROM ghcr.io/masuda-masuo/shiori/app:latest
 
+# curl は runner のダウンロードに必要（app イメージには無い）
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends git ca-certificates curl \
+    && apt-get install -y --no-install-recommends curl \
     && rm -rf /var/lib/apt/lists/*
-
-WORKDIR /app
-COPY pyproject.toml README.md ./
-COPY src ./src
-RUN pip install --no-cache-dir .
 
 ENV HF_HOME=/models
 
@@ -89,3 +85,7 @@ COPY docker/runner/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
 ENTRYPOINT ["/entrypoint.sh"]
+# ベースイメージ(app)のCMDを継承すると、entrypoint.sh の "$#" 判定で ./run.sh に
+# 到達できず、docker-compose.yml の runner サービス（command 未指定）が
+# 誤って shiori serve を起動してしまう。明示的に空にする。
+CMD []
