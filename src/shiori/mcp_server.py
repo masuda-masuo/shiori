@@ -368,9 +368,11 @@ def keyword_search(
     top_k: int | None = None,
     sort_by: str = "score",
     sort_order: str = "desc",
+    match_all: bool = False,
 ) -> list[dict[str, Any]]:
     """Keyword search (Japanese tokenize). Strong for exact matches: function names, API names, error codes, config keys.
-    Usually called via semantic_search.
+    Multi-token queries use OR matching by default (any token can match); tokens that match more/strongly rank higher.
+    Pass match_all=True for AND behavior (all tokens must match the same chunk).
     kind: 'issue' | 'pr' — further filter source_type='issue'/'pr_review' results
           by thread type. No effect on doc/code results (issue #98)."""
     with _conn() as conn:
@@ -380,6 +382,7 @@ def keyword_search(
             top_k,
             sort_by,
             sort_order,
+            match_all=match_all,
         )
 
 
