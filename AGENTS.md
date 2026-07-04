@@ -23,11 +23,12 @@ README や design.md の正規パターンを確認してから操作する。
 ```
 run_container_and_exec(
     image="python@sha256:...",       # 省略可（デフォルトイメージ）
+    clone_repo="owner/repo",         # Shiori の既存クローンから cp -r（ネットワーク不要）
+    clone_dest="/app",               # クローン先（既定 /tmp/repo）
     commands=[
         "cd /app && pip install -e '.[dev]'",
         "cd /app && pytest tests/ -v"
     ],
-    clone_repo="owner/repo",         # Shiori の既存クローンから cp -r（ネットワーク不要）
     allow_network=True,              # pip install に必須
     inject_vcs_token=True            # private リポジトリの認証に必要
 )
