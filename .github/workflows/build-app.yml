@@ -12,11 +12,15 @@ on:
     paths:
       - "docker/app/Dockerfile"
       - "pyproject.toml"
+      - "src/**"
+      - "README.md"
       - ".github/workflows/build-app.yml"
   pull_request:
     paths:
       - "docker/app/Dockerfile"
       - "pyproject.toml"
+      - "src/**"
+      - "README.md"
       - ".github/workflows/build-app.yml"
 
 jobs:

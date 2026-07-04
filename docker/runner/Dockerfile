@@ -85,3 +85,7 @@ COPY docker/runner/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
 ENTRYPOINT ["/entrypoint.sh"]
+# ベースイメージ(app)のCMDを継承すると、entrypoint.sh の "$#" 判定で ./run.sh に
+# 到達できず、docker-compose.yml の runner サービス（command 未指定）が
+# 誤って shiori serve を起動してしまう。明示的に空にする。
+CMD []
