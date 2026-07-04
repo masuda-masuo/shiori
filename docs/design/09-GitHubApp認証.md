@@ -242,6 +242,14 @@ secrets:
 
 services:
   app:            # 常駐 MCP サーバー。全認証方式対応（App / PAT / anonymous）
+    environment:
+      # GitHub App 認証（GITHUB_TOKEN はフォールバック、未設定時は anonymous）
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      GITHUB_APP_ID: ${GITHUB_APP_ID:-}
+      GITHUB_APP_INSTALLATION_ID: ${GITHUB_APP_INSTALLATION_ID:-}
+      GITHUB_APP_PRIVATE_KEY_PATH: ${GITHUB_APP_PRIVATE_KEY_PATH:-/run/secrets/github_app_key}
+    secrets:
+      - github_app_key
     ...
   ingest:
     profiles: ["ingest"]   # `up` では起動しない

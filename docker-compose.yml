@@ -28,7 +28,6 @@ services:
       dockerfile: docker/app/Dockerfile
     environment:
       DATABASE_URL: postgresql://shiori:shiori@db:5432/shiori
-      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
       SHIORI_REPOS: ${SHIORI_REPOS:-}
       EMBEDDING_MODEL: ${EMBEDDING_MODEL:-intfloat/multilingual-e5-small}
       EMBEDDING_DIM: ${EMBEDDING_DIM:-384}
@@ -37,7 +36,8 @@ services:
       SHIORI_INDEX_CODE: ${SHIORI_INDEX_CODE:-}
       SHIORI_CODE_EXTENSIONS: ${SHIORI_CODE_EXTENSIONS:-}
       SHIORI_CODE_EXCLUDE_GLOBS: ${SHIORI_CODE_EXCLUDE_GLOBS:-}
-      # GitHub App 認証（PAT を使う場合は GITHUB_TOKEN を渡す、App 優先）
+      # GitHub App 認証（GITHUB_TOKEN はフォールバック、未設定時は anonymous）
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
       GITHUB_APP_ID: ${GITHUB_APP_ID:-}
       GITHUB_APP_INSTALLATION_ID: ${GITHUB_APP_INSTALLATION_ID:-}
       GITHUB_APP_PRIVATE_KEY_PATH: ${GITHUB_APP_PRIVATE_KEY_PATH:-/run/secrets/github_app_key}
@@ -70,7 +70,7 @@ services:
       SHIORI_INDEX_CODE: ${SHIORI_INDEX_CODE:-}
       SHIORI_CODE_EXTENSIONS: ${SHIORI_CODE_EXTENSIONS:-}
       SHIORI_CODE_EXCLUDE_GLOBS: ${SHIORI_CODE_EXCLUDE_GLOBS:-}
-      # GitHub App 認証（PAT を使う場合は GITHUB_TOKEN を渡す）
+      # GitHub App 認証（GITHUB_TOKEN はフォールバック、未設定時は anonymous）
       GITHUB_TOKEN: ${GITHUB_TOKEN:-}
       GITHUB_APP_ID: ${GITHUB_APP_ID:-}
       GITHUB_APP_INSTALLATION_ID: ${GITHUB_APP_INSTALLATION_ID:-}
@@ -106,6 +106,7 @@ services:
       SHIORI_INDEX_CODE: ${SHIORI_INDEX_CODE:-}
       SHIORI_CODE_EXTENSIONS: ${SHIORI_CODE_EXTENSIONS:-}
       SHIORI_CODE_EXCLUDE_GLOBS: ${SHIORI_CODE_EXCLUDE_GLOBS:-}
+      # GitHub App 認証（GITHUB_TOKEN はフォールバック、未設定時は anonymous）
       GITHUB_TOKEN: ${GITHUB_TOKEN:-}
       GITHUB_APP_ID: ${GITHUB_APP_ID:-}
       GITHUB_APP_INSTALLATION_ID: ${GITHUB_APP_INSTALLATION_ID:-}
