@@ -695,7 +695,7 @@ def find_inbound_refs(
               AND body ~ %s
             ORDER BY issue_no, (comment_id = 0) DESC
             """,
-            (repo, issue_no, f"(?<![\\w\\d])#{issue_no}(?![\\d])"),
+            (repo, issue_no, f"(?<!\\w)#{issue_no}(?![\\d])"),
         )
         rows = cur.fetchall()
     return [

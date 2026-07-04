@@ -51,7 +51,7 @@ class TestExtractRefs:
         """Mention regex with negative lookbehind ignores # after letters.
         But regular #123 is still caught."""
         refs = _extract_refs("See https://example.com/page#anchor and #55")
-        assert len(refs) >= 1
+        assert len(refs) == 1
         assert {"issue_no": 55, "type": "mention"} in refs
 
     def test_github_url_closes(self):
