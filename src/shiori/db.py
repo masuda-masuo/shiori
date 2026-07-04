@@ -170,6 +170,11 @@ def _run_alter_statements(conn: psycopg.Connection) -> None:
         cur.execute("ALTER TABLE sync_runs ADD COLUMN IF NOT EXISTS code_indexed INTEGER")
     conn.commit()
 
+    # 6. Add pr_changes.base_sha for PR diff support (issue #96)
+    with conn.cursor() as cur:
+        cur.execute("ALTER TABLE pr_changes ADD COLUMN IF NOT EXISTS base_sha TEXT")
+    conn.commit()
+
 
 def migrate_light(conn: psycopg.Connection, settings: Settings) -> None:
     """Create tables, constraints, and btree indexes only. Skip HNSW/pgroonga (issue #72)."""
@@ -337,12 +342,15 @@ def get_issue_item_count(conn: psycopg.Connection, repo: str) -> int:
 
 def get_pr_changes(
     conn: psycopg.Connection, repo: str, issue_no: int
-) -> tuple[list[dict], str | None]:
-    """Fetch PR change file map (issue #54)."""
+) -> tuple[list[dict], str | None, str | None]:
+    """Fetch PR change file map (issue #54).
+    
+    Returns (files, head_sha, base_sha). base_sha may be None for legacy rows.
+    """
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT path, status, additions, deletions, changes, blob_url, head_sha
+            SELECT path, status, additions, deletions, changes, blob_url, head_sha, base_sha
             FROM pr_changes
             WHERE repo = %s AND issue_no = %s
             ORDER BY path
@@ -351,6 +359,7 @@ def get_pr_changes(
         )
         rows = cur.fetchall()
     head_sha = rows[0][6] if rows else None
+    base_sha = rows[0][7] if rows else None
     files = [
         {
             "path": r[0],
@@ -363,7 +372,7 @@ def get_pr_changes(
         for r in rows
         if r[0]  # Exclude sentinel rows with empty path
     ]
-    return files, head_sha
+    return files, head_sha, base_sha
 
 
 def upsert_pr_changes(
@@ -371,10 +380,15 @@ def upsert_pr_changes(
     repo: str,
     issue_no: int,
     head_sha: str,
-    files: list[dict],
+    base_sha: str | None = None,
+    files: list[dict] | None = None,
 ) -> None:
     """Upsert PR change file map (issue #54). Deletes existing entries for the same PR before insert.
-"""
+    
+    base_sha is optional for backward compatibility with callers that don't provide it.
+    """
+    if files is None:
+        files = []
     with conn.cursor() as cur:
         cur.execute(
             "DELETE FROM pr_changes WHERE repo = %s AND issue_no = %s",
@@ -384,12 +398,12 @@ def upsert_pr_changes(
             for f in files:
                 cur.execute(
                     """
-                    INSERT INTO pr_changes (repo, issue_no, head_sha, path, status,
+                    INSERT INTO pr_changes (repo, issue_no, head_sha, base_sha, path, status,
                                             additions, deletions, changes, blob_url)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     (
-                        repo, issue_no, head_sha,
+                        repo, issue_no, head_sha, base_sha,
                         f["filename"],
                         f.get("status"),
                         f.get("additions"),
@@ -402,11 +416,11 @@ def upsert_pr_changes(
             # Preserve head_sha even for PR with 0 files (sentinel row, path='')
             cur.execute(
                 """
-                INSERT INTO pr_changes (repo, issue_no, head_sha, path, status,
+                INSERT INTO pr_changes (repo, issue_no, head_sha, base_sha, path, status,
                                         additions, deletions, changes, blob_url)
-                VALUES (%s, %s, %s, '', NULL, NULL, NULL, NULL, NULL)
+                VALUES (%s, %s, %s, %s, '', NULL, NULL, NULL, NULL, NULL)
                 """,
-                (repo, issue_no, head_sha),
+                (repo, issue_no, head_sha, base_sha),
             )
 
 
@@ -573,3 +587,124 @@ def bulk_insert_chunks(conn: psycopg.Connection, rows: list[dict]) -> None:
             for r in rows
         ]
         cur.executemany(_BULK_INSERT_SQL, params)
+
+
+def get_pr_review_comments(
+    conn: psycopg.Connection, repo: str, issue_no: int
+) -> list[dict]:
+    """Fetch review comments for a PR (issue #96).
+    
+    Returns list of review comments with path, line, body, author, created_at.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT comment_id, author, is_bot, path, line, body, url, created_at
+            FROM issue_items
+            WHERE repo = %s AND issue_no = %s AND kind = 'pr_review_comment'
+            ORDER BY created_at ASC
+            """,
+            (repo, issue_no),
+        )
+        rows = cur.fetchall()
+    return [
+        {
+            "comment_id": r[0],
+            "author": r[1],
+            "is_bot": r[2],
+            "path": r[3],
+            "line": r[4],
+            "body": r[5],
+            "url": r[6],
+            "created_at": r[7].isoformat() if r[7] else None,
+        }
+        for r in rows
+    ]
+
+
+def get_issue_bodies(
+    conn: psycopg.Connection, repo: str, issue_no: int
+) -> list[dict]:
+    """Get all body texts for an issue/PR for link extraction (issue #97)."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT comment_id, kind, author, body, url, created_at
+            FROM issue_items
+            WHERE repo = %s AND issue_no = %s
+            ORDER BY (comment_id = 0) DESC, created_at ASC
+            """,
+            (repo, issue_no),
+        )
+        rows = cur.fetchall()
+    return [
+        {
+            "comment_id": r[0],
+            "kind": r[1],
+            "author": r[2],
+            "body": r[3],
+            "url": r[4],
+            "created_at": r[5].isoformat() if r[5] else None,
+        }
+        for r in rows
+    ]
+
+
+def get_issues_by_numbers(
+    conn: psycopg.Connection, repo: str, issue_nos: list[int]
+) -> dict[int, dict]:
+    """Get title and state for a set of issue numbers (issue #97)."""
+    if not issue_nos:
+        return {}
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT issue_no, title, state, kind, url
+            FROM issue_items
+            WHERE repo = %s AND issue_no = ANY(%s) AND comment_id = 0
+            """,
+            (repo, issue_nos),
+        )
+        rows = cur.fetchall()
+    return {
+        r[0]: {
+            "title": r[1],
+            "state": r[2],
+            "kind": r[3],
+            "url": r[4],
+        }
+        for r in rows
+    }
+
+
+def find_inbound_refs(
+    conn: psycopg.Connection, repo: str, issue_no: int
+) -> list[dict]:
+    """Find other issues/PRs that reference this issue (issue #97).
+    
+    Searches issue_items body for '#{issue_no}' pattern and returns
+    the referencing items.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT DISTINCT ON (issue_no) issue_no, comment_id, kind, author, body, url, created_at
+            FROM issue_items
+            WHERE repo = %s
+              AND issue_no != %s
+              AND body ~ %s
+            ORDER BY issue_no, (comment_id = 0) DESC
+            """,
+            (repo, issue_no, f"(?<!\\w)#{issue_no}(?![\\d])"),
+        )
+        rows = cur.fetchall()
+    return [
+        {
+            "issue_no": r[0],
+            "author": r[3],
+            "body_snippet": (r[4] or "")[:200],
+            "url": r[5],
+            "created_at": r[6].isoformat() if r[6] else None,
+        }
+        for r in rows
+    ]

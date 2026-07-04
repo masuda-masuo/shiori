@@ -707,12 +707,13 @@ def _sync_pr_changes(
 ) -> None:
     """Sync PR change file maps (issue #54).
     GET /repos/{repo}/pulls/{issue_number}/files"""
-    # 1. Fetch PR details to get head_sha
+    # 1. Fetch PR details to get head_sha and base_sha
     try:
         resp = client.get(f"{API}/repos/{repo}/pulls/{issue_no}")
         resp.raise_for_status()
         pr_data = resp.json()
         head_sha = pr_data.get("head", {}).get("sha")
+        base_sha = pr_data.get("base", {}).get("sha")
         if not head_sha:
             log.debug("PR #%d: could not obtain head_sha", issue_no)
             return
@@ -739,9 +740,9 @@ def _sync_pr_changes(
         return
 
     # 4. upsert
-    upsert_pr_changes(conn, repo, issue_no, head_sha, files)
-    log.info("PR #%d: updated change file map (head_sha=%s, %d files)",
-             issue_no, head_sha[:7], len(files))
+    upsert_pr_changes(conn, repo, issue_no, head_sha, base_sha, files)
+    log.info("PR #%d: updated change file map (head_sha=%s, base_sha=%s, %d files)",
+             issue_no, head_sha[:7], (base_sha or "?")[:7], len(files))
 
 
 def _sync_pr_reviews(

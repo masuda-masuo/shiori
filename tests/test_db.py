@@ -30,16 +30,17 @@ class TestGetPrChanges:
         return conn, cursor
 
     def test_returns_files_and_head_sha(self):
-        """ファイル一覧と head_sha を正しく返す（1クエリで両方取得）。"""
+        """ファイル一覧と head_sha + base_sha も含めて返す。"""
         conn, cursor = self._mock_conn(
             [
-                ("src/a.py", "modified", 5, 2, 7, "url_a", "abc1234"),
-                ("src/b.py", "added", 10, 0, 10, "url_b", "abc1234"),
+                ("src/a.py", "modified", 5, 2, 7, "url_a", "abc1234", "def4567"),
+                ("src/b.py", "added", 10, 0, 10, "url_b", "abc1234", "def4567"),
             ],
         )
-        files, sha = get_pr_changes(conn, "o/r", 42)
+        files, head_sha, base_sha = get_pr_changes(conn, "o/r", 42)
 
-        assert sha == "abc1234"
+        assert head_sha == "abc1234"
+        assert base_sha == "def4567"
         assert len(files) == 2
         assert files[0] == {
             "path": "src/a.py",
@@ -52,25 +53,27 @@ class TestGetPrChanges:
         assert files[1]["path"] == "src/b.py"
 
     def test_returns_empty_list_and_none_when_no_rows(self):
-        """pr_changes に行がない場合、空リストと None を返す。"""
+        """pr_changes に行がない場合、空リストと None×2 を返す。"""
         conn, cursor = self._mock_conn([])
 
-        files, sha = get_pr_changes(conn, "o/r", 42)
+        files, head_sha, base_sha = get_pr_changes(conn, "o/r", 42)
 
         assert files == []
-        assert sha is None
+        assert head_sha is None
+        assert base_sha is None
 
     def test_excludes_sentinel_rows(self):
-        """path が空文字の sentinel 行は files に含まれず、head_sha は取得される。"""
+        """path が空文字の sentinel 行は files に含まれず、head_sha と base_sha は取得される。"""
         conn, cursor = self._mock_conn(
             [
-                ("", None, None, None, None, None, "abc1234"),  # sentinel
+                ("", None, None, None, None, None, "abc1234", "def4567"),  # sentinel
             ],
         )
-        files, sha = get_pr_changes(conn, "o/r", 42)
+        files, head_sha, base_sha = get_pr_changes(conn, "o/r", 42)
 
         assert files == []
-        assert sha == "abc1234"
+        assert head_sha == "abc1234"
+        assert base_sha == "def4567"
 
     def test_uses_order_by_path_in_query(self):
         """SQL に ORDER BY path が含まれている。ソートは DB 側に委譲。"""
@@ -116,7 +119,7 @@ class TestUpsertPrChanges:
             },
         ]
 
-        upsert_pr_changes(conn, "o/r", 42, "abc1234", files)
+        upsert_pr_changes(conn, "o/r", 42, "abc1234", "def4567", files)
 
         # DELETE が 1 回呼ばれたか
         cursor.execute.assert_any_call(
@@ -136,18 +139,19 @@ class TestUpsertPrChanges:
         cursor = MagicMock()
         conn.cursor.return_value.__enter__.return_value = cursor
 
-        upsert_pr_changes(conn, "o/r", 42, "abc1234", [])
+        upsert_pr_changes(conn, "o/r", 42, "abc1234", "def4567", [])
 
         # DELETE + sentinel INSERT の 2 回
         assert cursor.execute.call_count == 2
 
         # sentinel INSERT のパラメータを検証
-        # path='' は SQL に直書きのため、パラメータは (repo, issue_no, head_sha) の 3 要素
+        # path='' は SQL に直書きのため、パラメータは (repo, issue_no, head_sha, base_sha) の 4 要素
         sentinel_params = cursor.execute.call_args_list[1][0][1]
-        assert len(sentinel_params) == 3
+        assert len(sentinel_params) == 4
         assert sentinel_params[0] == "o/r"       # repo
         assert sentinel_params[1] == 42           # issue_no
         assert sentinel_params[2] == "abc1234"    # head_sha
+        assert sentinel_params[3] == "def4567"    # base_sha
 
     def test_handles_none_fields(self):
         """blob_url 等が None でも正しく扱われる。"""
@@ -166,12 +170,12 @@ class TestUpsertPrChanges:
             },
         ]
 
-        upsert_pr_changes(conn, "o/r", 42, "def5678", files)
+        upsert_pr_changes(conn, "o/r", 42, "def5678", "base9999", files)
 
         insert_params = cursor.execute.call_args_list[1][0][1]
-        assert insert_params[3] == "deleted.py"  # path
-        assert insert_params[4] == "removed"     # status
-        assert insert_params[8] is None          # blob_url
+        assert insert_params[4] == "deleted.py"  # path (after repo, issue_no, head_sha, base_sha)
+        assert insert_params[5] == "removed"     # status
+        assert insert_params[9] is None          # blob_url
 
 
 # ── get_pr_head_sha ──
