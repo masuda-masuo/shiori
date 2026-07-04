@@ -7,6 +7,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import subprocess
 import threading
 import time
 from typing import Any
@@ -54,14 +55,42 @@ def _conn():
     return db.connect(settings)
 
 
+def _infer_repo_from_cwd() -> str | None:
+    """Infer repo from git remote of current working directory."""
+    try:
+        result = subprocess.run(  # noqa: S607
+            ["git", "remote", "get-url", "origin"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode != 0:
+            return None
+        remote_url = result.stdout.strip()
+        if "github.com" not in remote_url:
+            return None
+        path_part = remote_url.split("github.com")[-1].lstrip("/:")
+        candidate = path_part.replace(".git", "").strip()
+        if candidate.count("/") == 1:
+            return candidate if candidate in settings.repos else None
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        pass
+    return None
+
+
 def _resolve_repo(repo: str | None) -> str:
     if repo:
         return repo
-    if len(settings.repos) == 1:
-        return settings.repos[0]
-    raise ValueError(
-        f"Please specify a repo. Configured: {', '.join(settings.repos) or '(none)'}"
+    if not settings.repos:
+        raise ValueError("SHIORI_REPOS not set")
+    inferred = _infer_repo_from_cwd()
+    if inferred:
+        return inferred
+    log.info(
+        "repo not specified and could not be inferred from cwd; "
+        "falling back to %s (configured: %s)",
+        settings.repos[0],
+        ", ".join(settings.repos),
     )
+    return settings.repos[0]
 
 
 def _make_filters(
