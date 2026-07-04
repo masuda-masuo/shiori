@@ -1,6 +1,6 @@
 # 詳細設計/07: db / app の 2 サービス分離。データとモデルは named volume に永続化。
 # ingest は使い捨てのワンショット（profiles: ["ingest"]）。GitHub App 秘密鍵は
-# ingest / runner にだけ渡し、常駐 app には渡さない（詳細設計/09）。
+# app / ingest / runner に渡す。build_token_provider() が認証方式を自動選択する。
 # runner は self-hosted Actions runner（issue #6）。push / issue / PR で即時差分同期。
 services:
   db:
@@ -37,6 +37,12 @@ services:
       SHIORI_INDEX_CODE: ${SHIORI_INDEX_CODE:-}
       SHIORI_CODE_EXTENSIONS: ${SHIORI_CODE_EXTENSIONS:-}
       SHIORI_CODE_EXCLUDE_GLOBS: ${SHIORI_CODE_EXCLUDE_GLOBS:-}
+      # GitHub App 認証（PAT を使う場合は GITHUB_TOKEN を渡す、App 優先）
+      GITHUB_APP_ID: ${GITHUB_APP_ID:-}
+      GITHUB_APP_INSTALLATION_ID: ${GITHUB_APP_INSTALLATION_ID:-}
+      GITHUB_APP_PRIVATE_KEY_PATH: ${GITHUB_APP_PRIVATE_KEY_PATH:-/run/secrets/github_app_key}
+    secrets:
+      - github_app_key
     volumes:
       - models:/models   # 埋め込みモデルの重みキャッシュ
       - repos:/data      # git クローン先
