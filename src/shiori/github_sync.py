@@ -171,6 +171,8 @@ def _git(args: list[str], cwd: str | None = None) -> str:
         cwd=cwd,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
     )
     if out.returncode != 0:
