@@ -69,7 +69,7 @@ dependabot 等の bot 投稿は検索ノイズを避けるため原則索引か�
 cp .env.example .env   # SHIORI_REPOS / GITHUB_TOKEN を設定
 docker compose up -d --build
 
-# 初回の索引作成（private リポジトリには事前に .env の GITHUB_TOKEN または GitHub App の設定が必要）
+# 初回の索引作成（private リポジトリには事前に .env の認証設定が必要 — セットアップ.md 参照）
 docker compose run --rm ingest
 ```
 

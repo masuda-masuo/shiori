@@ -4,4 +4,5 @@ build/
 .env
 .venv/
 secrets/
+runtime/
 opencode.json
