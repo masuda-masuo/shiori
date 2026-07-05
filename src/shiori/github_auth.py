@@ -96,17 +96,17 @@ class AppTokenProvider(TokenProvider):
 
         if resp.status_code == 401:
             raise RuntimeError(
-                "GitHub App JWT was rejected (401). Check GITHUB_APP_ID and private key pairing,"
+                "GitHub App JWT was rejected (401). Check GITHUB_APP_ID and private key pairing, "
                 "and server clock."
             )
         if resp.status_code == 404:
             raise RuntimeError(
-                "Installation not found (404). Check GITHUB_APP_INSTALLATION_ID and"
+                "Installation not found (404). Check GITHUB_APP_INSTALLATION_ID and "
                 "whether the App is installed on the target repository."
             )
         if resp.status_code == 403:
             raise RuntimeError(
-                "Insufficient permissions (403). Check App permissions (Contents / Issues / Pull requests: Read) and"
+                "Insufficient permissions (403). Check App permissions (Contents / Issues / Pull requests: Read) and "
                 "the installation target repository."
             )
         resp.raise_for_status()  # 201 is success
