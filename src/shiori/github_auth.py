@@ -12,6 +12,7 @@ import calendar
 import logging
 import shlex
 import subprocess
+import sys
 import time
 from dataclasses import dataclass
 
@@ -139,10 +140,20 @@ class TokenCommandProvider(TokenProvider):
 
     def _refresh(self) -> None:
         try:
-            result = subprocess.run(
-                shlex.split(self._command), capture_output=True,
-                text=True, timeout=15.0,
-            )
+            # Use shell=True on Windows to preserve backslash paths (shlex.split
+            # follows POSIX rules and strips backslashes; #139).
+            # GITHUB_TOKEN_COMMAND is an admin-configured env var, so shell metachar
+            # injection (|, &, >) is not a practical concern here.
+            if sys.platform == "win32":
+                result = subprocess.run(
+                    self._command, capture_output=True,
+                    text=True, timeout=15.0, shell=True,
+                )
+            else:
+                result = subprocess.run(
+                    shlex.split(self._command), capture_output=True,
+                    text=True, timeout=15.0,
+                )
             token = result.stdout.strip()
             if token:
                 self._token = token
