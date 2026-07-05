@@ -842,7 +842,7 @@ def grep_search(
     if not resolved.startswith(os.path.realpath(base) + os.sep) and resolved != os.path.realpath(base):
         raise ValueError("path must be inside the repository")
 
-    cmd = ["rg", "-n"]
+    cmd = ["rg", "-n", "--no-heading", "--color", "never"]
     if context > 0:
         cmd.extend(["-C", str(context)])
     if not regex:
@@ -877,7 +877,7 @@ def grep_search(
                     text = parts[2] if len(parts) > 2 else ""
                     if len(matches) < max_results:
                         matches.append({
-                            "path": path or "",
+                            "path": parts[0],
                             "line": int(parts[1]),
                             "text": text,
                         })
