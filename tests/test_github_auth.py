@@ -20,6 +20,7 @@ from shiori.github_auth import (
     AnonymousProvider,
     AppTokenProvider,
     StaticTokenProvider,
+    TokenCommandProvider,
     build_token_provider,
 )
 
@@ -28,6 +29,7 @@ _ENV_KEYS = [
     "GITHUB_APP_ID",
     "GITHUB_APP_INSTALLATION_ID",
     "GITHUB_APP_PRIVATE_KEY",
+    "GITHUB_TOKEN_COMMAND",
     "GITHUB_APP_PRIVATE_KEY_PATH",
 ]
 
@@ -141,3 +143,55 @@ def test_refresh_error_messages(monkeypatch, rsa_pem, code, fragment):
     with pytest.raises(RuntimeError) as ei:
         prov.get_token()
     assert fragment in str(ei.value)
+
+
+
+def test_provider_token_command(clean_env):
+    clean_env.setenv("GITHUB_TOKEN_COMMAND", "echo ghs_token123")
+    p = build_token_provider(Settings())
+    assert isinstance(p, TokenCommandProvider)
+    assert p.get_token() == "ghs_token123"
+
+
+def test_provider_token_command_preferred_over_pat(clean_env):
+    clean_env.setenv("GITHUB_TOKEN_COMMAND", "echo ghs_token456")
+    clean_env.setenv("GITHUB_TOKEN", "ghp_xxx")
+    p = build_token_provider(Settings())
+    assert isinstance(p, TokenCommandProvider)
+    assert p.get_token() == "ghs_token456"
+
+
+def test_provider_command_after_app(clean_env, rsa_pem):
+    clean_env.setenv("GITHUB_APP_ID", "123")
+    clean_env.setenv("GITHUB_APP_INSTALLATION_ID", "456")
+    clean_env.setenv("GITHUB_APP_PRIVATE_KEY", rsa_pem)
+    clean_env.setenv("GITHUB_TOKEN_COMMAND", "echo ghs_token789")
+    p = build_token_provider(Settings())
+    assert isinstance(p, AppTokenProvider)
+
+
+def test_token_command_provider_cache(clean_env):
+    p = TokenCommandProvider("echo ghs_cached")
+    assert p.get_token() == "ghs_cached"
+    # second call should use cache (not re-run command)
+    assert p.get_token() == "ghs_cached"
+
+
+def test_token_command_provider_empty_output(clean_env):
+    p = TokenCommandProvider("echo")
+    with pytest.raises(RuntimeError):
+        p.get_token()
+
+
+def test_token_command_provider_fallback(clean_env, monkeypatch):
+    from unittest.mock import MagicMock
+    import shiori.github_auth as ga
+    p = TokenCommandProvider("nonexistent_cmd_xyz")
+    # prime cache
+    p._token = "ghs_old"
+    p._fetched_at = time.time()
+    # make the actual subprocess fail
+    mock_run = MagicMock(side_effect=FileNotFoundError("no such command"))
+    monkeypatch.setattr(ga.subprocess, "run", mock_run)
+    # fallback to cached token
+    assert p.get_token() == "ghs_old"

@@ -1,5 +1,5 @@
 @echo off
-for /f "usebackq delims=" %%t in (`C:\work\mcp\mcp-token.exe github`) do set GITHUB_TOKEN=%%t
+set GITHUB_TOKEN_COMMAND=C:\work\mcp\mcp-token.exe github
 set SHIORI_REPOS=masuda-masuo/shiori,masuda-masuo/code-sandbox-mcp,masuda-masuo/mcp-launcher
 set SHIORI_INDEX_CODE=true
 set SHIORI_ALLOW_REBUILD=false
