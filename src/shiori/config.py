@@ -126,7 +126,7 @@ class Settings:
     code_exclude_globs: list[str] = field(
         default_factory=_code_exclude_globs_from_env
     )
-    # Allow rebuild=True from MCP tool shiori_ingest (full TRUNCATE). Issue #63.
+    # Allow rebuild=True from CLI ingest (full TRUNCATE). Issue #63.
     # Default false. Set true only when operationally required.
     # CLI path (python -m shiori ingest --rebuild) always allowed regardless.
     allow_rebuild: bool = field(default_factory=_allow_rebuild_from_env)

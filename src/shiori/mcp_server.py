@@ -322,20 +322,19 @@ mcp = FastMCP(
     host=settings.mcp_host,
     port=settings.mcp_port,
     instructions=(
-        "Hybrid search of GitHub repository knowledge (Markdown docs, issue/PR discussions,"
-        "and source code)."
-        "First search with shiori_search to get pointers + snippets, then fetch"
-        "only the needed range via shiori_read_file / shiori_read_issue."
-        "For exact match of proper nouns, API names, error codes, function names, use shiori_keyword_search."
-        "If the index seems stale (recent changes not found), call shiori_ingest for diff sync."
-        "Check index freshness with shiori_status."
-        "Code files can be discovered via shiori_list_tree and read via shiori_read_file"
-        "(supports path, start_line, end_line)."
-        "shiori_list_tree supports filtering by source_type='doc'/'code' and extension='.py'."
-        "Code can be searched via shiori_search / shiori_keyword_search"
-        "(filter by source_type='code' and prog_lang filter)."
-        "PR change file maps are available via shiori_pr_changes."
-        "PR head file content can be read transparently via shiori_read_pr_file (issue #81)."
+        "Hybrid search of GitHub repository knowledge (Markdown docs, issue/PR discussions, "
+        "and source code). "
+        "First search with shiori_search to get pointers + snippets, then fetch "
+        "only the needed range via shiori_read_file / shiori_read_issue. "
+        "For exact match of proper nouns, API names, error codes, function names, use shiori_keyword_search. "
+        "Check index freshness with shiori_status. "
+        "Code files can be discovered via shiori_list_tree and read via shiori_read_file "
+        "(supports path, start_line, end_line). "
+        "shiori_list_tree supports filtering by source_type='doc'/'code' and extension='.py'. "
+        "Code can be searched via shiori_search / shiori_keyword_search "
+        "(filter by source_type='code' and prog_lang filter). "
+        "PR change file maps are available via shiori_pr_changes. "
+        "PR head file content can be read transparently via shiori_read_pr_file (issue #81). "
         "\n"
         "\u25a0 Two-store model (information sources)\n"
         "shiori has 2 independent data sources:\n"
@@ -344,7 +343,7 @@ mcp = FastMCP(
         "   - shiori_read_issue: issue/PR threads (indexed only)\n"
         "   - shiori_list_tree (source_type='doc'): indexed doc_files table\n"
         "   - shiori_pr_changes: PR change file maps (indexed metadata)\n"
-        "   - Freshness depends on shiori_ingest / auto-sync\n"
+        "   - Freshness depends on auto-sync / CLI ingest\n"
         "2. Clone (disk, pinned to main branch)\n"
         "   - shiori_read_file: read real files directly (no index needed, works if clone exists)\n"
         "   - shiori_read_pr_file: get PR head files via git (non-destructive to working tree)\n"
@@ -538,7 +537,7 @@ def _read_issue_single(target: str, number: int, exclude_noise_bots: bool) -> di
         )
         rows = cur.fetchall()
     if not rows:
-        raise ValueError(f"#{number} is not indexed (has ingest been run?)")
+        raise ValueError(f"#{number} is not indexed (run CLI ingest first)")
     # Exclude bots outside the allowlist (issue #44)
     if exclude_noise_bots:
         allowlist = settings.index_bot_logins
@@ -623,8 +622,8 @@ def pr_changes(
         files, head_sha, base_sha = db.get_pr_changes(conn, target, number)
     if head_sha is None:
         raise ValueError(
-            f"PR #{number} change file map not found."
-            "Please sync with shiori_ingest."
+            f"PR #{number} change file map not found. "
+            "Check shiori_status and sync if stale."
         )
     result: dict[str, Any] = {
         "repo": target,
@@ -658,7 +657,7 @@ def _compute_pr_diff(
     git_dir = os.path.realpath(settings.repo_dir(target))
     if not os.path.isdir(os.path.join(git_dir, ".git")):
         raise FileNotFoundError(
-            f"Clone for {target} does not exist. Please run shiori_ingest to sync."
+            f"Clone for {target} does not exist. Run python -m shiori ingest first."
         )
 
     ref = f"pull/{number}/head"
@@ -702,7 +701,7 @@ def pr_diff(
     if head_sha is None:
         raise ValueError(
             f"PR #{number} change file map not found. "
-            "Please sync with shiori_ingest."
+            "Check shiori_status and sync if stale."
         )
 
     diff_text, stat_text = _compute_pr_diff(number, target, base_sha, path)
@@ -750,7 +749,7 @@ def read_pr_file(
 
     if not os.path.isdir(os.path.join(base, ".git")):
         raise FileNotFoundError(
-            f"Clone for {target} does not exist. Please run shiori_ingest to sync."
+            f"Clone for {target} does not exist. Run python -m shiori ingest first."
         )
 
     ref = f"pull/{number}/head"
@@ -797,9 +796,11 @@ def read_pr_file(
             _git_delete_ref(tmp_ref, cwd=base)
 
 
-@mcp.tool(name="shiori_ingest")
 def ingest(rebuild: bool = False, repo: str | None = None) -> dict[str, Any]:
     """Sync docs/issues/code from GitHub and update index (diff sync, typically seconds).
+    Check index freshness with shiori_status first — auto-sync keeps the index
+    fresh, so ingest is normally unnecessary. Call this only when shiori_status
+    reports the index is stale.
     rebuild=True: discard and full rebuild (requires SHIORI_ALLOW_REBUILD=true; issue #63).
     Also treated as rebuild when chunks table is empty."""
     if rebuild and not settings.allow_rebuild:
@@ -847,7 +848,7 @@ def _build_warnings(
     if missing:
         warnings.append(
             f"Unsynced categories: {', '.join(missing)}."
-            "Please run shiori_ingest for diff sync"
+            "Run python -m shiori ingest for diff sync"
         )
 
     return warnings

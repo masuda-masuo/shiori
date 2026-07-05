@@ -13,8 +13,7 @@ README や design.md の正規パターンを確認してから操作する。
 - `shiori_read_issue`: issue/PR のスレッド全体を取得
 - `shiori_read_file`: クローンされた実ファイルを読む
 - `shiori_read_pr_file`: PR head のファイルを読む
-- `shiori_ingest`: 索引が古いときに差分同期
-- `shiori_status`: 索引の鮮度確認
+- `shiori_status`: 索引の鮮度確認（自動同期が有効なら通常不要）
 
 ## code-sandbox-mcp
 
@@ -51,3 +50,4 @@ run_container_and_exec(
 - テスト実行: `PYTHONPATH=src python3 -m pytest tests/ -v`
 - 本番環境では `psycopg` が必要 → Docker Compose で PostgreSQL を起動
 - リポジトリ: masuda-masuo/shiori, masuda-masuo/code-sandbox-mcp
+- 索引更新（CLI）: `python -m shiori ingest`（`shiori_ingest` MCP ツールは廃止）
