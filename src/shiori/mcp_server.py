@@ -805,8 +805,8 @@ def ingest(rebuild: bool = False, repo: str | None = None) -> dict[str, Any]:
     Also treated as rebuild when chunks table is empty."""
     if rebuild and not settings.allow_rebuild:
         raise ValueError(
-            "rebuild=True cannot be executed from the MCP tool."
-            "Use the CLI (python -m shiori ingest --rebuild) or"
+            "rebuild=True cannot be executed from the MCP tool. "
+            "Use the CLI (python -m shiori ingest --rebuild) or "
             "set the environment variable SHIORI_ALLOW_REBUILD=true."
         )
     return _do_sync(repos=[repo] if repo else None, rebuild=rebuild, route="mcp")
