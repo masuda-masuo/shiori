@@ -50,6 +50,11 @@ class Settings:
     github_token: str | None = field(
         default_factory=lambda: os.environ.get("GITHUB_TOKEN") or None
     )
+    # External command to obtain token (e.g. "mcp-token github").
+    # Gets called periodically; stdout is the token. Optional.
+    github_token_command: str | None = field(
+        default_factory=lambda: os.environ.get("GITHUB_TOKEN_COMMAND") or None
+    )
     # GitHub App authentication (short-lived token. See detailed design/09).
     # App preferred if all 3 present; fall back to github_token; then anonymous.
     github_app_id: str | None = field(

@@ -19,10 +19,12 @@ MCP サーバーは GitHub に触れない」という前提だったが、issue
 
 ## 決定事項
 
-1. **認証は `TokenProvider` 抽象に統一する。** 静的トークン（PAT）と GitHub App の
-   2 実装を持ち、`github_sync` は provider 経由でのみトークンに触れる。
-2. **App 認証が設定されていれば App を優先、なければ `GITHUB_TOKEN`、どちらも
-   なければ匿名**（公開リポジトリのみ可）。両方設定時は App を使い info ログを出す。
+1. **認証は `TokenProvider` 抽象に統一する。** 静的トークン（PAT）、GitHub App、
+   および外部コマンド（TokenCommand）の 3 実装を持ち、`github_sync` は provider 経由でのみトークンに触れる。
+2. **App > TokenCommand > PAT > 匿名** の優先順位。TokenCommand は `GITHUB_TOKEN_COMMAND` 環境変数で
+   指定されたコマンド（例: `mcp-token github`）を定期実行してトークンを取得する。
+   App が設定されていれば App を優先、なければ TokenCommand、なければ `GITHUB_TOKEN`、どちらも
+   なければ匿名。TokenCommand と PAT 両方設定時は TokenCommand を使い info ログを出す。
 3. **トークンは expiry の 5 分前を過ぎたら再発行**（provider 内でキャッシュ）。
    初回 ingest（CPU 埋め込みで 1 時間超があり得る）でも途中で失効しない。
 4. **git の認証は clone URL 埋め込みをやめ、`http.extraHeader` で毎回注入する。**
@@ -42,7 +44,11 @@ MCP サーバーは GitHub に触れない」という前提だったが、issue
 | `GITHUB_APP_PRIVATE_KEY_PATH` | 秘密鍵 PEM のパス。既定 `/run/secrets/github_app_key` |
 | `GITHUB_APP_PRIVATE_KEY` | PEM 本文を直接渡す場合（PATH より優先度低。両方あれば PATH） |
 | `GITHUB_APP_INSTALLATION_ID` | Installation ID（数値文字列） |
-| `GITHUB_TOKEN` | 従来どおり。App 未設定時のフォールバック |
+| `GITHUB_TOKEN` | 従来どおり。App / TokenCommand 未設定時のフォールバック |
+| `GITHUB_TOKEN_COMMAND` | 外部コマンド（例: `mcp-token github`）。stdout がトークン。TokenCommandProvider がキャッシュ＋自動再発行。 |
+
+TokenCommand の優先順位: App > TokenCommand > PAT > 匿名。
+TokenCommand と PAT 両方設定時は TokenCommand を優先し info ログを出す。
 
 App 利用の判定: `GITHUB_APP_ID` と `GITHUB_APP_INSTALLATION_ID` が両方あり、
 鍵（PATH または本文）が読めること。一部だけ設定されている場合は起動時に
@@ -170,6 +176,30 @@ def build_token_provider(settings: "Settings") -> TokenProvider:
 
 > `_refresh()` の UTC 変換・ネットワークエラー時のキャッシュフォールバック・403 専用の
 > エラーメッセージは、上記コード例どおりに実装済み（issue #14）。
+
+### 6. TokenCommandProvider（第3実装）
+
+`TokenCommandProvider` は外部コマンド（例: `mcp-token github`）を定期実行してトークンを取得する。
+キャッシュ有効期間は55分（GitHub installation token の1時間より5分短い）、
+コマンド失敗時はキャッシュ期限内（60分）ならフォールバックする。
+
+`Settings` への追加: `github_token_command`（`GITHUB_TOKEN_COMMAND` 環境変数）。
+`build_token_provider()` の優先順位（更新）:
+
+```python
+def build_token_provider(settings: "Settings") -> TokenProvider:
+    # App 優先（既存）
+    ...
+    # TokenCommand が次に優先
+    if settings.github_token_command:
+        if settings.github_token:
+            log.info("GITHUB_TOKEN_COMMAND takes priority over GITHUB_TOKEN")
+        return TokenCommandProvider(settings.github_token_command)
+    # StaticToken（PAT）
+    if settings.github_token:
+        return StaticTokenProvider(settings.github_token)
+    return AnonymousProvider()
+```
 
 `Settings` への追加: `github_app_id` / `github_app_installation_id`（環境変数の単純読み）、
 `github_app_private_key()`（`GITHUB_APP_PRIVATE_KEY_PATH` のファイルを読む。
@@ -301,6 +331,11 @@ issue #116 で廃止された `runner` を除く最新の全サービス構成�
    匿名 → 空リスト。
 5. 結合: 旧トークン入り URL を仕込んだ `.git/config` が `remote set-url` で
    浄化されること。
+6. `build_token_provider`: App + TokenCommand 両方 → App 優先 / TokenCommand のみ → TokenCommandProvider /
+   TokenCommand + PAT 両方 → TokenCommand 優先 / すべてなし → Anonymous。
+7. `TokenCommandProvider`: 初回 get_token でコマンド実行、キャッシュ有効中は再実行しない、
+   55分経過で再実行、コマンド失敗時は60分以内ならキャッシュフォールバック、
+   空出力＋キャッシュなしで RuntimeError。
 
 ## 検討事項 / 未決
 
