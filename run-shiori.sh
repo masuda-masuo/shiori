@@ -8,4 +8,4 @@ if "$DIR/stop-shiori.sh" 2>/dev/null; then
   sleep 1
 fi
 
-exec python -m shiori serve "$@"
+exec "$DIR/.venv/bin/python" -m shiori serve "$@"

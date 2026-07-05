@@ -8,6 +8,11 @@ if [ -f "$DIR/.env" ]; then
   set +a
 fi
 
+if [ ! -d "$DIR/.venv" ]; then
+  echo "Creating Python virtual environment at $DIR/.venv..."
+  python3 -m venv "$DIR/.venv"
+fi
+
 # GITHUB_TOKEN_COMMAND 経由で TokenCommandProvider が定期実行・自動更新する
 export GITHUB_TOKEN_COMMAND=${GITHUB_TOKEN_COMMAND:-}
 export SHIORI_REPOS=${SHIORI_REPOS:-masuda-masuo/shiori}
