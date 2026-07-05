@@ -817,6 +817,7 @@ def grep_search(
     repo: str | None = None,
     path: str | None = None,
     regex: bool = False,
+    ignore_case: bool = True,
     max_results: int = 200,
 ) -> dict[str, Any]:
     """Grep clone files with ripgrep. Stage-2 search after shiori_search/keyword_search
@@ -825,6 +826,7 @@ def grep_search(
     pattern: search pattern (regex or fixed string)
     path: optional file/subdir path within repo to scope the search
     regex: True for regex search, False (default) for fixed-string search
+    ignore_case: case-insensitive search (default True)
     max_results: maximum matches to return (default 200)
     """
     target = _resolve_repo(repo)
@@ -841,6 +843,8 @@ def grep_search(
         raise ValueError("path must be inside the repository")
 
     cmd = ["rg", "-n", "--no-heading", "--color", "never"]
+    if ignore_case:
+        cmd.append("-i")
     if not regex:
         cmd.append("--fixed-strings")
     cmd.extend(["-e", pattern])

@@ -281,3 +281,28 @@ class TestGrepSearch:
             result = grep_search(pattern="test")
 
             assert result["matches"][0]["path"] == "src/other.py"
+
+
+    def test_ignore_case_default(self):
+        """Default ignore_case=True passes -i to rg."""
+        with (
+            patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
+            patch("shiori.mcp_server.settings") as mock_settings,
+            patch("shiori.mcp_server.os.path.isdir", return_value=True),
+            patch(
+                "shiori.mcp_server.os.path.realpath",
+                side_effect=lambda p: p,
+            ),
+            patch("shiori.mcp_server.subprocess.run") as mock_run,
+        ):
+            mock_settings.repo_dir.return_value = "/data/repos"
+            mock_result = MagicMock()
+            mock_result.stdout = ""
+            mock_result.returncode = 1
+            mock_result.stderr = ""
+            mock_run.return_value = mock_result
+
+            grep_search(pattern="Error")
+
+            cmd = mock_run.call_args[0][0]
+            assert "-i" in cmd
