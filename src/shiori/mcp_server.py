@@ -322,20 +322,19 @@ mcp = FastMCP(
     host=settings.mcp_host,
     port=settings.mcp_port,
     instructions=(
-        "Hybrid search of GitHub repository knowledge (Markdown docs, issue/PR discussions,"
-        "and source code)."
-        "First search with shiori_search to get pointers + snippets, then fetch"
-        "only the needed range via shiori_read_file / shiori_read_issue."
-        "For exact match of proper nouns, API names, error codes, function names, use shiori_keyword_search."
-        "If the index seems stale (recent changes not found), call shiori_ingest for diff sync."
-        "Check index freshness with shiori_status."
-        "Code files can be discovered via shiori_list_tree and read via shiori_read_file"
-        "(supports path, start_line, end_line)."
-        "shiori_list_tree supports filtering by source_type='doc'/'code' and extension='.py'."
-        "Code can be searched via shiori_search / shiori_keyword_search"
-        "(filter by source_type='code' and prog_lang filter)."
-        "PR change file maps are available via shiori_pr_changes."
-        "PR head file content can be read transparently via shiori_read_pr_file (issue #81)."
+        "Hybrid search of GitHub repository knowledge (Markdown docs, issue/PR discussions, "
+        "and source code). "
+        "First search with shiori_search to get pointers + snippets, then fetch "
+        "only the needed range via shiori_read_file / shiori_read_issue. "
+        "For exact match of proper nouns, API names, error codes, function names, use shiori_keyword_search. "
+        "Check index freshness with shiori_status. "
+        "Code files can be discovered via shiori_list_tree and read via shiori_read_file "
+        "(supports path, start_line, end_line). "
+        "shiori_list_tree supports filtering by source_type='doc'/'code' and extension='.py'. "
+        "Code can be searched via shiori_search / shiori_keyword_search "
+        "(filter by source_type='code' and prog_lang filter). "
+        "PR change file maps are available via shiori_pr_changes. "
+        "PR head file content can be read transparently via shiori_read_pr_file (issue #81). "
         "\n"
         "\u25a0 Two-store model (information sources)\n"
         "shiori has 2 independent data sources:\n"
@@ -797,9 +796,11 @@ def read_pr_file(
             _git_delete_ref(tmp_ref, cwd=base)
 
 
-@mcp.tool(name="shiori_ingest")
 def ingest(rebuild: bool = False, repo: str | None = None) -> dict[str, Any]:
     """Sync docs/issues/code from GitHub and update index (diff sync, typically seconds).
+    Check index freshness with shiori_status first — auto-sync keeps the index
+    fresh, so ingest is normally unnecessary. Call this only when shiori_status
+    reports the index is stale.
     rebuild=True: discard and full rebuild (requires SHIORI_ALLOW_REBUILD=true; issue #63).
     Also treated as rebuild when chunks table is empty."""
     if rebuild and not settings.allow_rebuild:
