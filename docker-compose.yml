@@ -1,7 +1,7 @@
 # 詳細設計/07: db / app の 2 サービス分離。データとモデルは named volume に永続化。
 # ingest は使い捨てのワンショット（profiles: ["ingest"]）。GitHub App 秘密鍵は
-# app / ingest / runner に渡す。build_token_provider() が認証方式を自動選択する。
-# runner は self-hosted Actions runner（issue #6）。push / issue / PR で即時差分同期。
+# app / ingest に渡す。build_token_provider() が認証方式を自動選択する。
+# 同期は serve のバックグラウンドポーリング（SHIORI_SYNC_INTERVAL_SECONDS）に一本化。
 services:
   db:
     build: docker/db
@@ -84,44 +84,6 @@ services:
       db:
         condition: service_healthy
 
-  # self-hosted Actions runner（issue #6）。
-  # push / issue / PR イベントを GitHub からアウトバウンドのロングポーリングで受け取り、
-  # `python -m shiori ingest` を実行する。inbound ポート開放・トンネル・Webhook 不要。
-  # 初回起動前に `docker compose run --rm runner ./config.sh ...` で登録が必要。
-  # profiles: ["runner"] により、`docker compose up -d` だけでは起動しない。
-  # COMPOSE_PROFILES=runner（または --profile runner）で有効化（issue #15）。
-  # セキュリティ注意: private リポジトリ専用。public 化する場合はプロファイルを無効化し、
-  # config.sh remove で runner 登録を解除すること
-  # （fork PR からの任意コード実行リスク。代替は Webhook + Cloudflare Tunnel + HMAC）。
-  runner:
-    profiles: ["runner"]
-    build:
-      context: .
-      dockerfile: docker/runner/Dockerfile
-    environment:
-      DATABASE_URL: postgresql://shiori:shiori@db:5432/shiori
-      SHIORI_REPOS: ${SHIORI_REPOS:-}
-      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-intfloat/multilingual-e5-small}
-      EMBEDDING_DIM: ${EMBEDDING_DIM:-384}
-      SHIORI_INDEX_CODE: ${SHIORI_INDEX_CODE:-}
-      SHIORI_CODE_EXTENSIONS: ${SHIORI_CODE_EXTENSIONS:-}
-      SHIORI_CODE_EXCLUDE_GLOBS: ${SHIORI_CODE_EXCLUDE_GLOBS:-}
-      # GitHub App 認証（GITHUB_TOKEN はフォールバック、未設定時は anonymous）
-      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
-      GITHUB_APP_ID: ${GITHUB_APP_ID:-}
-      GITHUB_APP_INSTALLATION_ID: ${GITHUB_APP_INSTALLATION_ID:-}
-      GITHUB_APP_PRIVATE_KEY_PATH: ${GITHUB_APP_PRIVATE_KEY_PATH:-/run/secrets/github_app_key}
-    secrets:
-      - github_app_key
-    volumes:
-      - models:/models
-      - repos:/data
-      - runner-state:/actions-runner
-    depends_on:
-      db:
-        condition: service_healthy
-    restart: unless-stopped
-
 secrets:
   github_app_key:
     # GitHub App の秘密鍵 PEM。リポジトリにはコミットしない（.gitignore 済み）。
@@ -132,4 +94,4 @@ volumes:
   dbdata:
   models:
   repos:
-  runner-state:   # runner の登録状態（.runner / .credentials）を永続化する
+

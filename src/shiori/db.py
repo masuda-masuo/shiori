@@ -35,7 +35,7 @@ CREATE TABLE IF NOT EXISTS sync_state (
 -- Updated on every successful sync (even 0 changes), so it indicates freshness.
 CREATE TABLE IF NOT EXISTS sync_runs (
     repo TEXT PRIMARY KEY,
-    route TEXT,                   -- 'cli' | 'runner' | 'mcp' | 'auto'
+    route TEXT,                   -- 'cli' | 'runner'(deprecated) | 'mcp' | 'auto'
     finished_at TIMESTAMPTZ NOT NULL,
     docs_updated INTEGER,
     issues_indexed INTEGER,
