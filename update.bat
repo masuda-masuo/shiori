@@ -1,8 +1,9 @@
 @echo off
-cd /d "C:\work\mcp\shiori"
+set DIR=%~dp0
+cd /d "%DIR%"
 git pull
-.venv\Scripts\pip.exe install torch --index-url https://download.pytorch.org/whl/cpu
-.venv\Scripts\pip.exe install -e .[dev]
+"%DIR%.venv\Scripts\pip.exe" install torch --index-url https://download.pytorch.org/whl/cpu
+"%DIR%.venv\Scripts\pip.exe" install -e .[dev]
 
 echo.
 echo Update done. Run run-shiori.bat to start.

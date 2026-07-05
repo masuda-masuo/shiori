@@ -1,4 +1,4 @@
 @echo off
-cd /d "C:\work\mcp\shiori"
-call env.bat
-.venv\Scripts\python.exe -m shiori ingest %*
+set DIR=%~dp0
+call "%DIR%env.bat"
+"%DIR%.venv\Scripts\python.exe" -m shiori ingest %*
