@@ -1,4 +1,6 @@
 @echo off
+REM GITHUB_TOKEN_COMMAND 経由で TokenCommandProvider が定期実行・自動更新する
+REM （従来の for /f + GITHUB_TOKEN 一時設定ではリフレッシュできなかった）
 set GITHUB_TOKEN_COMMAND=C:\work\mcp\mcp-token.exe github
 set SHIORI_REPOS=masuda-masuo/shiori,masuda-masuo/code-sandbox-mcp,masuda-masuo/mcp-launcher
 set SHIORI_INDEX_CODE=true

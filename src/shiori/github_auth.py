@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import calendar
 import logging
+import shlex
 import subprocess
 import time
 from dataclasses import dataclass
@@ -139,7 +140,7 @@ class TokenCommandProvider(TokenProvider):
     def _refresh(self) -> None:
         try:
             result = subprocess.run(
-                self._command, shell=True, capture_output=True,
+                shlex.split(self._command), capture_output=True,
                 text=True, timeout=15.0,
             )
             token = result.stdout.strip()
