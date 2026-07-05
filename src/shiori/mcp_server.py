@@ -662,21 +662,32 @@ def _compute_pr_diff(
 
     ref = f"pull/{number}/head"
     tmp_ref = None
+    tmp_base = None
     try:
         provider = build_token_provider(settings)
         tmp_ref = _git_fetch_ref(ref, cwd=git_dir, provider=provider)
-        merge_base = base_sha if base_sha else "HEAD"
-        args = ["diff", f"{merge_base}...{tmp_ref}", "--unified=3"]
+
+        if base_sha:
+            tmp_base = _git_fetch_ref(
+                base_sha, cwd=git_dir, provider=provider,
+            )
+            diff_base = tmp_base
+        else:
+            diff_base = "HEAD"
+
+        args = ["diff", f"{diff_base}..{tmp_ref}", "--unified=3"]
         if path:
             args.extend(["--", path])
         diff_text = _git(args, cwd=git_dir)
         stat_text = _git(
-            ["diff", f"{merge_base}...{tmp_ref}", "--stat"], cwd=git_dir
+            ["diff", f"{diff_base}..{tmp_ref}", "--stat"], cwd=git_dir
         )
         return diff_text, stat_text.strip() if stat_text else ""
     finally:
         if tmp_ref:
             _git_delete_ref(tmp_ref, cwd=git_dir)
+        if tmp_base:
+            _git_delete_ref(tmp_base, cwd=git_dir)
 
 
 @mcp.tool(name="shiori_pr_diff")
