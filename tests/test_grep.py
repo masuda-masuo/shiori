@@ -219,3 +219,98 @@ class TestGrepSearch:
             cmd = mock_run.call_args[0][0]
             assert "-C" in cmd
             assert "3" in cmd[cmd.index("-C") + 1]
+
+    def test_default_regex_is_false(self):
+        """Default regex=False passes --fixed-strings to rg."""
+        with (
+            patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
+            patch("shiori.mcp_server.settings") as mock_settings,
+            patch("shiori.mcp_server.os.path.isdir", return_value=True),
+            patch(
+                "shiori.mcp_server.os.path.realpath",
+                side_effect=lambda p: p,
+            ),
+            patch("shiori.mcp_server.subprocess.run") as mock_run,
+        ):
+            mock_settings.repo_dir.return_value = "/data/repos"
+            mock_result = MagicMock()
+            mock_result.stdout = ""
+            mock_result.returncode = 1
+            mock_result.stderr = ""
+            mock_run.return_value = mock_result
+
+            grep_search(pattern="foo.bar")
+
+            cmd = mock_run.call_args[0][0]
+            assert "--fixed-strings" in cmd
+
+    def test_e_flag_for_pattern(self):
+        """Pattern is passed via -e to avoid flag interpretation."""
+        with (
+            patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
+            patch("shiori.mcp_server.settings") as mock_settings,
+            patch("shiori.mcp_server.os.path.isdir", return_value=True),
+            patch(
+                "shiori.mcp_server.os.path.realpath",
+                side_effect=lambda p: p,
+            ),
+            patch("shiori.mcp_server.subprocess.run") as mock_run,
+        ):
+            mock_settings.repo_dir.return_value = "/data/repos"
+            mock_result = MagicMock()
+            mock_result.stdout = ""
+            mock_result.returncode = 1
+            mock_result.stderr = ""
+            mock_run.return_value = mock_result
+
+            grep_search(pattern="--debug")
+
+            cmd = mock_run.call_args[0][0]
+            assert "-e" in cmd
+            assert cmd[cmd.index("-e") + 1] == "--debug"
+
+    def test_path_strip_absolute_prefix(self):
+        """Path in match entries is stripped to repo-relative."""
+        with (
+            patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
+            patch("shiori.mcp_server.settings") as mock_settings,
+            patch("shiori.mcp_server.os.path.isdir", return_value=True),
+            patch(
+                "shiori.mcp_server.os.path.realpath",
+                side_effect=lambda p: p,
+            ),
+            patch("shiori.mcp_server.subprocess.run") as mock_run,
+        ):
+            mock_settings.repo_dir.return_value = "/data/repos/o__r"
+            mock_result = MagicMock()
+            mock_result.stdout = "/data/repos/o__r/src/file.py:42:content\n"
+            mock_result.returncode = 0
+            mock_result.stderr = ""
+            mock_run.return_value = mock_result
+
+            result = grep_search(pattern="test")
+
+            assert result["matches"][0]["path"] == "src/file.py"
+
+    def test_path_kept_when_within_base(self):
+        """Path inside base without prefix is kept as-is."""
+        with (
+            patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
+            patch("shiori.mcp_server.settings") as mock_settings,
+            patch("shiori.mcp_server.os.path.isdir", return_value=True),
+            patch(
+                "shiori.mcp_server.os.path.realpath",
+                side_effect=lambda p: p,
+            ),
+            patch("shiori.mcp_server.subprocess.run") as mock_run,
+        ):
+            mock_settings.repo_dir.return_value = "/data/repos/o__r"
+            mock_result = MagicMock()
+            mock_result.stdout = "/data/repos/o__r/src/other.py:1:line\n"
+            mock_result.returncode = 0
+            mock_result.stderr = ""
+            mock_run.return_value = mock_result
+
+            result = grep_search(pattern="test")
+
+            assert result["matches"][0]["path"] == "src/other.py"

@@ -817,7 +817,7 @@ def grep_search(
     repo: str | None = None,
     path: str | None = None,
     context: int = 0,
-    regex: bool = True,
+    regex: bool = False,
     max_results: int = 200,
 ) -> dict[str, Any]:
     """Grep clone files with ripgrep. Stage-2 search after shiori_search/keyword_search
@@ -826,7 +826,7 @@ def grep_search(
     pattern: search pattern (regex or fixed string)
     path: optional file/subdir path within repo to scope the search
     context: number of surrounding context lines (default 0)
-    regex: True (default) for regex search, False for fixed-string search
+    regex: True for regex search, False (default) for fixed-string search
     max_results: maximum matches to return (default 200)
     """
     target = _resolve_repo(repo)
@@ -847,7 +847,7 @@ def grep_search(
         cmd.extend(["-C", str(context)])
     if not regex:
         cmd.append("--fixed-strings")
-    cmd.append(pattern)
+    cmd.extend(["-e", pattern])
     cmd.append(resolved)
 
     try:
@@ -876,8 +876,11 @@ def grep_search(
                     total += 1
                     text = parts[2] if len(parts) > 2 else ""
                     if len(matches) < max_results:
+                        rel_path = parts[0]
+                        if rel_path.startswith(base + "/"):
+                            rel_path = rel_path[len(base) + 1:]
                         matches.append({
-                            "path": parts[0],
+                            "path": rel_path,
                             "line": int(parts[1]),
                             "text": text,
                         })
