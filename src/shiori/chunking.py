@@ -308,6 +308,15 @@ def _build_heading_path(path_prefix: str, name: str, kind: str) -> str:
     return f"{path_prefix} ({kind_label} {name})" if path_prefix else f"({kind_label} {name})"
 
 
+_IDENT_RE = re.compile(r'[a-zA-Z_][a-zA-Z0-9_]*')
+
+
+def _extract_idents(text: str) -> str:
+    """Extract all identifier tokens and split at camelCase/snake_case boundaries."""
+    idents = _IDENT_RE.findall(text)
+    return _split_symbols(' '.join(idents))
+
+
 def split_code(file_path: str, content: str, max_chars: int = _CODE_MAX_CHARS) -> list[Chunk]:
     """Chunk source code by function/method/class (detailed design/10 Step 2).
 """
@@ -355,6 +364,47 @@ def split_code(file_path: str, content: str, max_chars: int = _CODE_MAX_CHARS) -
 
     chunks: list[Chunk] = []
     all_nodes = [n for _, n in def_nodes_raw]
+
+    # Module-level code: gaps between definitions (issue #102)
+    base_name = os.path.basename(file_path)
+    total_src_lines = len(source_lines)
+    covered = [False] * total_src_lines
+    for _, n in def_nodes_raw:
+        for ln in range(n.start_point[0], n.end_point[0] + 1):
+            if ln < total_src_lines:
+                covered[ln] = True
+
+    gap_start: int | None = None
+    gap_regions: list[tuple[int, int]] = []
+    for ln in range(total_src_lines):
+        sline = source_lines[ln]
+        is_noise = (
+            not sline.strip()
+            or sline.strip().startswith(('import ', 'from ', '#'))
+        )
+        if not covered[ln] and not is_noise:
+            if gap_start is None:
+                gap_start = ln
+        else:
+            if gap_start is not None:
+                gap_regions.append((gap_start, ln - 1))
+                gap_start = None
+    if gap_start is not None:
+        gap_regions.append((gap_start, total_src_lines - 1))
+
+    for gs, ge in gap_regions:
+        gap_lines = source_lines[gs:ge + 1]
+        gap_text = '\n'.join(gap_lines).strip()
+        if not gap_text:
+            continue
+        for part in _split_long_text(gap_text, max_chars):
+            chunks.append(Chunk(
+                content=f"[{base_name}] (module)\n{part}",
+                heading_path=base_name,
+                start_line=gs + 1,
+                end_line=ge + 1,
+                symbols=_extract_idents(part),
+            ))
 
     for capture_name, ts_node in def_nodes_raw:
         start_line = ts_node.start_point[0]
