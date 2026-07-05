@@ -141,7 +141,9 @@ class TokenCommandProvider(TokenProvider):
     def _refresh(self) -> None:
         try:
             # Use shell=True on Windows to preserve backslash paths (shlex.split
-            # follows POSIX rules and strips backslashes; #issue-xx).
+            # follows POSIX rules and strips backslashes; #139).
+            # GITHUB_TOKEN_COMMAND is an admin-configured env var, so shell metachar
+            # injection (|, &, >) is not a practical concern here.
             if sys.platform == "win32":
                 result = subprocess.run(
                     self._command, capture_output=True,
