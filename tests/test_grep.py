@@ -66,14 +66,6 @@ class TestGrepSearch:
         assert result["total_matches"] == 0
         assert result["matches"] == []
 
-    def test_zero_context_default(self):
-        """Default context=0 returns only matching lines."""
-        rg_out = "src/file.py:1:match this\n"
-        result = self._run_grep(rg_stdout=rg_out)
-
-        assert len(result["matches"]) == 1
-        assert result["matches"][0]["line"] == 1
-
     def test_empty_stdout(self):
         """Empty stdout returns empty matches."""
         result = self._run_grep(rg_stdout="")
@@ -194,31 +186,6 @@ class TestGrepSearch:
 
             with pytest.raises(FileNotFoundError, match="Clone for"):
                 grep_search(pattern="test")
-
-    def test_context_param(self):
-        """context parameter adds -C to rg."""
-        with (
-            patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
-            patch("shiori.mcp_server.settings") as mock_settings,
-            patch("shiori.mcp_server.os.path.isdir", return_value=True),
-            patch(
-                "shiori.mcp_server.os.path.realpath",
-                side_effect=lambda p: p,
-            ),
-            patch("shiori.mcp_server.subprocess.run") as mock_run,
-        ):
-            mock_settings.repo_dir.return_value = "/data/repos"
-            mock_result = MagicMock()
-            mock_result.stdout = ""
-            mock_result.returncode = 1
-            mock_result.stderr = ""
-            mock_run.return_value = mock_result
-
-            grep_search(pattern="test", context=3)
-
-            cmd = mock_run.call_args[0][0]
-            assert "-C" in cmd
-            assert "3" in cmd[cmd.index("-C") + 1]
 
     def test_default_regex_is_false(self):
         """Default regex=False passes --fixed-strings to rg."""

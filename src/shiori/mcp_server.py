@@ -816,16 +816,14 @@ def grep_search(
     pattern: str,
     repo: str | None = None,
     path: str | None = None,
-    context: int = 0,
     regex: bool = False,
     max_results: int = 200,
 ) -> dict[str, Any]:
     """Grep clone files with ripgrep. Stage-2 search after shiori_search/keyword_search
-    narrowed down the target file. Returns line-level matches with context lines.
+    narrowed down the target file. Returns line-level matches.
 
     pattern: search pattern (regex or fixed string)
     path: optional file/subdir path within repo to scope the search
-    context: number of surrounding context lines (default 0)
     regex: True for regex search, False (default) for fixed-string search
     max_results: maximum matches to return (default 200)
     """
@@ -843,8 +841,6 @@ def grep_search(
         raise ValueError("path must be inside the repository")
 
     cmd = ["rg", "-n", "--no-heading", "--color", "never"]
-    if context > 0:
-        cmd.extend(["-C", str(context)])
     if not regex:
         cmd.append("--fixed-strings")
     cmd.extend(["-e", pattern])
