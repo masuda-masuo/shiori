@@ -1,6 +1,7 @@
 from shiori.chunking import (
     Chunk,
     _TS_AVAILABLE,
+    _extract_idents,
     _find_breakpoint,
     _split_long_text,
     _split_symbols,
@@ -308,3 +309,76 @@ def test_find_breakpoint_small_max_chars():
     assert _find_breakpoint("ABCDE", 5) == 5
     assert _find_breakpoint("AB、CDE", 5) == 3
     assert _find_breakpoint("AB", 1) == 1
+
+
+# ---------------------------------------------------------------------------
+# _extract_idents / module-level gaps (issue #102)
+# ---------------------------------------------------------------------------
+
+
+def test_extract_idents_method_chain():
+    """mcp.tool()(func) produces 'mcp tool func'."""
+    result = _extract_idents("sandbox_exec = mcp.tool()(sandbox_exec)")
+    assert "mcp" in result
+    assert "tool" in result
+    assert "sandbox" in result
+    assert "exec" in result
+
+
+def test_extract_idents_empty():
+    assert _extract_idents("") == ""
+    assert _extract_idents("123") == ""
+
+
+def test_extract_idents_decorator():
+    """@mcp.tool() extracts both mcp and tool."""
+    result = _extract_idents("@mcp.tool()")
+    assert "mcp" in result
+    assert "tool" in result
+
+
+@pytest.mark.skipif(not _TS_PYTHON_OK, reason="tree-sitter python parser not available")
+def test_split_code_module_level_method_call():
+    """Module-level mcp.tool()(func) patterns are captured."""
+    code = '''\
+import os
+import sys
+
+sandbox_exec = mcp.tool()(sandbox_exec)
+publish = mcp.tool()(publish)
+
+@mcp.tool()
+def my_tool(a: int) -> int:
+    """My tool."""
+    return a
+'''
+    chunks = split_code("server.py", code)
+    # Should have: module gap(s) + the function def
+    module_chunks = [c for c in chunks if "sandbox_exec" in c.content]
+    assert len(module_chunks) >= 1, "module-level mcp.tool()() not indexed"
+    mc = module_chunks[0]
+    assert "mcp.tool" in mc.content, f"content missing mcp.tool: {mc.content!r}"
+    assert mc.start_line is not None
+    assert mc.end_line is not None
+    assert mc.symbols is not None
+    assert "mcp" in mc.symbols
+    assert "tool" in mc.symbols
+
+
+@pytest.mark.skipif(not _TS_PYTHON_OK, reason="tree-sitter python parser not available")
+def test_split_code_module_gap_does_not_swallow_imports():
+    """Pure import/comment blocks before definitions produce no extra chunk."""
+    code = '''\
+import os
+from typing import Any
+
+# This is a comment.
+
+def hello() -> None:
+    pass
+'''
+    chunks = split_code("mod.py", code)
+    # Only the function def chunk — no module chunk for import noise
+    assert len(chunks) == 1
+    assert chunks[0].heading_path is not None
+    assert "hello" in chunks[0].content
