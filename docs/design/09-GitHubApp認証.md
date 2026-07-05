@@ -12,7 +12,7 @@
 MCP サーバーは GitHub に触れない」という前提だったが、issue #6 で serve プロセス内の
 自動同期（`SHIORI_SYNC_INTERVAL_SECONDS`）と `shiori_ingest` ツールを追加したため、
 現在は常駐 `app` も `GITHUB_TOKEN`（PAT）で GitHub に触れる。本設計では、
-すべてのサービス（app / ingest / runner）で App 認証を使う。`build_token_provider()` が
+すべてのサービス（app / ingest）で App 認証を使う。`build_token_provider()` が
 環境変数の有無に応じて App / PAT / anonymous を自動選択する。
 ジョブ内でトークンを取得し、長時間ジョブに備えてリクエスト単位で再発行できれば十分、
 という基本方針自体は変わらない。
@@ -28,7 +28,7 @@ MCP サーバーは GitHub に触れない」という前提だったが、issue
 4. **git の認証は clone URL 埋め込みをやめ、`http.extraHeader` で毎回注入する。**
    理由: 現行方式は `.git/config` にトークンが平文で永続化され（named volume 上に残る）、
    短期トークンでは次回 pull 時に失効済みトークンが残って失敗する。
-5. **GitHub App の秘密鍵は app / ingest / runner の全サービスに渡す。**
+5. **GitHub App の秘密鍵は app / ingest の全サービスに渡す。**
    compose 上では secrets + environment で全サービスに同一設定を共有する。
    `build_token_provider()` が App → PAT → anonymous の優先順位で認証方式を選択する。
    PAT 運用時も `GITHUB_TOKEN` は全サービスに渡す。
@@ -268,8 +268,7 @@ services:
 `./secrets/` は `.gitignore` に追加する。
 
 上記は compose の基本構成を示す抜粋であり、`app` + `ingest` のみを示している。
-issue #6 で追加された `runner`（self-hosted runner、App 秘密鍵を保持）を含む
-最新の全サービス構成は `docker-compose.yml` を参照すること。
+issue #116 で廃止された `runner` を除く最新の全サービス構成は `docker-compose.yml` を参照すること。
 
 ### 5. App の権限（README に記載）
 
@@ -313,6 +312,6 @@ issue #6 で追加された `runner`（self-hosted runner、App 秘密鍵を保�
 ## 基本設計.md への反映
 
 - §5 決定ログに「GitHub 認証は TokenProvider 抽象。GitHub App（installation token、
-  extraHeader 注入）を推奨、PAT はフォールバック。App 秘密鍵は ingest / runner 限定、
+  extraHeader 注入）を推奨、PAT はフォールバック。App 秘密鍵は app / ingest に渡し、
   PAT は app にも渡す」を追記。
 - §6 未決事項に「MCP サーバー自体の認可（OAuth 2.1）— リモート公開時」を追加。

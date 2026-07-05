@@ -160,7 +160,7 @@ def _redact(text: str) -> str:
 
 def _git(args: list[str], cwd: str | None = None) -> str:
     # When cwd is specified, explicitly set safe.directory for security.
-    # app/ingest (root) and runner (non-root) share /data/repos;
+    # app/ingest (root) runs in the container where /data/repos is mounted;
     # prevents git dubious ownership errors (issue #48).
     cmd = ["git"]
     if cwd:
