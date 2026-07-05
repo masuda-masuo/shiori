@@ -72,7 +72,6 @@ class TestGrepSearch:
         result = self._run_grep(rg_stdout=rg_out)
 
         assert len(result["matches"]) == 1
-        # With context=0, there should be no context lines
         assert result["matches"][0]["line"] == 1
 
     def test_empty_stdout(self):
@@ -158,14 +157,20 @@ class TestGrepSearch:
 
     def test_path_escape_raises(self):
         """Path traversal outside the repo raises ValueError."""
+        def _mock_realpath(p: str) -> str:
+            if "/../" in p:
+                return "/etc/passwd"
+            return p
+
         with (
             patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
             patch("shiori.mcp_server.settings") as mock_settings,
             patch("shiori.mcp_server.os.path.isdir", return_value=True),
             patch(
                 "shiori.mcp_server.os.path.realpath",
-                side_effect=lambda p: p,
+                side_effect=_mock_realpath,
             ),
+            patch("shiori.mcp_server.subprocess.run") as mock_run,
         ):
             mock_settings.repo_dir.return_value = "/data/repos"
             import pytest
