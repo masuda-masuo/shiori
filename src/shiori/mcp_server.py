@@ -349,7 +349,11 @@ mcp = FastMCP(
         "   - shiori_read_pr_file: get PR head files via git (non-destructive to working tree)\n"
         "   - shiori_list_tree (source_type='code'): physically existing code files via os.walk\n"
         "   - Clone is maintained by sync_docs via clone --depth=1 + reset --hard origin/HEAD\n"
-        "   - shiori_read_pr_file fetches PR head via git fetch starting from the clone"
+        "   - shiori_read_pr_file fetches PR head via git fetch starting from the clone\n"
+        "3. Clone grep (ripgrep)\n"
+        "   - shiori_grep: line-level search in clone files via ripgrep\n"
+        "   - Use after shiori_search/keyword_search to narrow down matches to specific lines\n"
+        "   - Supports regex, fixed-strings, and context lines"
     ),
 )
 
@@ -805,6 +809,94 @@ def read_pr_file(
     finally:
         if tmp_ref:
             _git_delete_ref(tmp_ref, cwd=base)
+
+
+@mcp.tool(name="shiori_grep")
+def grep_search(
+    pattern: str,
+    repo: str | None = None,
+    path: str | None = None,
+    regex: bool = False,
+    ignore_case: bool = True,
+    max_results: int = 200,
+) -> dict[str, Any]:
+    """Grep clone files with ripgrep. Stage-2 search after shiori_search/keyword_search
+    narrowed down the target file. Returns line-level matches.
+
+    pattern: search pattern (regex or fixed string)
+    path: optional file/subdir path within repo to scope the search
+    regex: True for regex search, False (default) for fixed-string search
+    ignore_case: case-insensitive search (default True)
+    max_results: maximum matches to return (default 200)
+    """
+    target = _resolve_repo(repo)
+    base = os.path.realpath(settings.repo_dir(target))
+
+    if not os.path.isdir(base):
+        raise FileNotFoundError(
+            f"Clone for {target} does not exist. Run python -m shiori ingest first."
+        )
+
+    search_path = os.path.join(base, path) if path else base
+    resolved = os.path.realpath(search_path)
+    if not resolved.startswith(os.path.realpath(base) + os.sep) and resolved != os.path.realpath(base):
+        raise ValueError("path must be inside the repository")
+
+    cmd = ["rg", "-n", "--no-heading", "--color", "never"]
+    if ignore_case:
+        cmd.append("-i")
+    if not regex:
+        cmd.append("--fixed-strings")
+    cmd.extend(["-e", pattern])
+    cmd.append(resolved)
+
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except FileNotFoundError:
+        raise RuntimeError("ripgrep (rg) is not installed in this container")
+
+    if result.returncode not in (0, 1):
+        raise RuntimeError(f"rg failed (exit {result.returncode}): {result.stderr.strip()}")
+
+    matches: list[dict[str, Any]] = []
+    total = 0
+    if result.stdout:
+        for line in result.stdout.splitlines():
+            if not line.strip() or line.startswith("--"):
+                continue
+            parts = line.split(":", 2)
+            if len(parts) >= 2:
+                try:
+                    int(parts[1])
+                    total += 1
+                    text = parts[2] if len(parts) > 2 else ""
+                    if len(matches) < max_results:
+                        rel_path = parts[0]
+                        if rel_path.startswith(base + "/"):
+                            rel_path = rel_path[len(base) + 1:]
+                        matches.append({
+                            "path": rel_path,
+                            "line": int(parts[1]),
+                            "text": text,
+                        })
+                except ValueError:
+                    pass
+
+    truncated = total > max_results
+
+    return {
+        "repo": target,
+        "pattern": pattern,
+        "path": path or "",
+        "total_matches": total,
+        "truncated": truncated,
+        "matches": matches,
+    }
 
 
 def ingest(rebuild: bool = False, repo: str | None = None) -> dict[str, Any]:
