@@ -343,7 +343,7 @@ mcp = FastMCP(
         "   - shiori_read_issue: issue/PR threads (indexed only)\n"
         "   - shiori_list_tree (source_type='doc'): indexed doc_files table\n"
         "   - shiori_pr_changes: PR change file maps (indexed metadata)\n"
-        "   - Freshness depends on shiori_ingest / auto-sync\n"
+        "   - Freshness depends on auto-sync / CLI ingest\n"
         "2. Clone (disk, pinned to main branch)\n"
         "   - shiori_read_file: read real files directly (no index needed, works if clone exists)\n"
         "   - shiori_read_pr_file: get PR head files via git (non-destructive to working tree)\n"
@@ -537,7 +537,7 @@ def _read_issue_single(target: str, number: int, exclude_noise_bots: bool) -> di
         )
         rows = cur.fetchall()
     if not rows:
-        raise ValueError(f"#{number} is not indexed (has ingest been run?)")
+        raise ValueError(f"#{number} is not indexed (run CLI ingest first)")
     # Exclude bots outside the allowlist (issue #44)
     if exclude_noise_bots:
         allowlist = settings.index_bot_logins
@@ -622,8 +622,8 @@ def pr_changes(
         files, head_sha, base_sha = db.get_pr_changes(conn, target, number)
     if head_sha is None:
         raise ValueError(
-            f"PR #{number} change file map not found."
-            "Please sync with shiori_ingest."
+            f"PR #{number} change file map not found. "
+            "Check shiori_status and sync if stale."
         )
     result: dict[str, Any] = {
         "repo": target,
@@ -657,7 +657,7 @@ def _compute_pr_diff(
     git_dir = os.path.realpath(settings.repo_dir(target))
     if not os.path.isdir(os.path.join(git_dir, ".git")):
         raise FileNotFoundError(
-            f"Clone for {target} does not exist. Please run shiori_ingest to sync."
+            f"Clone for {target} does not exist. Run python -m shiori ingest first."
         )
 
     ref = f"pull/{number}/head"
@@ -701,7 +701,7 @@ def pr_diff(
     if head_sha is None:
         raise ValueError(
             f"PR #{number} change file map not found. "
-            "Please sync with shiori_ingest."
+            "Check shiori_status and sync if stale."
         )
 
     diff_text, stat_text = _compute_pr_diff(number, target, base_sha, path)
@@ -749,7 +749,7 @@ def read_pr_file(
 
     if not os.path.isdir(os.path.join(base, ".git")):
         raise FileNotFoundError(
-            f"Clone for {target} does not exist. Please run shiori_ingest to sync."
+            f"Clone for {target} does not exist. Run python -m shiori ingest first."
         )
 
     ref = f"pull/{number}/head"
@@ -848,7 +848,7 @@ def _build_warnings(
     if missing:
         warnings.append(
             f"Unsynced categories: {', '.join(missing)}."
-            "Please run shiori_ingest for diff sync"
+            "Run python -m shiori ingest for diff sync"
         )
 
     return warnings

@@ -59,7 +59,6 @@ dependabot 等の bot 投稿は検索ノイズを避けるため原則索引か�
 - `shiori_list_tree` — リポジトリ構造の閲覧。`source_type`（`doc` / `code`）と `extension`（`.py` / `.md` 等）で絞り込み可能
 - `shiori_read_file` / `shiori_read_issue` — 指定ファイル／スレッドを必要なら一部だけ取得
 - `shiori_pr_changes` — PR の変更ファイルマップ（メタデータ）。head_sha と変更ファイル一覧（path / status / additions / deletions / blob_url）。コンテンツ（patch）は GitHub MCP に委譲
-- `shiori_ingest` — 索引の差分更新（オンデマンド。`rebuild=true` で全件再構築）
 - `shiori_status` — 索引の鮮度と健全性の確認（最終同期時刻・件数内訳・警告）
 
 検索系ツールは全文ではなくポインタ（パス／見出しパス／issue 番号＋スニペット＋GitHub URL）を返す。
