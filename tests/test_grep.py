@@ -31,7 +31,7 @@ class TestGrepSearch:
             ),
             patch("shiori.mcp_server.subprocess.run") as mock_run,
         ):
-            mock_settings.repo_dir.return_value = "/data/repos"
+            mock_settings.repo_dir.side_effect = lambda r: f"/data/repos/{r.replace('/', '__')}"
             mock_result = MagicMock()
             mock_result.stdout = rg_stdout
             mock_result.returncode = rg_returncode
@@ -117,7 +117,7 @@ class TestGrepSearch:
             ),
             patch("shiori.mcp_server.subprocess.run") as mock_run,
         ):
-            mock_settings.repo_dir.return_value = "/data/repos"
+            mock_settings.repo_dir.side_effect = lambda r: f"/data/repos/{r.replace('/', '__')}"
             mock_result = MagicMock()
             mock_result.stdout = ""
             mock_result.returncode = 1
@@ -141,7 +141,7 @@ class TestGrepSearch:
             ),
             patch("shiori.mcp_server.subprocess.run") as mock_run,
         ):
-            mock_settings.repo_dir.return_value = "/data/repos"
+            mock_settings.repo_dir.side_effect = lambda r: f"/data/repos/{r.replace('/', '__')}"
             mock_result = MagicMock()
             mock_result.stdout = ""
             mock_result.returncode = 1
@@ -170,7 +170,7 @@ class TestGrepSearch:
             ),
             patch("shiori.mcp_server.subprocess.run") as mock_run,
         ):
-            mock_settings.repo_dir.return_value = "/data/repos"
+            mock_settings.repo_dir.side_effect = lambda r: f"/data/repos/{r.replace('/', '__')}"
             mock_result = MagicMock()
             mock_result.stdout = ""
             mock_result.returncode = 1
@@ -191,7 +191,7 @@ class TestGrepSearch:
                 side_effect=lambda p: p,
             ),
         ):
-            mock_settings.repo_dir.return_value = "/data/repos"
+            mock_settings.repo_dir.side_effect = lambda r: f"/data/repos/{r.replace('/', '__')}"
             result = grep_search(pattern="test")
 
             assert result["skipped_repos"] == ["o/r"]
@@ -210,7 +210,7 @@ class TestGrepSearch:
             ),
             patch("shiori.mcp_server.subprocess.run") as mock_run,
         ):
-            mock_settings.repo_dir.return_value = "/data/repos"
+            mock_settings.repo_dir.side_effect = lambda r: f"/data/repos/{r.replace('/', '__')}"
             mock_result = MagicMock()
             mock_result.stdout = ""
             mock_result.returncode = 1
@@ -234,7 +234,7 @@ class TestGrepSearch:
             ),
             patch("shiori.mcp_server.subprocess.run") as mock_run,
         ):
-            mock_settings.repo_dir.return_value = "/data/repos"
+            mock_settings.repo_dir.side_effect = lambda r: f"/data/repos/{r.replace('/', '__')}"
             mock_result = MagicMock()
             mock_result.stdout = ""
             mock_result.returncode = 1
@@ -259,7 +259,7 @@ class TestGrepSearch:
             ),
             patch("shiori.mcp_server.subprocess.run") as mock_run,
         ):
-            mock_settings.repo_dir.return_value = "/data/repos/o__r"
+            mock_settings.repo_dir.side_effect = lambda r: f"/data/repos/{r.replace('/', '__')}"
             mock_result = MagicMock()
             mock_result.stdout = "/data/repos/o__r/src/file.py:42:content\n"
             mock_result.returncode = 0
@@ -283,7 +283,7 @@ class TestGrepSearch:
             ),
             patch("shiori.mcp_server.subprocess.run") as mock_run,
         ):
-            mock_settings.repo_dir.return_value = "/data/repos/o__r"
+            mock_settings.repo_dir.side_effect = lambda r: f"/data/repos/{r.replace('/', '__')}"
             mock_result = MagicMock()
             mock_result.stdout = "/data/repos/o__r/src/other.py:1:line\n"
             mock_result.returncode = 0
@@ -306,7 +306,7 @@ class TestGrepSearch:
             ),
             patch("shiori.mcp_server.subprocess.run") as mock_run,
         ):
-            mock_settings.repo_dir.return_value = "/data/repos"
+            mock_settings.repo_dir.side_effect = lambda r: f"/data/repos/{r.replace('/', '__')}"
             mock_result = MagicMock()
             mock_result.stdout = ""
             mock_result.returncode = 1
@@ -330,7 +330,7 @@ class TestGrepSearch:
             ),
             patch("shiori.mcp_server.subprocess.run") as mock_run,
         ):
-            mock_settings.repo_dir.return_value = "/data/repos"
+            mock_settings.repo_dir.side_effect = lambda r: f"/data/repos/{r.replace('/', '__')}"
             mock_result = MagicMock()
             mock_result.stdout = "src/file.py:1:match\n"
             mock_result.returncode = 0
