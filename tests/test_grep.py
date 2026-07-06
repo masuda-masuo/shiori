@@ -222,6 +222,30 @@ class TestGrepSearch:
             cmd = mock_run.call_args[0][0]
             assert "--fixed-strings" not in cmd
 
+    def test_explicit_regex_true(self):
+        """Explicit regex=True does NOT pass --fixed-strings to rg."""
+        with (
+            patch("shiori.mcp_server._resolve_repos", return_value=["o/r"]),
+            patch("shiori.mcp_server.settings") as mock_settings,
+            patch("shiori.mcp_server.os.path.isdir", return_value=True),
+            patch(
+                "shiori.mcp_server.os.path.realpath",
+                side_effect=lambda p: p,
+            ),
+            patch("shiori.mcp_server.subprocess.run") as mock_run,
+        ):
+            mock_settings.repo_dir.side_effect = lambda r: f"/data/repos/{r.replace('/', '__')}"
+            mock_result = MagicMock()
+            mock_result.stdout = ""
+            mock_result.returncode = 1
+            mock_result.stderr = ""
+            mock_run.return_value = mock_result
+
+            grep_search(pattern="foo.bar", regex=True)
+
+            cmd = mock_run.call_args[0][0]
+            assert "--fixed-strings" not in cmd
+
     def test_regex_parse_error_hint(self):
         """rg exit code 2 includes self-healing hint in error."""
         with (
