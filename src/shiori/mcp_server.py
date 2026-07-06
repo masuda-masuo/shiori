@@ -830,7 +830,7 @@ def grep_search(
     pattern: str,
     repo: str | None = None,
     path: str | None = None,
-    regex: bool = False,
+    regex: bool = True,
     ignore_case: bool = True,
     max_results: int = 200,
 ) -> dict[str, Any]:
@@ -843,7 +843,9 @@ def grep_search(
     pattern: search pattern (regex or fixed string)
     repo: target repo ("owner/name"), "*" for all repos, or None for default
     path: optional file/subdir path within repo to scope the search
-    regex: True for regex search, False (default) for fixed-string search
+    regex: True (default) for regex search, False for fixed-string search.
+          Patterns containing literal ``[...]`` (character classes) should use
+          ``regex=False`` to avoid silent misinterpretation.
     ignore_case: case-insensitive search (default True)
     max_results: maximum matches to return (default 200)
     """
@@ -887,7 +889,10 @@ def grep_search(
             raise RuntimeError("ripgrep (rg) is not installed in this container")
 
         if rg_result.returncode not in (0, 1):
-            raise RuntimeError(f"rg failed (exit {rg_result.returncode}): {rg_result.stderr.strip()}")
+            msg = f"rg failed (exit {rg_result.returncode}): {rg_result.stderr.strip()}"
+            if rg_result.returncode == 2:
+                msg += " (regex parse error. If you intended a literal search, retry with regex=False)"
+            raise RuntimeError(msg)
 
         if rg_result.stdout:
             for line in rg_result.stdout.splitlines():
