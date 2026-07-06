@@ -10,9 +10,9 @@ SHIORI_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$SHIORI_DIR"
 mkdir -p runtime
 
-# --- sha256 for pinned mcp-token binaries (masuda-masuo/mcp-launcher mcp-token/v1.1.0) ---
-MCP_TOKEN_LINUX_AMD64_SHA256="55479987cb280258605ec22fde720a2fc4e289ad31abb446731bde8311bc1fdc"
-MCP_TOKEN_LINUX_ARM64_SHA256="1b88014180f48c25f22902fd31fcbe95ea9c5e8d264c6af36080b1c961e3f87b"
+# --- sha256 for pinned mcp-token binaries (masuda-masuo/mcp-launcher mcp-token/v1.1.1) ---
+MCP_TOKEN_LINUX_AMD64_SHA256="08d22380f0af932508aaaea80cb114acada1ef46d0a3b32507755c67f5f77bba"
+MCP_TOKEN_LINUX_ARM64_SHA256="032ee0942fd4e2184158f111873c67f32d843def0cbefca576df614bfc8d3c64"
 
 resolve_mcp_token() {
   # 1. explicit override
@@ -64,7 +64,7 @@ download_mcp_token() {
   esac
 
   local asset="mcp-token-linux-${arch}"
-  local tag="mcp-token/v1.1.0"
+  local tag="mcp-token/v1.1.1"
   local encoded_tag="${tag//\//%2F}"
   local url="https://github.com/masuda-masuo/mcp-launcher/releases/download/${encoded_tag}/${asset}"
 
