@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from shiori.mcp_server import grep_search
 
 
@@ -15,10 +17,12 @@ class TestGrepSearch:
         rg_stdout: str = "",
         rg_returncode: int = 0,
         repo_isdir: bool = True,
+        repo_count: int = 1,
         **kwargs,
     ):
+        repos = ["o/r"] * repo_count
         with (
-            patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
+            patch("shiori.mcp_server._resolve_repos", return_value=repos),
             patch("shiori.mcp_server.settings") as mock_settings,
             patch("shiori.mcp_server.os.path.isdir", return_value=repo_isdir),
             patch(
@@ -27,7 +31,7 @@ class TestGrepSearch:
             ),
             patch("shiori.mcp_server.subprocess.run") as mock_run,
         ):
-            mock_settings.repo_dir.return_value = "/data/repos"
+            mock_settings.repo_dir.side_effect = lambda r: f"/data/repos/{r.replace('/', '__')}"
             mock_result = MagicMock()
             mock_result.stdout = rg_stdout
             mock_result.returncode = rg_returncode
@@ -40,10 +44,10 @@ class TestGrepSearch:
         rg_out = "src/file.py:42:def test_function():\n"
         result = self._run_grep(rg_stdout=rg_out)
 
-        assert result["repo"] == "o/r"
         assert result["pattern"] == "test"
         assert result["total_matches"] == 1
         assert len(result["matches"]) == 1
+        assert result["matches"][0]["repo"] == "o/r"
         assert result["matches"][0]["line"] == 42
         assert result["matches"][0]["text"] == "def test_function():"
 
@@ -58,6 +62,8 @@ class TestGrepSearch:
 
         assert result["total_matches"] == 3
         assert len(result["matches"]) == 3
+        for m in result["matches"]:
+            assert m["repo"] == "o/r"
 
     def test_no_match(self):
         """rg exit code 1 means no match."""
@@ -102,7 +108,7 @@ class TestGrepSearch:
     def test_fixed_string_mode(self):
         """regex=False passes --fixed-strings to rg."""
         with (
-            patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
+            patch("shiori.mcp_server._resolve_repos", return_value=["o/r"]),
             patch("shiori.mcp_server.settings") as mock_settings,
             patch("shiori.mcp_server.os.path.isdir", return_value=True),
             patch(
@@ -111,7 +117,7 @@ class TestGrepSearch:
             ),
             patch("shiori.mcp_server.subprocess.run") as mock_run,
         ):
-            mock_settings.repo_dir.return_value = "/data/repos"
+            mock_settings.repo_dir.side_effect = lambda r: f"/data/repos/{r.replace('/', '__')}"
             mock_result = MagicMock()
             mock_result.stdout = ""
             mock_result.returncode = 1
@@ -126,7 +132,7 @@ class TestGrepSearch:
     def test_path_param(self):
         """path parameter limits search scope."""
         with (
-            patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
+            patch("shiori.mcp_server._resolve_repos", return_value=["o/r"]),
             patch("shiori.mcp_server.settings") as mock_settings,
             patch("shiori.mcp_server.os.path.isdir", return_value=True),
             patch(
@@ -135,7 +141,7 @@ class TestGrepSearch:
             ),
             patch("shiori.mcp_server.subprocess.run") as mock_run,
         ):
-            mock_settings.repo_dir.return_value = "/data/repos"
+            mock_settings.repo_dir.side_effect = lambda r: f"/data/repos/{r.replace('/', '__')}"
             mock_result = MagicMock()
             mock_result.stdout = ""
             mock_result.returncode = 1
@@ -155,7 +161,7 @@ class TestGrepSearch:
             return p
 
         with (
-            patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
+            patch("shiori.mcp_server._resolve_repos", return_value=["o/r"]),
             patch("shiori.mcp_server.settings") as mock_settings,
             patch("shiori.mcp_server.os.path.isdir", return_value=True),
             patch(
@@ -164,16 +170,20 @@ class TestGrepSearch:
             ),
             patch("shiori.mcp_server.subprocess.run") as mock_run,
         ):
-            mock_settings.repo_dir.return_value = "/data/repos"
-            import pytest
+            mock_settings.repo_dir.side_effect = lambda r: f"/data/repos/{r.replace('/', '__')}"
+            mock_result = MagicMock()
+            mock_result.stdout = ""
+            mock_result.returncode = 1
+            mock_result.stderr = ""
+            mock_run.return_value = mock_result
 
             with pytest.raises(ValueError, match="inside the repository"):
                 grep_search(pattern="test", path="../etc")
 
-    def test_clone_missing_raises(self):
-        """Missing clone raises FileNotFoundError."""
+    def test_clone_missing_is_skipped(self):
+        """Missing clone is reported in skipped_repos instead of raising."""
         with (
-            patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
+            patch("shiori.mcp_server._resolve_repos", return_value=["o/r"]),
             patch("shiori.mcp_server.settings") as mock_settings,
             patch("shiori.mcp_server.os.path.isdir", return_value=False),
             patch(
@@ -181,16 +191,17 @@ class TestGrepSearch:
                 side_effect=lambda p: p,
             ),
         ):
-            mock_settings.repo_dir.return_value = "/data/repos"
-            import pytest
+            mock_settings.repo_dir.side_effect = lambda r: f"/data/repos/{r.replace('/', '__')}"
+            result = grep_search(pattern="test")
 
-            with pytest.raises(FileNotFoundError, match="Clone for"):
-                grep_search(pattern="test")
+            assert result["skipped_repos"] == ["o/r"]
+            assert result["total_matches"] == 0
+            assert result["matches"] == []
 
     def test_default_regex_is_false(self):
         """Default regex=False passes --fixed-strings to rg."""
         with (
-            patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
+            patch("shiori.mcp_server._resolve_repos", return_value=["o/r"]),
             patch("shiori.mcp_server.settings") as mock_settings,
             patch("shiori.mcp_server.os.path.isdir", return_value=True),
             patch(
@@ -199,7 +210,7 @@ class TestGrepSearch:
             ),
             patch("shiori.mcp_server.subprocess.run") as mock_run,
         ):
-            mock_settings.repo_dir.return_value = "/data/repos"
+            mock_settings.repo_dir.side_effect = lambda r: f"/data/repos/{r.replace('/', '__')}"
             mock_result = MagicMock()
             mock_result.stdout = ""
             mock_result.returncode = 1
@@ -214,7 +225,7 @@ class TestGrepSearch:
     def test_e_flag_for_pattern(self):
         """Pattern is passed via -e to avoid flag interpretation."""
         with (
-            patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
+            patch("shiori.mcp_server._resolve_repos", return_value=["o/r"]),
             patch("shiori.mcp_server.settings") as mock_settings,
             patch("shiori.mcp_server.os.path.isdir", return_value=True),
             patch(
@@ -223,7 +234,7 @@ class TestGrepSearch:
             ),
             patch("shiori.mcp_server.subprocess.run") as mock_run,
         ):
-            mock_settings.repo_dir.return_value = "/data/repos"
+            mock_settings.repo_dir.side_effect = lambda r: f"/data/repos/{r.replace('/', '__')}"
             mock_result = MagicMock()
             mock_result.stdout = ""
             mock_result.returncode = 1
@@ -239,7 +250,7 @@ class TestGrepSearch:
     def test_path_strip_absolute_prefix(self):
         """Path in match entries is stripped to repo-relative."""
         with (
-            patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
+            patch("shiori.mcp_server._resolve_repos", return_value=["o/r"]),
             patch("shiori.mcp_server.settings") as mock_settings,
             patch("shiori.mcp_server.os.path.isdir", return_value=True),
             patch(
@@ -248,7 +259,7 @@ class TestGrepSearch:
             ),
             patch("shiori.mcp_server.subprocess.run") as mock_run,
         ):
-            mock_settings.repo_dir.return_value = "/data/repos/o__r"
+            mock_settings.repo_dir.side_effect = lambda r: f"/data/repos/{r.replace('/', '__')}"
             mock_result = MagicMock()
             mock_result.stdout = "/data/repos/o__r/src/file.py:42:content\n"
             mock_result.returncode = 0
@@ -258,11 +269,12 @@ class TestGrepSearch:
             result = grep_search(pattern="test")
 
             assert result["matches"][0]["path"] == "src/file.py"
+            assert result["matches"][0]["repo"] == "o/r"
 
     def test_path_kept_when_within_base(self):
         """Path inside base without prefix is kept as-is."""
         with (
-            patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
+            patch("shiori.mcp_server._resolve_repos", return_value=["o/r"]),
             patch("shiori.mcp_server.settings") as mock_settings,
             patch("shiori.mcp_server.os.path.isdir", return_value=True),
             patch(
@@ -271,7 +283,7 @@ class TestGrepSearch:
             ),
             patch("shiori.mcp_server.subprocess.run") as mock_run,
         ):
-            mock_settings.repo_dir.return_value = "/data/repos/o__r"
+            mock_settings.repo_dir.side_effect = lambda r: f"/data/repos/{r.replace('/', '__')}"
             mock_result = MagicMock()
             mock_result.stdout = "/data/repos/o__r/src/other.py:1:line\n"
             mock_result.returncode = 0
@@ -282,11 +294,10 @@ class TestGrepSearch:
 
             assert result["matches"][0]["path"] == "src/other.py"
 
-
     def test_ignore_case_default(self):
         """Default ignore_case=True passes -i to rg."""
         with (
-            patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
+            patch("shiori.mcp_server._resolve_repos", return_value=["o/r"]),
             patch("shiori.mcp_server.settings") as mock_settings,
             patch("shiori.mcp_server.os.path.isdir", return_value=True),
             patch(
@@ -295,7 +306,7 @@ class TestGrepSearch:
             ),
             patch("shiori.mcp_server.subprocess.run") as mock_run,
         ):
-            mock_settings.repo_dir.return_value = "/data/repos"
+            mock_settings.repo_dir.side_effect = lambda r: f"/data/repos/{r.replace('/', '__')}"
             mock_result = MagicMock()
             mock_result.stdout = ""
             mock_result.returncode = 1
@@ -306,3 +317,55 @@ class TestGrepSearch:
 
             cmd = mock_run.call_args[0][0]
             assert "-i" in cmd
+
+    def test_skipped_repos_in_response(self):
+        """skipped_repos lists repos without a clone."""
+        with (
+            patch("shiori.mcp_server._resolve_repos", return_value=["o/r1", "o/r2"]),
+            patch("shiori.mcp_server.settings") as mock_settings,
+            patch("shiori.mcp_server.os.path.isdir", side_effect=[False, True]),
+            patch(
+                "shiori.mcp_server.os.path.realpath",
+                side_effect=lambda p: p,
+            ),
+            patch("shiori.mcp_server.subprocess.run") as mock_run,
+        ):
+            mock_settings.repo_dir.side_effect = lambda r: f"/data/repos/{r.replace('/', '__')}"
+            mock_result = MagicMock()
+            mock_result.stdout = "src/file.py:1:match\n"
+            mock_result.returncode = 0
+            mock_result.stderr = ""
+            mock_run.return_value = mock_result
+
+            result = grep_search(pattern="test")
+
+            assert result["skipped_repos"] == ["o/r1"]
+            assert result["total_matches"] == 1
+            assert result["matches"][0]["repo"] == "o/r2"
+
+    def test_all_repos_wildcard(self):
+        """repo='*' searches all configured repos."""
+        with (
+            patch("shiori.mcp_server._resolve_repos", return_value=["o/r1", "o/r2", "o/r3"]),
+            patch("shiori.mcp_server.settings") as mock_settings,
+            patch("shiori.mcp_server.os.path.isdir", return_value=True),
+            patch(
+                "shiori.mcp_server.os.path.realpath",
+                side_effect=lambda p: p,
+            ),
+            patch("shiori.mcp_server.subprocess.run") as mock_run,
+        ):
+            mock_settings.repo_dir.side_effect = lambda r: f"/data/repos/{r.replace('/', '__')}"
+            mock_result = MagicMock()
+            mock_result.stdout = "file.py:1:match\n"
+            mock_result.returncode = 0
+            mock_result.stderr = ""
+            mock_run.return_value = mock_result
+
+            result = grep_search(pattern="test")
+
+            # 3 repos searched, 3 matches expected
+            assert result["total_matches"] == 3
+            repos_found = {m["repo"] for m in result["matches"]}
+            assert repos_found == {"o/r1", "o/r2", "o/r3"}
+            assert result["skipped_repos"] == []

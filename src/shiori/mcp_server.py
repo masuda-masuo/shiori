@@ -93,6 +93,20 @@ def _resolve_repo(repo: str | None) -> str:
     return settings.repos[0]
 
 
+def _resolve_repos(repo: str | None) -> list[str]:
+    """Resolve repo parameter to a list of target repos.
+
+    repo="*" returns all configured repos (cross-repo search).
+    repo="owner/name" returns that single repo.
+    repo=None returns the default single repo via _resolve_repo (backward compat).
+    """
+    if repo == "*":
+        if not settings.repos:
+            raise ValueError("SHIORI_REPOS not set")
+        return list(settings.repos)
+    return [_resolve_repo(repo)]
+
+
 def _make_filters(
     source_type: str | None,
     language: str | None,
@@ -336,7 +350,7 @@ mcp = FastMCP(
         "PR change file maps are available via shiori_pr_changes. "
         "PR head file content can be read transparently via shiori_read_pr_file (issue #81). "
         "\n"
-        "\u25a0 Two-store model (information sources)\n"
+        "■ Two-store model (information sources)\n"
         "shiori has 2 independent data sources:\n"
         "1. Index (Postgres/pgvector/pgroonga)\n"
         "   - shiori_search / shiori_keyword_search: embedding + full-text search\n"
@@ -823,81 +837,91 @@ def grep_search(
     """Grep clone files with ripgrep. Stage-2 search after shiori_search/keyword_search
     narrowed down the target file. Returns line-level matches.
 
+    When repo="*", search across all configured repositories.
+    Each match includes a "repo" field identifying the source repository.
+
     pattern: search pattern (regex or fixed string)
+    repo: target repo ("owner/name"), "*" for all repos, or None for default
     path: optional file/subdir path within repo to scope the search
     regex: True for regex search, False (default) for fixed-string search
     ignore_case: case-insensitive search (default True)
     max_results: maximum matches to return (default 200)
     """
-    target = _resolve_repo(repo)
-    base = os.path.realpath(settings.repo_dir(target))
+    targets = _resolve_repos(repo)
 
-    if not os.path.isdir(base):
-        raise FileNotFoundError(
-            f"Clone for {target} does not exist. Run python -m shiori ingest first."
-        )
-
-    search_path = os.path.join(base, path) if path else base
-    resolved = os.path.realpath(search_path)
-    if not resolved.startswith(os.path.realpath(base) + os.sep) and resolved != os.path.realpath(base):
-        raise ValueError("path must be inside the repository")
-
-    cmd = ["rg", "-n", "--no-heading", "--color", "never"]
-    if ignore_case:
-        cmd.append("-i")
-    if not regex:
-        cmd.append("--fixed-strings")
-    cmd.extend(["-e", pattern])
-    cmd.append(resolved)
-
-    try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-    except FileNotFoundError:
-        raise RuntimeError("ripgrep (rg) is not installed in this container")
-
-    if result.returncode not in (0, 1):
-        raise RuntimeError(f"rg failed (exit {result.returncode}): {result.stderr.strip()}")
-
-    matches: list[dict[str, Any]] = []
+    all_matches: list[dict[str, Any]] = []
     total = 0
-    if result.stdout:
-        for line in result.stdout.splitlines():
-            if not line.strip() or line.startswith("--"):
-                continue
-            parts = line.split(":", 2)
-            if len(parts) >= 2:
-                try:
-                    int(parts[1])
-                    total += 1
-                    text = parts[2] if len(parts) > 2 else ""
-                    if len(matches) < max_results:
-                        rel_path = parts[0]
-                        if rel_path.startswith(base + "/"):
-                            rel_path = rel_path[len(base) + 1:]
-                        matches.append({
-                            "path": rel_path,
-                            "line": int(parts[1]),
-                            "text": text,
-                        })
-                except ValueError:
-                    pass
+    skipped_repos: list[str] = []
+
+    for target in targets:
+        base = os.path.realpath(settings.repo_dir(target))
+
+        if not os.path.isdir(base):
+            skipped_repos.append(target)
+            continue
+
+        if path:
+            search_path = os.path.join(base, path)
+            resolved = os.path.realpath(search_path)
+            if not resolved.startswith(os.path.realpath(base) + os.sep) and resolved != os.path.realpath(base):
+                raise ValueError("path must be inside the repository")
+        else:
+            resolved = base
+
+        cmd = ["rg", "-n", "--no-heading", "--color", "never"]
+        if ignore_case:
+            cmd.append("-i")
+        if not regex:
+            cmd.append("--fixed-strings")
+        cmd.extend(["-e", pattern])
+        cmd.append(resolved)
+
+        try:
+            rg_result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+        except FileNotFoundError:
+            raise RuntimeError("ripgrep (rg) is not installed in this container")
+
+        if rg_result.returncode not in (0, 1):
+            raise RuntimeError(f"rg failed (exit {rg_result.returncode}): {rg_result.stderr.strip()}")
+
+        if rg_result.stdout:
+            for line in rg_result.stdout.splitlines():
+                if not line.strip() or line.startswith("--"):
+                    continue
+                parts = line.split(":", 2)
+                if len(parts) >= 2:
+                    try:
+                        int(parts[1])
+                        total += 1
+                        text = parts[2] if len(parts) > 2 else ""
+                        if len(all_matches) < max_results:
+                            rel_path = parts[0]
+                            if rel_path.startswith(base + "/"):
+                                rel_path = rel_path[len(base) + 1:]
+                            all_matches.append({
+                                "repo": target,
+                                "path": rel_path,
+                                "line": int(parts[1]),
+                                "text": text,
+                            })
+                    except ValueError:
+                        pass
 
     truncated = total > max_results
 
     return {
-        "repo": target,
         "pattern": pattern,
         "path": path or "",
         "total_matches": total,
         "truncated": truncated,
-        "matches": matches,
+        "matches": all_matches,
+        "skipped_repos": skipped_repos,
     }
-
 
 def ingest(rebuild: bool = False, repo: str | None = None) -> dict[str, Any]:
     """Sync docs/issues/code from GitHub and update index (diff sync, typically seconds).

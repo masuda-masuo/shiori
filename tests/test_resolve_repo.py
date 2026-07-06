@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 import pytest
 
-from shiori.mcp_server import _infer_repo_from_cwd, _resolve_repo
+from shiori.mcp_server import _infer_repo_from_cwd, _resolve_repo, _resolve_repos
 
 
 class TestResolveRepo:
@@ -95,3 +95,35 @@ class TestInferRepoFromCwd:
         """FileNotFoundError (git not installed) returns None gracefully."""
         with patch("shiori.mcp_server.subprocess.run", side_effect=FileNotFoundError):
             assert _infer_repo_from_cwd() is None
+
+
+class TestResolveRepos:
+    """Behavior of _resolve_repos for multi-repo resolution (issue #151)."""
+
+    def test_wildcard_returns_all(self, monkeypatch):
+        """repo='*' returns all configured repos."""
+        monkeypatch.setattr("shiori.mcp_server.settings.repos", ["o/r1", "o/r2"])
+        assert _resolve_repos("*") == ["o/r1", "o/r2"]
+
+    def test_wildcard_empty_repos_raises(self, monkeypatch):
+        """repo='*' with empty SHIORI_REPOS raises ValueError."""
+        monkeypatch.setattr("shiori.mcp_server.settings.repos", [])
+        with pytest.raises(ValueError, match="SHIORI_REPOS not set"):
+            _resolve_repos("*")
+
+    def test_explicit_repo(self, monkeypatch):
+        """Explicit repo string is returned as a single-element list."""
+        monkeypatch.setattr("shiori.mcp_server.settings.repos", ["o/r"])
+        assert _resolve_repos("owner/repo") == ["owner/repo"]
+
+    def test_none_delegates_to_resolve_repo(self, monkeypatch):
+        """repo=None delegates to _resolve_repo for backward compat."""
+        monkeypatch.setattr("shiori.mcp_server.settings.repos", ["o/r"])
+        assert _resolve_repos(None) == ["o/r"]
+
+    def test_wildcard_copies_list(self, monkeypatch):
+        """repo='*' returns a copy, not the original list."""
+        monkeypatch.setattr("shiori.mcp_server.settings.repos", ["o/r"])
+        result = _resolve_repos("*")
+        result.append("x/y")
+        assert "x/y" not in _resolve_repos("*")

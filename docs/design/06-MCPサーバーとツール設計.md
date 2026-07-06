@@ -13,6 +13,7 @@
 - `shiori_pr_changes(number, repo?)`: PR の変更ファイルマップ（メタデータ）を返す（issue #54）。head_sha と変更ファイル一覧（path / status / additions / deletions / blob_url）。コンテンツ（patch）は GitHub MCP に委譲。
 - `shiori_read_pr_file(number, path, range?, repo?)`: PR head のファイル内容を git 薄皮ラッパーで透過的に取得する（issue #81）。`shiori_pr_changes` → `shiori_read_pr_file` の流れが ShioriMCP 内で完結する。
   > **v2 廃止:** MCP ツールとしての `shiori_ingest` は廃止されました。同期は CLI（`python -m shiori ingest`）または自動同期（`SHIORI_SYNC_INTERVAL_SECONDS`）を使用します。allowlist 制約（`SHIORI_REPOS`）と rebuild ガード（`SHIORI_ALLOW_REBUILD`）は CLI 経由でも適用されます。
+- `shiori_grep(pattern, repo?, path?, regex?, ignore_case?, max_results?)`: クローンを ripgrep で直接検索する（issue #146, #151）。Stage-2 検索（`shiori_search`/`shiori_keyword_search` で絞り込んだファイルをさらに行レベルで grep）。`repo="*"` で全リポジトリ横断検索が可能。各マッチに `repo` フィールドを含む。クローン不在のリポジトリは `skipped_repos` として応答に明示される。
 - `shiori_status()`: 索引の鮮度と健全性を照会する（issue #22, #31）。`chunks` の source_type 別内訳・`issue_items` 全件数・差分同期カーソル・警告（warnings）を返す。
 
 検索系には `source_type`（doc / issue / pr_review / code）, `language`, `state` 等のフィルタを持たせる。bot 投稿は原則索引から除外されるが、`SHIORI_INDEX_BOT_LOGINS` 環境変数（GitHub App 名 + `[bot]` 形式のログイン名をカンマ区切りで指定）で allowlist 指定が可能（issue #25）。
@@ -70,6 +71,13 @@
 - `shiori_read_pr_file` を新設し、`shiori_read_file` の「main ブランチ固定」責務は変更しない。
 - 内部で `_git_fetch_ref` / `_git_delete_ref` 共通ヘルパーを使用し、#74 / #79 / #77 でも再利用可能にする。
 - PR head のファイル内容は索引（DB）には入れず、クローン経由の動的取得にとどめる（ポインタ設計の原則を維持）。
+
+## 決定事項（issue #151）
+
+- `shiori_grep` の `repo` パラメータに `"*"` を指定すると全リポジトリ横断検索となる。
+- `repo=None`（未指定時）の既定挙動は従来どおり単一リポジトリ解決（`_resolve_repo` 経由）。後方互換を維持する。
+- 各マッチに `repo` フィールドを付与し、どのリポジトリの結果か識別可能にする。
+- クローン不在のリポジトリはエラーにせずスキップし、`skipped_repos` として応答に含める。
 
 ## 検討事項 / 未決
 
