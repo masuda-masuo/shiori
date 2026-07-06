@@ -8,9 +8,9 @@ Type=oneshot
 RemainAfterExit=yes
 WorkingDirectory=@SHIORI_DIR@
 ExecStartPre=-@SHIORI_DIR@/scripts/refresh-token.sh
-ExecStart=/usr/bin/env docker compose up -d app
-ExecStop=/usr/bin/env docker compose stop app
-ExecReload=/usr/bin/env docker compose restart app
+ExecStart=/usr/bin/docker compose up -d app
+ExecStop=/usr/bin/docker compose stop app
+ExecReload=/usr/bin/docker compose restart app
 
 [Install]
 WantedBy=default.target

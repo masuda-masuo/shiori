@@ -4,6 +4,7 @@ BindsTo=shiori.service
 After=shiori.service
 
 [Timer]
+OnBootSec=300
 OnUnitActiveSec=300
 Persistent=true
 

@@ -22,6 +22,7 @@ systemctl --user daemon-reload
 
 systemctl --user enable --now shiori.service
 systemctl --user enable --now shiori-refresh.timer
+systemctl --user start shiori-refresh.service
 
 echo ""
 echo "==> Done.  Useful commands:"
