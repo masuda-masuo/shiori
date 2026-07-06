@@ -1,0 +1,16 @@
+[Unit]
+Description=Shiori MCP Server (docker compose)
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=@SHIORI_DIR@
+ExecStartPre=-@SHIORI_DIR@/scripts/refresh-token.sh
+ExecStart=/usr/bin/env docker compose up -d app
+ExecStop=/usr/bin/env docker compose stop app
+ExecReload=/usr/bin/env docker compose restart app
+
+[Install]
+WantedBy=default.target

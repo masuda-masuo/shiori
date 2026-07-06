@@ -1,0 +1,11 @@
+[Unit]
+Description=Shiori Token Refresh Timer (every 5 min)
+BindsTo=shiori.service
+After=shiori.service
+
+[Timer]
+OnUnitActiveSec=300
+Persistent=true
+
+[Install]
+WantedBy=timers.target
