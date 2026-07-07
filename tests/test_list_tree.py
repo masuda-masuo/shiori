@@ -16,7 +16,6 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from shiori.mcp_server import (
-    _VALID_SOURCE_TYPES,
     _match_extension,
     _walk_code_files,
     list_tree,

@@ -1,6 +1,6 @@
+import pytest
+
 from shiori.chunking import (
-    Chunk,
-    _TS_AVAILABLE,
     _extract_idents,
     _find_breakpoint,
     _split_long_text,
@@ -158,8 +158,6 @@ def test_split_code_no_definitions():
 # ---------------------------------------------------------------------------
 # Deterministic tree-sitter tests (gated by _ts_get_parser success)
 # ---------------------------------------------------------------------------
-
-import pytest
 
 _TS_PYTHON_OK = _ts_get_parser("python") is not None
 

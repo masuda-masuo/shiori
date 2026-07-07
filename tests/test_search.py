@@ -13,7 +13,6 @@ _COL_UPDATED_AT = 14
 
 def _make_row(source_type, kind=None, state=None, updated_at=None, created_at=None):
     """Build a mock row tuple matching _RESULT_COLS (issue #98)."""
-    from datetime import datetime, timezone
     return (
         1, source_type, "test/repo", "dummy/path", None, None, kind,
         "ja", "heading", "content text", state, "author", None,

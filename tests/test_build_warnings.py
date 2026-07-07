@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from shiori.mcp_server import _build_warnings
 
 
