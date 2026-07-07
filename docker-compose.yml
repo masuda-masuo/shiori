@@ -12,6 +12,18 @@ services:
       POSTGRES_USER: shiori
       POSTGRES_PASSWORD: shiori
       POSTGRES_DB: shiori
+    # ゾンビセッション対策: トランザクション内で長時間応答が無い/TCPが切れた
+    # セッションを自動破棄し、advisory lock の占有を防ぐ（issue #167）。
+    command:
+      - postgres
+      - -c
+      - idle_in_transaction_session_timeout=300000
+      - -c
+      - tcp_keepalives_idle=60
+      - -c
+      - tcp_keepalives_interval=10
+      - -c
+      - tcp_keepalives_count=3
     ports:
       # ホスト上の stdio serve / ingest（セットアップ.md 参照）から接続するため
       # localhost に限定して公開する
