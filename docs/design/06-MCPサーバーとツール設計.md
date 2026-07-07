@@ -2,7 +2,7 @@
 
 ## 目的
 
-検索・取得の機能を MCP ツールとして公開し、エージェントが「検索 → 必要分だけ取得」を行えるようにする。
+検索・取得の機能を MCP ツールとして公開し、エージェントが「検索 → 必要分だけ取得」を行えるようにする。ツール群の分類（4 層モデル）とユースケース別のツールフローは `詳細設計/13`（プロダクト定義とユースケース）を参照。
 
 ## ツール
 
@@ -10,7 +10,10 @@
 - `shiori_keyword_search(query, filters?)`: キーワード／完全一致検索（日本語対応トークナイズ）。厳密一致が必要なときに使う補助ツール。
 - `shiori_list_tree(path?, source_type?, extension?)`: リポジトリ構造の閲覧。`source_type`（`doc` / `code`）と `extension`（`.py` / `.md` 等）での絞り込みが可能（issue #43）。
 - `shiori_read_file(path, range?)` / `shiori_read_issue(number, repo?, exclude_noise_bots?)`: 指定ファイル／スレッドを必要なら一部だけ取得。`read_issue` の `exclude_noise_bots=true` で allowlist（`SHIORI_INDEX_BOT_LOGINS`）外の bot 投稿を除外可能（issue #44）。
-- `shiori_pr_changes(number, repo?)`: PR の変更ファイルマップ（メタデータ）を返す（issue #54）。head_sha と変更ファイル一覧（path / status / additions / deletions / blob_url）。コンテンツ（patch）は GitHub MCP に委譲。
+- `shiori_pr_changes(number, repo?, include_diff?)`: PR の変更ファイルマップ（メタデータ）を返す（issue #54, #100）。head_sha と変更ファイル一覧（path / status / additions / deletions / blob_url）。`include_diff=true` で diff を同時取得できる。
+- `shiori_pr_diff(number, path?, repo?)`: PR の unified diff を git で計算して返す（issue #96）。`path` 指定で単一ファイルの差分に絞れる。PR head と base を一時 ref に fetch して `git diff` する（ワーキングツリー非破壊）。
+- `shiori_pr_review_comments(number, repo?)`: PR のレビューコメント一覧（`kind='pr_review_comment'`）を返す（issue #96）。ファイルパス・行番号・本文・作成者・作成日時を含む。
+- `shiori_issue_links(number, repo?)`: issue/PR の相互参照を inbound / outbound で返す（issue #97）。本文・コメント中の `#N` 参照を抽出し、種別（closes / duplicate / refs / mention）を判定。参照先のタイトル・state を同梱。重複チェック・epic 構築・回帰追跡に使う。
 - `shiori_read_pr_file(number, path, range?, repo?)`: PR head のファイル内容を git 薄皮ラッパーで透過的に取得する（issue #81）。`shiori_pr_changes` → `shiori_read_pr_file` の流れが ShioriMCP 内で完結する。
   > **v2 廃止:** MCP ツールとしての `shiori_ingest` は廃止されました。同期は CLI（`python -m shiori ingest`）または自動同期（`SHIORI_SYNC_INTERVAL_SECONDS`）を使用します。allowlist 制約（`SHIORI_REPOS`）と rebuild ガード（`SHIORI_ALLOW_REBUILD`）は CLI 経由でも適用されます。
 - `shiori_grep(pattern, repo?, path?, regex?, ignore_case?, max_results?)`: クローンを ripgrep で直接検索する（issue #146, #151）。Stage-2 検索（`shiori_search`/`shiori_keyword_search` で絞り込んだファイルをさらに行レベルで grep）。`regex=True` が既定（issue #152）。パターンに `[...]`（文字クラス）を含むリテラルを検索する際は `regex=False` を指定する。`repo="*"` で全リポジトリ横断検索が可能。各マッチに `repo` フィールドを含む。クローン不在のリポジトリは `skipped_repos` として応答に明示される。

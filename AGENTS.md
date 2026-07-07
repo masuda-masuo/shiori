@@ -8,11 +8,30 @@ README や design.md の正規パターンを確認してから操作する。
 
 ## Shiori (shiori MCP)
 
+プロジェクトナレッジ検索 MCP。定義・ユースケースは `docs/design/13-プロダクト定義とユースケース.md`。
+
+検索（どこに書いてある？）:
+
 - `shiori_search`: 意味検索の入口。まずこれで調べる
 - `shiori_keyword_search`: 関数名・API 名・エラーコード等の厳密一致
+- `shiori_grep`: クローンの行レベル grep（検索で絞った後の Stage-2、`repo="*"` で横断）
+
+閲覧（何と書いてある？）:
+
 - `shiori_read_issue`: issue/PR のスレッド全体を取得
-- `shiori_read_file`: クローンされた実ファイルを読む
+- `shiori_read_file`: クローンされた実ファイルを読む（範囲指定可）
 - `shiori_read_pr_file`: PR head のファイルを読む
+- `shiori_list_tree`: リポジトリ構造の閲覧（`source_type` / `extension` で絞り込み）
+
+関係・変更（何とつながっている？何が変わる？）:
+
+- `shiori_issue_links`: issue/PR の相互参照（closes / duplicate / refs / mention）
+- `shiori_pr_changes`: PR の変更ファイルマップ
+- `shiori_pr_diff`: PR の unified diff
+- `shiori_pr_review_comments`: PR のレビューコメント一覧
+
+運用:
+
 - `shiori_status`: 索引の鮮度確認（自動同期が有効なら通常不要）
 
 ## code-sandbox-mcp

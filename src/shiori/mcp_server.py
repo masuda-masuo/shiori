@@ -336,8 +336,11 @@ mcp = FastMCP(
     host=settings.mcp_host,
     port=settings.mcp_port,
     instructions=(
-        "Hybrid search of GitHub repository knowledge (Markdown docs, issue/PR discussions, "
-        "and source code). "
+        "Project-knowledge search MCP: one unified, cross-lingual (ja/en) index over GitHub "
+        "repository knowledge — Markdown docs, source code, and issue/PR discussions — searchable "
+        "in a single query and traversable across sources (issue -> fix PR -> changed files -> docs). "
+        "Not a RAG server — shiori returns pointers + snippets and never generates answers; "
+        "you decide what to fetch. "
         "First search with shiori_search to get pointers + snippets, then fetch "
         "only the needed range via shiori_read_file / shiori_read_issue. "
         "For exact match of proper nouns, API names, error codes, function names, use shiori_keyword_search. "
@@ -349,6 +352,10 @@ mcp = FastMCP(
         "(filter by source_type='code' and prog_lang filter). "
         "PR change file maps are available via shiori_pr_changes. "
         "PR head file content can be read transparently via shiori_read_pr_file (issue #81). "
+        "PR diffs via shiori_pr_diff (unified diff, optionally scoped to one path; issue #96). "
+        "PR review comments (with path/line) via shiori_pr_review_comments. "
+        "Issue/PR cross-references (closes/duplicate/refs/mention, inbound+outbound) "
+        "via shiori_issue_links (issue #97) — useful for duplicate checks and tracing fixes. "
         "\n"
         "■ Two-store model (information sources)\n"
         "shiori has 2 independent data sources:\n"
