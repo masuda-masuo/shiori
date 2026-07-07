@@ -336,8 +336,9 @@ mcp = FastMCP(
     host=settings.mcp_host,
     port=settings.mcp_port,
     instructions=(
-        "Project-knowledge search MCP: search and navigate GitHub repository knowledge "
-        "(Markdown docs, issue/PR discussions, and source code) with low token cost. "
+        "Project-knowledge search MCP: one unified, cross-lingual (ja/en) index over GitHub "
+        "repository knowledge — Markdown docs, source code, and issue/PR discussions — searchable "
+        "in a single query and traversable across sources (issue -> fix PR -> changed files -> docs). "
         "Not a RAG server — shiori returns pointers + snippets and never generates answers; "
         "you decide what to fetch. "
         "First search with shiori_search to get pointers + snippets, then fetch "
