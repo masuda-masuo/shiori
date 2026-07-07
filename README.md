@@ -1,8 +1,10 @@
 # shiori 栞
 
-GitHub リポジトリの知識 — ドキュメントと、issue/PR 上の議論 — に、AI エージェントが効率よくアクセスするためのローカルな MCP サーバー。ファイル全文をコンテキストに流し込むのではなく、関連箱所への「ポインタ」を返す。
+**プロジェクトナレッジ検索 MCP** — GitHub リポジトリに散在するプロジェクトナレッジ（ドキュメント・ソースコード・issue/PR の議論）を、AI エージェントが低トークンで検索・参照するためのローカルな MCP サーバー。ファイル全文をコンテキストに流し込むのではなく、関連箇所への「ポインタ」を返す。
 
- 栞（shiori）＝ブックマーク。検索が該当箱所への栞を返し、エージェントは必要だと判断したときだけ全文を取りに行く — それがこのツールの核心。
+ 栞（shiori）＝ブックマーク。検索が該当箇所への栞を返し、エージェントは必要だと判断したときだけ全文を取りに行く — それがこのツールの核心。
+
+shiori は RAG（検索拡張生成）ではない。回答の生成や自動的なコンテキスト注入は行わず、検索（Retrieval）とナレッジナビゲーションに徹する。判断と生成の主体はエージェント側にある。定義の詳細とユースケースは `docs/design/13-プロダクト定義とユースケース.md` を参照。
 
 ## なぜ作るか
 
@@ -54,11 +56,30 @@ dependabot 等の bot 投稿は検索ノイズを避けるため原則索引か�
 
 ## MCP ツール
 
-- `shiori_semantic_search` — 意味ベースの検索（内部でハイブリッド融合）。入口ツール
-- `shiori_keyword_search` — 完全一致／識別子検索（日本語対応トークナイズ）
+12 ツールを「ユーザーの問い」で 4 層に分類している（詳細は `docs/design/13-プロダクト定義とユースケース.md`）。
+
+**① 検索 — どこに書いてある？**
+
+- `shiori_search` — 統合入口。意味＋キーワードのハイブリッド検索（RRF 融合）。概念・言い換え・クロスリンガルに強い
+- `shiori_keyword_search` — 完全一致／識別子検索（日本語対応トークナイズ）。関数名・API 名・エラーコード向け
+- `shiori_grep` — クローンを ripgrep で行レベル検索。検索でファイルを絞った後の Stage-2。`repo="*"` で横断検索
+
+**② 閲覧 — 何と書いてある？**
+
+- `shiori_read_file` — クローン（main 固定）の実ファイルを範囲指定で読む
+- `shiori_read_issue` — issue/PR スレッド全体を時系列で取得（`numbers` で一括取得可）
+- `shiori_read_pr_file` — PR head 時点のファイルを git 経由で透過取得
 - `shiori_list_tree` — リポジトリ構造の閲覧。`source_type`（`doc` / `code`）と `extension`（`.py` / `.md` 等）で絞り込み可能
-- `shiori_read_file` / `shiori_read_issue` — 指定ファイル／スレッドを必要なら一部だけ取得
-- `shiori_pr_changes` — PR の変更ファイルマップ（メタデータ）。head_sha と変更ファイル一覧（path / status / additions / deletions / blob_url）。コンテンツ（patch）は GitHub MCP に委譲
+
+**③ 関係・変更 — 何とつながっている？何が変わる？**
+
+- `shiori_issue_links` — issue/PR の相互参照（closes / duplicate / refs / mention）を inbound/outbound で返す
+- `shiori_pr_changes` — PR の変更ファイルマップ（head_sha・path・status・増減・blob_url）
+- `shiori_pr_diff` — PR の unified diff を git で計算して返す（`path` で単一ファイルに絞れる）
+- `shiori_pr_review_comments` — PR のレビューコメント一覧（パス・行番号付き）
+
+**④ 運用 — 索引は新しいか？**
+
 - `shiori_status` — 索引の鮮度と健全性の確認（最終同期時刻・件数内訳・警告）
 
 検索系ツールは全文ではなくポインタ（パス／見出しパス／issue 番号＋スニペット＋GitHub URL）を返す。
@@ -78,5 +99,6 @@ MCP クライアントからは `http://localhost:8765/mcp`（streamable HTTP）
 ## ドキュメント構成
 
 - `docs/design/00-基本設計.md` — 全体像と設計方針・決定ログ
-- `docs/design/01〜10-*.md` — トピック別の詳細設計（各ファイルに v1 の決定を記録）
+- `docs/design/01〜12-*.md` — トピック別の詳細設計（各ファイルに v1 の決定を記録）
+- `docs/design/13-プロダクト定義とユースケース.md` — プロダクト定義・ツールカタログ（4 層モデル）・ユースケース集
 - `docs/guides/セットアップ.md` — セットアップ・運用手順
