@@ -27,14 +27,7 @@ from shiori.github_sync import (
 )
 
 
-# ===================================================================
-# ChunkBuffer（issue #72）
-# ===================================================================
-
-
 class TestChunkBuffer:
-    """ChunkBuffer: chunk accumulation → batch embed → bulk insert."""
-
     def _mock_conn(self):
         conn = MagicMock()
         conn.cursor.return_value.__enter__.return_value = MagicMock()
@@ -67,7 +60,6 @@ class TestChunkBuffer:
         return defaults
 
     def test_add_then_flush_batches_embedding_and_insert(self):
-        """add accumulates, flush does batch embed + bulk insert + commit."""
         conn = self._mock_conn()
         embedder = MagicMock()
         embedder.embed_passages.return_value = [[0.1, 0.2], [0.3, 0.4]]
@@ -81,15 +73,11 @@ class TestChunkBuffer:
             n = buf.flush()
 
             assert n == 2
-            # embed_passages called once (both texts batched)
             embedder.embed_passages.assert_called_once()
-            # bulk_insert_chunks called once
             mock_bulk.assert_called_once()
-            # commit called once
             conn.commit.assert_called_once()
 
     def test_auto_flush_when_batch_size_reached(self):
-        """Auto-flushes when batch_size is reached."""
         conn = self._mock_conn()
         embedder = MagicMock()
         embedder.embed_passages.return_value = [[0.1, 0.2], [0.3, 0.4]]
@@ -99,16 +87,13 @@ class TestChunkBuffer:
 
             buf.add(**self._chunk_kwargs(content="a"))
             buf.add(**self._chunk_kwargs(chunk_key="k2", content="b"))
-            # batch_size=2 reached → auto flush
             assert embedder.embed_passages.call_count == 1
             assert conn.commit.call_count == 1
 
-            # buffer should be empty
             buf.add(**self._chunk_kwargs(chunk_key="k3", content="c"))
-            assert len(buf._items) == 1  # not flushed yet
+            assert len(buf._items) == 1
 
     def test_flush_empty_buffer_noops(self):
-        """flush on empty buffer is a no-op."""
         conn = self._mock_conn()
         embedder = MagicMock()
 
@@ -121,7 +106,6 @@ class TestChunkBuffer:
         conn.commit.assert_not_called()
 
     def test_flush_returns_inserted_count(self):
-        """flush の返り値は挿入件数。"""
         conn = self._mock_conn()
         embedder = MagicMock()
         embedder.embed_passages.return_value = [
@@ -142,14 +126,7 @@ class TestChunkBuffer:
             assert n == 3
 
 
-# ===================================================================
-# _should_index
-# ===================================================================
-
-
 class TestShouldIndex:
-    """_should_index allowlist logic (issue #25)."""
-
     def test_non_bot_always_indexed(self):
         settings = Settings()
         assert _should_index(False, "alice", settings) is True
@@ -169,26 +146,17 @@ class TestShouldIndex:
         assert _should_index(True, "other[bot]", settings) is False
 
     def test_author_none_with_allowlist(self):
-        """Bot with author=None is excluded regardless of allowlist."""
         settings = Settings()
         settings.index_bot_logins = {"any[bot]"}
         assert _should_index(True, None, settings) is False
 
     def test_case_insensitive(self):
-        """allowlist matching is case-insensitive."""
         settings = Settings()
         settings.index_bot_logins = {"my-bot[bot]"}
         assert _should_index(True, "MY-BOT[bot]", settings) is True
 
 
-# ===================================================================
-# _is_bot
-# ===================================================================
-
-
 class TestIsBot:
-    """_is_bot detection logic."""
-
     def test_type_bot(self):
         assert _is_bot({"type": "Bot", "login": "x"}) is True
         assert _is_bot({"type": "User", "login": "x"}) is False
@@ -201,14 +169,7 @@ class TestIsBot:
         assert _is_bot(None) is False
 
 
-# ===================================================================
-# _propagate_issue_state（issue #56）
-# ===================================================================
-
-
 class TestPropagateIssueState:
-    """_propagate_issue_state behavior."""
-
     def test_updates_all_chunks_for_repo_and_issue(self):
         conn = MagicMock()
         cursor = MagicMock()
@@ -223,7 +184,6 @@ class TestPropagateIssueState:
         )
 
     def test_zero_rowcount_does_not_log(self):
-        """No exception when rowcount=0."""
         conn = MagicMock()
         cursor = MagicMock()
         cursor.rowcount = 0
@@ -232,43 +192,31 @@ class TestPropagateIssueState:
         _propagate_issue_state(conn, "o/r", 42, "open")
 
 
-# ===================================================================
-# _sync_pr_changes（issue #54）
-# ===================================================================
-
-
 class TestSyncPrChanges:
-    """_sync_pr_changes behavior."""
-
     def test_skips_when_head_sha_unchanged(self):
         client = MagicMock()
         conn = MagicMock()
 
-        # PR detail response
         client.get.return_value.raise_for_status.return_value = None
         client.get.return_value.json.return_value = {
             "head": {"sha": "abc1234"},
         }
 
-        # mock get_pr_head_sha to return the same SHA
         with patch("shiori.github_sync.get_pr_head_sha", return_value="abc1234"):
             with patch("shiori.github_sync.upsert_pr_changes") as mock_upsert:
                 _sync_pr_changes(client, conn, "o/r", 42)
 
-        # files not fetched, upsert not called
         mock_upsert.assert_not_called()
 
     def test_fetches_files_when_head_sha_changed(self):
         client = MagicMock()
         conn = MagicMock()
 
-        # PR detail
         client.get.side_effect = [
             MagicMock(
                 raise_for_status=lambda: None,
                 json=lambda: {"head": {"sha": "newsha"}},
             ),
-            # files
             MagicMock(
                 raise_for_status=lambda: None,
                 json=lambda: [
@@ -319,17 +267,9 @@ class TestSyncPrChanges:
         mock_upsert.assert_not_called()
 
 
-# ---------------------------------------------------------------------------
-# _git (safe.directory)
-# ---------------------------------------------------------------------------
-
-
 class TestGit:
-    """_git safe.directory injection logic (issue #48)."""
-
     @patch("shiori.github_sync.subprocess.run")
     def test_safe_directory_added_when_cwd_given(self, mock_run):
-        """Ensures -c safe.directory=<cwd> is passed when cwd is set."""
         mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
         _git(["status"], cwd="/data/repos/foo")
         called_cmd = mock_run.call_args[0][0]
@@ -337,78 +277,52 @@ class TestGit:
 
     @patch("shiori.github_sync.subprocess.run")
     def test_no_safe_directory_when_cwd_none(self, mock_run):
-        """safe.directory is not injected when cwd=None (clone etc)."""
         mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
         _git(["clone", "url", "dest"])
         called_cmd = mock_run.call_args[0][0]
         assert "-c" not in called_cmd
 
 
-# ---------------------------------------------------------------------------
-# _clean_text（issue #73）
-# ---------------------------------------------------------------------------
-
-
 class TestCleanText:
-    """_clean_text: control character removal (newline/tab preserved)."""
-
     def test_remove_nul(self):
-        """NUL (0x00) is removed."""
         assert _clean_text("hello\x00world") == "helloworld"
 
     def test_remove_control_chars(self):
-        """改行・タブ以外の制御文字 (0x01-0x08, 0x0B-0x1F) が除去される。"""
         assert _clean_text("a\x01b\x08c\x0Bd\x1Fe") == "abcde"
 
     def test_preserve_newline(self):
-        """改行 (\n, 0x0A) は保持される。"""
         assert _clean_text("line1\nline2\nline3") == "line1\nline2\nline3"
 
     def test_preserve_tab(self):
-        """タブ (\t, 0x09) は保持される。"""
         assert _clean_text("col1\tcol2\tcol3") == "col1\tcol2\tcol3"
 
     def test_preserve_normal_text(self):
-        """通常のテキストはそのまま。"""
-        text = "Hello, 世界! This is a test \U0001f60a"
+        text = "Hello, \u4e16\u754c! This is a test \U0001f60a"
         assert _clean_text(text) == text
 
     def test_none_returns_empty(self):
-        """None は空文字列になる。"""
         assert _clean_text(None) == ""
 
     def test_empty_string(self):
-        """空文字列はそのまま。"""
         assert _clean_text("") == ""
 
     def test_mixed_control_and_valid(self):
-        """制御文字・改行・タブ・通常テキストの混合。"""
         mixed = "a\x00b\x01c\nd\te\x1Ff\x09g\nh"
         expected = "abc\nd\tef\tg\nh"
         assert _clean_text(mixed) == expected
 
     def test_only_control_chars(self):
-        """制御文字だけの文字列は空になる。"""
         assert _clean_text("\x00\x01\x08\x0B\x1F") == ""
 
 
-# ---------------------------------------------------------------------------
-# _git_fetch_ref / _git_delete_ref（issue #81）
-# ---------------------------------------------------------------------------
-
-
 class TestGitFetchRef:
-    """_git_fetch_ref / _git_delete_ref: PR head 取得の共通プリミティブ。"""
-
     @patch("shiori.github_sync._git")
     def test_auto_generates_tmp_ref(self, mock_git):
-        """tmp_ref 未指定時は refs/shiori/tmp-{uuid} を自動生成する。"""
         with patch("shiori.github_sync.uuid.uuid4") as mock_uuid:
             mock_uuid.return_value.hex = "deadbeef1234"
             result = _git_fetch_ref("pull/42/head", cwd="/data/repos/o/r")
 
         assert result == "refs/shiori/tmp-deadbeef1234"
-        # fetch が呼ばれたこと
         called_args = mock_git.call_args[0][0]
         assert called_args == [
             "fetch", "origin", "pull/42/head:refs/shiori/tmp-deadbeef1234", "--depth=1",
@@ -416,7 +330,6 @@ class TestGitFetchRef:
 
     @patch("shiori.github_sync._git")
     def test_uses_custom_tmp_ref(self, mock_git):
-        """tmp_ref 指定時はその値を使う。"""
         result = _git_fetch_ref(
             "pull/42/head",
             cwd="/data/repos/o/r",
@@ -429,40 +342,39 @@ class TestGitFetchRef:
             "fetch", "origin", "pull/42/head:refs/shiori/my-temp", "--depth=1",
         ]
 
-    @patch("shiori.github_sync._auth_args")
     @patch("shiori.github_sync._git")
-    def test_forwards_provider_auth(self, mock_git, mock_auth):
-        """provider が指定された場合、_auth_args の結果を git 引数に含める。"""
-        mock_auth.return_value = ["-c", "http.extraHeader=Authorization: Basic xxx"]
+    def test_forwards_provider_auth(self, mock_git):
+        fake_remote = "https://github.com/o/r.git"
+        fake_authed = "https://x-access-token:tok@github.com/o/r.git"
+        mock_git.side_effect = [fake_remote, None, None, None]
         provider = MagicMock()
+        provider.get_token.return_value = "tok"
 
         with patch("shiori.github_sync.uuid.uuid4") as mock_uuid:
             mock_uuid.return_value.hex = "abc"
             _git_fetch_ref("pull/1/head", cwd="/r", provider=provider)
 
-        called_args = mock_git.call_args[0][0]
-        assert called_args[:2] == ["-c", "http.extraHeader=Authorization: Basic xxx"]
-        assert "fetch" in called_args
-        mock_auth.assert_called_once_with(provider)
+        assert mock_git.call_count == 4
+        assert mock_git.call_args_list[0][0][0] == ["remote", "get-url", "origin"]
+        assert mock_git.call_args_list[1][0][0] == ["remote", "set-url", "origin", fake_authed]
+        assert mock_git.call_args_list[2][0][0] == [
+            "fetch", "origin", "pull/1/head:refs/shiori/tmp-abc", "--depth=1",
+        ]
+        assert mock_git.call_args_list[3][0][0] == ["remote", "set-url", "origin", fake_remote]
+        provider.get_token.assert_called_once()
 
-    @patch("shiori.github_sync._auth_args")
     @patch("shiori.github_sync._git")
-    def test_no_auth_when_provider_none(self, mock_git, mock_auth):
-        """provider=None なら認証引数は付与されない。"""
-        mock_auth.return_value = []
-
+    def test_no_auth_when_provider_none(self, mock_git):
         with patch("shiori.github_sync.uuid.uuid4") as mock_uuid:
             mock_uuid.return_value.hex = "abc"
             _git_fetch_ref("pull/1/head", cwd="/r", provider=None)
 
+        mock_git.assert_called_once()
         called_args = mock_git.call_args[0][0]
         assert called_args[0] == "fetch"
-        # _auth_args が呼ばれないことを確認
-        mock_auth.assert_not_called()
 
     @patch("shiori.github_sync._git")
     def test_fetch_failure_propagated(self, mock_git):
-        """git fetch の失敗はそのまま伝播する。"""
         mock_git.side_effect = RuntimeError("fetch failed")
 
         with pytest.raises(RuntimeError, match="fetch failed"):
@@ -470,7 +382,6 @@ class TestGitFetchRef:
 
     @patch("shiori.github_sync._git")
     def test_delete_ref_exists(self, mock_git):
-        """_git_delete_ref は update-ref -d を呼ぶ。"""
         _git_delete_ref("refs/shiori/tmp-abc", cwd="/r")
 
         mock_git.assert_called_once_with(
@@ -480,21 +391,12 @@ class TestGitFetchRef:
 
     @patch("shiori.github_sync._git")
     def test_delete_ref_nonexistent_ignored(self, mock_git):
-        """Silently ignores RuntimeError when deleting a non-existent ref."""
         mock_git.side_effect = RuntimeError("fatal: ...")
 
-        # 例外を出さない
         _git_delete_ref("refs/shiori/nonexistent", cwd="/r")
 
 
-# ===================================================================
-# _sync_pr_reviews (issue #103)
-# ===================================================================
-
-
 class TestSyncPrReviews:
-    """_sync_pr_reviews: PR review submissions from pulls/reviews."""
-
     @staticmethod
     def _review(
         rid: int,
@@ -514,7 +416,6 @@ class TestSyncPrReviews:
         }
 
     def _setup_api_pages(self, client, reviews):
-        """Configure client mock so _api_pages returns the given reviews."""
         mock_resp = MagicMock()
         mock_resp.raise_for_status.return_value = None
         mock_resp.json.return_value = reviews
@@ -612,7 +513,6 @@ class TestSyncPrReviews:
         mock_index.assert_not_called()
 
     def test_bot_review_upserted_but_not_indexed(self):
-        """Bot review outside allowlist: upsert happens, _should_index=False -> no index."""
         client = MagicMock()
         conn = MagicMock()
         embedder = MagicMock()
@@ -702,7 +602,6 @@ class TestSyncPrReviews:
         mock_should.assert_not_called()
 
     def test_pass_through_chunk_buffer(self):
-        """When buffer is provided, _index_item receives it."""
         client = MagicMock()
         conn = MagicMock()
         embedder = MagicMock()
@@ -727,7 +626,6 @@ class TestSyncPrReviews:
         assert kwargs["buffer"] is buffer
 
     def test_negative_comment_id_avoids_collision(self):
-        """All review comment_ids must be negative to avoid collision with inline comments."""
         client = MagicMock()
         conn = MagicMock()
         embedder = MagicMock()
@@ -750,4 +648,3 @@ class TestSyncPrReviews:
         for call_args in mock_upsert.call_args_list:
             comment_id = call_args[0][1]["comment_id"]
             assert comment_id < 0, f"comment_id {comment_id} must be negative"
-

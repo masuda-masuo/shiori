@@ -66,27 +66,16 @@ def _should_index(is_bot: bool, author: str | None, settings: Settings) -> bool:
     return False
 
 
-# Regex for control char removal: matches control chars (0x00-0x1F) except newline (\n=0x0A) and tab (\t=0x09)
 _CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0B-\x1F]")
 
 
 def _clean_text(s: str | None) -> str:
-    """Normalize control characters from GitHub API text (issue #73).
-"""
     if not s:
         return ""
     return _CONTROL_CHARS_RE.sub("", s)
 
 
-# ---------------------------------------------------------------------------
-# ChunkBuffer: batch embed/insert buffer for bulk path (issue #72)
-# ---------------------------------------------------------------------------
-
 class ChunkBuffer:
-    """Accumulate chunks, batch-embed, bulk-insert, coarse-commit for high throughput.
-    Incremental path unused; initial/rebuild only (detailed design/01, 02, 10).
-"""
-
     def __init__(
         self,
         conn: psycopg.Connection,
@@ -110,7 +99,6 @@ class ChunkBuffer:
             prog_lang: str | None = None, symbols: str | None = None,
             created_at=None, updated_at=None, url: str | None = None,
     ) -> None:
-        """Add chunk to buffer. Auto-flushes at batch_size."""
         self._items.append({
             "chunk_key": chunk_key, "chunk_index": chunk_index,
             "source_type": source_type, "repo": repo, "content": content,
@@ -122,7 +110,6 @@ class ChunkBuffer:
             "prog_lang": prog_lang, "symbols": symbols,
             "created_at": created_at, "updated_at": updated_at,
             "url": url,
-            # Embedding placeholder (filled at flush time)
             "embedding": None,
         })
         self._texts.append(content)
@@ -130,7 +117,6 @@ class ChunkBuffer:
             self.flush()
 
     def flush(self) -> int:
-        """Flush buffer: batch embed → bulk insert → commit. Returns insert count."""
         if not self._items:
             return 0
         n = len(self._items)
@@ -147,20 +133,11 @@ class ChunkBuffer:
         return n
 
 
-# ---------------------------------------------------------------------------
-# docs (git)
-# ---------------------------------------------------------------------------
-
-
 def _redact(text: str) -> str:
-    """Mask auth credentials embedded in URLs (x-access-token:...@ etc.)."""
     return re.sub(r"https://[^@\s/]+@", "https://", text)
 
 
 def _git(args: list[str], cwd: str | None = None) -> str:
-    # When cwd is specified, explicitly set safe.directory for security.
-    # app/ingest (root) runs in the container where /data/repos is mounted;
-    # prevents git dubious ownership errors (issue #48).
     cmd = ["git"]
     if cwd:
         cmd += ["-c", f"safe.directory={cwd}"]
@@ -203,7 +180,6 @@ def _authed_url(remote: str, provider: TokenProvider) -> str:
     token = provider.get_token()
     if not token:
         return remote
-    # Insert x-access-token:<token>@ after the scheme (https://)
     return remote.replace("https://", f"https://x-access-token:{token}@", 1)
 
 
@@ -213,18 +189,14 @@ def _git_fetch_ref(
     provider: TokenProvider | None = None,
     tmp_ref: str | None = None,
 ) -> str:
-    """Shallow-fetch a ref and return a temp ref name (issue #81).
-    tmp_ref=None skips fetch. Returns SHA of fetched ref."""
     resolved = tmp_ref or f"refs/shiori/tmp-{uuid.uuid4().hex}"
     if provider:
-        # Get the current remote URL and add auth token
         remote = _git(["remote", "get-url", "origin"], cwd=cwd)
         authed = _authed_url(remote, provider)
         _git(["remote", "set-url", "origin", authed], cwd=cwd)
         try:
             _git(["fetch", "origin", f"{ref}:{resolved}", "--depth=1"], cwd=cwd)
         finally:
-            # Restore clean URL without token
             _git(["remote", "set-url", "origin", remote], cwd=cwd)
     else:
         _git(["fetch", "origin", f"{ref}:{resolved}", "--depth=1"], cwd=cwd)
@@ -232,17 +204,13 @@ def _git_fetch_ref(
 
 
 def _git_delete_ref(tmp_ref: str, cwd: str | None = None) -> None:
-    """Delete a temporary ref (issue #81). No-op if not found."""
     try:
         _git(["update-ref", "-d", tmp_ref], cwd=cwd)
     except RuntimeError:
-        pass  # Already deleted etc.
+        pass
 
 
 class _GitHubAuth(httpx.Auth):
-    """httpx Auth hook. Gets token from provider per request.
-    Refreshes token near expiry to survive long ingests."""
-
     def __init__(self, provider: TokenProvider) -> None:
         self._provider = provider
 
@@ -261,26 +229,20 @@ def sync_docs(
     provider: TokenProvider,
     buffer: ChunkBuffer | None = None,
 ) -> int:
-    """Sync repo Markdown; index only changed files. Returns update count.
-    When buffer specified (bulk path), uses ChunkBuffer for batch embedding."""
     repo_dir = settings.repo_dir(repo)
     remote = f"https://github.com/{repo}.git"
     authed_remote = _authed_url(remote, provider)
     if os.path.isdir(os.path.join(repo_dir, ".git")):
-        # Overwrite even if old token-embedded URL remains in .git/config (idempotent).
         _git(["remote", "set-url", "origin", authed_remote], cwd=repo_dir)
         _git(["fetch", "--depth=1", "origin"], cwd=repo_dir)
-        # Restore clean URL (without token) after fetch
         _git(["remote", "set-url", "origin", remote], cwd=repo_dir)
         _git(["reset", "--hard", "origin/HEAD"], cwd=repo_dir)
     else:
         os.makedirs(os.path.dirname(repo_dir), exist_ok=True)
         _git(["clone", "--depth=1", authed_remote, repo_dir])
-        # Restore clean URL in the cloned repo
         _git(["remote", "set-url", "origin", remote], cwd=repo_dir)
     head = _git(["rev-parse", "HEAD"], cwd=repo_dir)
 
-    # Diff current file set against existing index
     current: dict[str, str] = {}
     for root, dirs, files in os.walk(repo_dir):
         dirs[:] = [d for d in dirs if d != ".git"]
@@ -313,7 +275,7 @@ def sync_docs(
     for path in changed:
         with open(os.path.join(repo_dir, path), encoding="utf-8", errors="replace") as fp:
             text = fp.read()
-        text = _clean_text(text)  # Remove NUL etc. (issue #111)
+        text = _clean_text(text)
         language = detect_language(text)
         chunks = split_markdown(text, settings.chunk_max_chars)
         chunk_key = f"doc:{repo}:{path}"
@@ -376,11 +338,6 @@ def sync_docs(
     return len(changed) + len(removed)
 
 
-# ---------------------------------------------------------------------------
-# code (shares same git clone, sha delta)
-# ---------------------------------------------------------------------------
-
-# Directory names to skip in os.walk
 _EXCLUDE_DIRS = {
     ".git",
     "node_modules",
@@ -393,7 +350,6 @@ _EXCLUDE_DIRS = {
     ".cache",
 }
 
-# File extensions excluded from code indexing (binary/asset etc.)
 _EXCLUDE_EXTENSIONS = {
     ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".webp",
     ".woff", ".woff2", ".ttf", ".eot", ".otf",
@@ -407,8 +363,6 @@ _EXCLUDE_EXTENSIONS = {
 
 
 def _is_code_file(filename: str, settings: Settings) -> bool:
-    """Determine if the relative path is a code file that should be indexed.
-"""
     lower = filename.lower()
     if lower.endswith((".md", ".mdx", ".markdown")):
         return False
@@ -420,7 +374,6 @@ def _is_code_file(filename: str, settings: Settings) -> bool:
 
 
 def _is_excluded_by_glob(rel_path: str, settings: Settings) -> bool:
-    """Check if path matches excluded glob patterns."""
     for pattern in settings.code_exclude_globs:
         if fnmatch.fnmatch(rel_path, pattern):
             return True
@@ -435,8 +388,6 @@ def sync_code(
     provider: TokenProvider,
     buffer: ChunkBuffer | None = None,
 ) -> int:
-    """Sync source code; index only changed files (detailed design/10 Step 3).
-    Shares clone with sync_docs."""
     if not settings.index_code:
         return 0
 
@@ -447,13 +398,10 @@ def sync_code(
         return 0
 
     head = _git(["rev-parse", "HEAD"], cwd=repo_dir)
-
-    # Cursor check: skip walk if HEAD unchanged since last run
     prev_head = get_cursor(conn, repo, "code")
     if prev_head == head:
         return 0
 
-    # Current code file set (with sha)
     current: dict[str, str] = {}
     for root, dirs, files in os.walk(repo_dir):
         dirs[:] = [d for d in dirs if d not in _EXCLUDE_DIRS]
@@ -467,7 +415,6 @@ def sync_code(
             with open(abspath, "rb") as fp:
                 current[rel] = hashlib.sha256(fp.read()).hexdigest()
 
-    # Existing index (doc_files rows with kind='code')
     with conn.cursor() as cur:
         cur.execute(
             "SELECT path, content_sha FROM doc_files WHERE repo = %s AND kind = 'code'",
@@ -478,7 +425,6 @@ def sync_code(
     removed = set(indexed) - set(current)
     changed = [p for p, sha in current.items() if indexed.get(p) != sha]
 
-    # Delete removed files
     for path in removed:
         delete_chunks_by_key(conn, f"code:{repo}:{path}")
         with conn.cursor() as cur:
@@ -488,13 +434,12 @@ def sync_code(
             )
         log.info("removed code %s", path)
 
-    # Re-index changed/added files
     for path in changed:
         abspath = os.path.join(repo_dir, path)
         try:
             with open(abspath, encoding="utf-8", errors="replace") as fp:
                 text = fp.read()
-            text = _clean_text(text)  # Remove NUL etc. (issue #111)
+            text = _clean_text(text)
         except Exception as exc:
             log.warning("sync_code: skip %s (%s)", path, exc)
             continue
@@ -507,7 +452,6 @@ def sync_code(
             prog_lang = _detect_prog_lang(path)
             if buffer is not None:
                 for c in chunks:
-                    # Permalink uses commit_sha (resilient to line drift. Should-fix #5)
                     url = (
                         f"https://github.com/{repo}/blob/{head}/{path}"
                         f"#L{c.start_line}-L{c.end_line}"
@@ -520,7 +464,7 @@ def sync_code(
                         source_type="code",
                         repo=repo,
                         path=path,
-                        language=None,  # code uses language=NULL (decision 4)
+                        language=None,
                         heading_path=c.heading_path,
                         content=c.content,
                         line=c.start_line,
@@ -533,7 +477,6 @@ def sync_code(
             else:
                 vectors = embedder.embed_passages([c.content for c in chunks])
                 for c, v in zip(chunks, vectors):
-                    # Permalink uses commit_sha (resilient to line drift. Should-fix #5)
                     url = (
                         f"https://github.com/{repo}/blob/{head}/{path}"
                         f"#L{c.start_line}-L{c.end_line}"
@@ -547,7 +490,7 @@ def sync_code(
                         source_type="code",
                         repo=repo,
                         path=path,
-                        language=None,  # code uses language=NULL (decision 4)
+                        language=None,
                         heading_path=c.heading_path,
                         content=c.content,
                         embedding=v,
@@ -559,7 +502,6 @@ def sync_code(
                         url=url,
                     )
 
-        # Record in doc_files with kind='code'
         with conn.cursor() as cur:
             cur.execute(
                 """
@@ -580,12 +522,7 @@ def sync_code(
     return len(changed) + len(removed)
 
 
-# ---------------------------------------------------------------------------
-# issues / PR (GitHub API)
-# ---------------------------------------------------------------------------
-
 def _api_pages(client: httpx.Client, url: str, params: dict) -> "list[dict]":
-    """Paginate all pages via Link header."""
     items: list[dict] = []
     next_params: dict | None = params
     while url:
@@ -593,7 +530,7 @@ def _api_pages(client: httpx.Client, url: str, params: dict) -> "list[dict]":
         resp.raise_for_status()
         items.extend(resp.json())
         url = resp.links.get("next", {}).get("url")
-        next_params = None   # None not {}; preserves next URL query params as-is
+        next_params = None
     return items
 
 
@@ -637,8 +574,6 @@ def _issue_title_state_kind(
 def _propagate_issue_state(
     conn: psycopg.Connection, repo: str, issue_no: int, state: str | None
 ) -> None:
-    """Propagate issue_items state changes to chunks (issue #56).
-"""
     with conn.cursor() as cur:
         cur.execute(
             "UPDATE chunks SET state = %s WHERE repo = %s AND issue_no = %s",
@@ -729,9 +664,6 @@ def _sync_pr_changes(
     repo: str,
     issue_no: int,
 ) -> None:
-    """Sync PR change file maps (issue #54).
-    GET /repos/{repo}/pulls/{issue_number}/files"""
-    # 1. Fetch PR details to get head_sha and base_sha
     try:
         resp = client.get(f"{API}/repos/{repo}/pulls/{issue_no}")
         resp.raise_for_status()
@@ -745,13 +677,11 @@ def _sync_pr_changes(
         log.warning("PR #%d: failed to fetch details: %s", issue_no, exc)
         return
 
-    # 2. Skip if head_sha unchanged
     prev_sha = get_pr_head_sha(conn, repo, issue_no)
     if prev_sha == head_sha:
         log.debug("PR #%d: head_sha unchanged, skipping", issue_no)
         return
 
-    # 3. Fetch file list
     try:
         files = _api_pages(
             client,
@@ -763,7 +693,6 @@ def _sync_pr_changes(
         log.warning("PR #%d: failed to fetch file list: %s", issue_no, exc)
         return
 
-    # 4. upsert
     upsert_pr_changes(conn, repo, issue_no, head_sha, base_sha, files)
     log.info("PR #%d: updated change file map (head_sha=%s, base_sha=%s, %d files)",
              issue_no, head_sha[:7], (base_sha or "?")[:7], len(files))
@@ -778,12 +707,6 @@ def _sync_pr_reviews(
     issue_no: int,
     buffer: ChunkBuffer | None = None,
 ) -> None:
-    """Sync PR review submissions from pulls/{issue_no}/reviews (issue #103).
-
-    Review submissions (body + state like COMMENTED/APPROVED/CHANGES_REQUESTED)
-    are not returned by pulls/comments (which only has inline review comments).
-    Store with comment_id = -(review_id) to avoid collision with inline reviews.
-    """
     try:
         reviews = _api_pages(
             client,
@@ -849,8 +772,6 @@ def sync_issues(
     provider: TokenProvider,
     buffer: ChunkBuffer | None = None,
 ) -> int:
-    """Incremental sync of issues/PRs/comments/reviews.
-    When buffer specified (bulk path), uses ChunkBuffer for batch embedding."""
     headers = {
         "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
@@ -860,7 +781,6 @@ def sync_issues(
     with httpx.Client(
         headers=headers, auth=_GitHubAuth(provider), timeout=30.0
     ) as client:
-        # --- Body (issues endpoint includes PRs) ---
         since = get_cursor(conn, repo, "issues")
         params = {
             "state": "all",
@@ -911,7 +831,6 @@ def sync_issues(
                     buffer=buffer,
                 )
                 n_indexed += 1
-            # Sync change file maps and review submissions for PRs
             if kind == "pr":
                 _sync_pr_changes(client, conn, repo, no)
                 _sync_pr_reviews(client, conn, embedder, settings, repo, no, buffer=buffer)
@@ -920,7 +839,6 @@ def sync_issues(
         if items:
             set_cursor(conn, repo, "issues", items[-1]["updated_at"])
 
-        # --- Issue/PR comments ---
         since = get_cursor(conn, repo, "issue_comments")
         params = {"sort": "updated", "direction": "asc", "per_page": 100}
         if since:
@@ -958,7 +876,6 @@ def sync_issues(
         if comments:
             set_cursor(conn, repo, "issue_comments", comments[-1]["updated_at"])
 
-        # --- PR review comments (with path/line/diff_hunk) ---
         since = get_cursor(conn, repo, "pr_review_comments")
         params = {"sort": "updated", "direction": "asc", "per_page": 100}
         if since:
@@ -970,7 +887,6 @@ def sync_issues(
             author = (c.get("user") or {}).get("login")
             is_bot = _is_bot(c.get("user"))
             line = c.get("line") or c.get("original_line")
-            # Append diff_hunk to body as context (within decision not to index diffs themselves)
             body = _clean_text(c.get("body") or "")
             diff_hunk = c.get("diff_hunk")
             if diff_hunk:
