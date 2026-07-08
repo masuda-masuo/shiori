@@ -208,6 +208,8 @@ class McpTokenProvider(TokenProvider):
 
     def get_token(self) -> str | None:
         if self._binary_resolved and self._binary is None:
+            if self._token is not None and time.time() < self._fetched_at + self.HARD_EXPIRY:
+                return self._token
             return None
         if self._token is None or time.time() > self._fetched_at + self.CACHE_SECONDS - self.REFRESH_BEFORE:
             self._refresh()
@@ -280,6 +282,7 @@ class McpTokenProvider(TokenProvider):
             return
         log.warning("mcp-token failed and no cached token available; falling back to anonymous")
         self._binary = None
+        self._binary_resolved = False
 
 
 def _detect_arch() -> str:
