@@ -19,7 +19,7 @@ _HEADING_RE = re.compile(r"^(#{1,6})\s+(.*)$")
 _SENTENCE_END_RE = re.compile(r"(?<=[。．！？!?\\.])\s*|\n{2,}")
 _JA_CHAR_RE = re.compile(r"[\u3040-\u30ff\u4e00-\u9fff]")
 
-# --- tree-sitter (0.23 series. 0.24+ not supported due to API changes) ---
+# --- tree-sitter (0.24+ series; wraps QueryCursor for API compatibility) ---
 _TS_AVAILABLE = False
 _TS_PARSER_CACHE: dict[str, object] = {}
 _TS_FAILED: set[str] = set()
@@ -341,19 +341,18 @@ def split_code(file_path: str, content: str, max_chars: int = _CODE_MAX_CHARS) -
         return _split_code_fallback(content, file_path, max_chars)
 
     try:
-        from tree_sitter import Query
+        from tree_sitter import Query, QueryCursor
         query = Query(parser.language, query_src)
     except Exception:
         return _split_code_fallback(content, file_path, max_chars)
 
-    # tree-sitter 0.23: query.matches(root) → list[tuple[int, dict[str, list[Node]]]]
     def_nodes_raw: list[tuple[str, object]] = []
     try:
-        for _pattern_index, capture_map in query.matches(root):
+        cursor = QueryCursor(query)
+        for _pattern_index, capture_map in cursor.matches(root):
             for capture_name, captured_nodes in capture_map.items():
-                name = capture_name.decode() if isinstance(capture_name, bytes) else capture_name
                 for n in captured_nodes:
-                    def_nodes_raw.append((name, n))
+                    def_nodes_raw.append((capture_name, n))
     except Exception:
         pass
 
