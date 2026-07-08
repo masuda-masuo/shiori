@@ -1,8 +1,8 @@
 # 詳細設計/07: db / app の 2 サービス分離。データとモデルは named volume に永続化。
 # ingest は使い捨てのワンショット（profiles: ["ingest"]）。
-# 認証は mcp-token モデル（mcp-launcher の security-model）: GitHub App の鍵は
-# OS keystore から出さず、ホスト側 scripts/refresh-token が runtime/ に書く
-# 短命トークンだけをコンテナに渡す（GITHUB_TOKEN_COMMAND=cat、.env で設定）。
+# 認証は mcp-token モデル（mcp-launcher の security-model）: サーバープロセス内で
+# McpTokenProvider が mcp-token バイナリを自動解決（env→PATH→cache→download）し、
+# 短命トークンを期限管理してキャッシュする。GitHub App の鍵はコンテナに渡らない。
 # build_token_provider() が認証方式を自動選択する。
 # 同期は serve のバックグラウンドポーリング（SHIORI_SYNC_INTERVAL_SECONDS）に一本化。
 services:
@@ -51,14 +51,10 @@ services:
       SHIORI_INDEX_CODE: ${SHIORI_INDEX_CODE:-}
       SHIORI_CODE_EXTENSIONS: ${SHIORI_CODE_EXTENSIONS:-}
       SHIORI_CODE_EXCLUDE_GLOBS: ${SHIORI_CODE_EXCLUDE_GLOBS:-}
-      # 短命トークン取得コマンド（.env で cat /run/shiori/github-token を指定。
-      # GITHUB_TOKEN は PAT フォールバック、両方未設定なら anonymous）
       GITHUB_TOKEN: ${GITHUB_TOKEN:-}
-      GITHUB_TOKEN_COMMAND: ${SHIORI_TOKEN_COMMAND:-}
     volumes:
       - models:/models   # 埋め込みモデルの重みキャッシュ
       - repos:/data      # git クローン先
-      - ./runtime:/run/shiori:ro   # scripts/refresh-token が更新する短命トークン
     ports:
       - "8765:8765"
     depends_on:
@@ -83,13 +79,10 @@ services:
       SHIORI_INDEX_CODE: ${SHIORI_INDEX_CODE:-}
       SHIORI_CODE_EXTENSIONS: ${SHIORI_CODE_EXTENSIONS:-}
       SHIORI_CODE_EXCLUDE_GLOBS: ${SHIORI_CODE_EXCLUDE_GLOBS:-}
-      # 短命トークン取得コマンド（app と同じ mcp-token モデル）
       GITHUB_TOKEN: ${GITHUB_TOKEN:-}
-      GITHUB_TOKEN_COMMAND: ${SHIORI_TOKEN_COMMAND:-}
     volumes:
       - models:/models
       - repos:/data
-      - ./runtime:/run/shiori:ro
     depends_on:
       db:
         condition: service_healthy
