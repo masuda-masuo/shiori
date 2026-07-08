@@ -15,6 +15,7 @@ import pytest
 from shiori.config import Settings
 from shiori.github_sync import (
     ChunkBuffer,
+    _authed_url,
     _clean_text,
     _git,
     _git_delete_ref,
@@ -390,6 +391,50 @@ class TestCleanText:
     def test_only_control_chars(self):
         """制御文字だけの文字列は空になる。"""
         assert _clean_text("\x00\x01\x08\x0B\x1F") == ""
+
+
+# ---------------------------------------------------------------------------
+# _authed_url（PR #177）
+# ---------------------------------------------------------------------------
+
+
+class TestAuthedUrl:
+    """_authed_url: URL-embedded token for git auth (issue #174, PR #177)."""
+
+    def test_embeds_token(self):
+        """Token is embedded into URL via x-access-token scheme."""
+        provider = MagicMock()
+        provider.get_token.return_value = "ghs_token123"
+        url = _authed_url("https://github.com/o/r.git", provider)
+        assert url == "https://x-access-token:ghs_token123@github.com/o/r.git"
+
+    def test_none_token_returns_original(self):
+        """When provider returns None, original URL is returned."""
+        provider = MagicMock()
+        provider.get_token.return_value = None
+        url = _authed_url("https://github.com/o/r.git", provider)
+        assert url == "https://github.com/o/r.git"
+
+    def test_empty_token_returns_original(self):
+        """When provider returns empty string, original URL is returned."""
+        provider = MagicMock()
+        provider.get_token.return_value = ""
+        url = _authed_url("https://github.com/o/r.git", provider)
+        assert url == "https://github.com/o/r.git"
+
+    def test_only_replaces_first_https(self):
+        """Only the first https:// is replaced (unlikely edge case)."""
+        provider = MagicMock()
+        provider.get_token.return_value = "tok"
+        url = _authed_url("https://github.com/https://path.git", provider)
+        assert url == "https://x-access-token:tok@github.com/https://path.git"
+
+    def test_token_with_url_unsafe_chars(self):
+        """URL-unsafe chars in token are embedded as-is (git handles them)."""
+        provider = MagicMock()
+        provider.get_token.return_value = "tok/+="
+        url = _authed_url("https://github.com/o/r.git", provider)
+        assert url == "https://x-access-token:tok/+=@github.com/o/r.git"
 
 
 # ---------------------------------------------------------------------------
