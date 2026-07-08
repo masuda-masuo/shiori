@@ -7,10 +7,9 @@ RS256 keys are generated inside the test.
 from __future__ import annotations
 
 import os
-import stat
 import time
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import httpx
 import jwt
