@@ -17,7 +17,6 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from shiori import github_auth
 from shiori.config import Settings
 from shiori.github_auth import (
-    AnonymousProvider,
     AppTokenProvider,
     McpTokenProvider,
     StaticTokenProvider,
