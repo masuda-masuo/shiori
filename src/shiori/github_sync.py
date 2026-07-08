@@ -14,7 +14,6 @@ Auth via TokenProvider (detailed design/09); git via http.extraHeader; API via h
 
 from __future__ import annotations
 
-import base64
 import fnmatch
 import hashlib
 import logging
@@ -189,12 +188,23 @@ def _git(args: list[str], cwd: str | None = None) -> str:
 
 def _auth_args(provider: TokenProvider) -> list[str]:
     """Return git auth header as `-c http.extraHeader=...` args.
-    Token clipped from clone URL."""
+    Token clipped from clone URL.
+
+    NOTE: http.extraHeader is not used in practice because it fails in some
+    git versions. Use _authed_url() instead for clone/fetch operations.
+    Kept for compatibility."""
+    return []
+
+
+def _authed_url(remote: str, provider: TokenProvider) -> str:
+    """Return remote URL with token embedded (x-access-token scheme).
+    Falls back to the original URL if no token is available.
+    The token is redacted from logs by _redact()."""
     token = provider.get_token()
     if not token:
-        return []
-    b64 = base64.b64encode(f"x-access-token:{token}".encode()).decode()
-    return ["-c", f"http.extraHeader=Authorization: Basic {b64}"]
+        return remote
+    # Insert x-access-token:<token>@ after the scheme (https://)
+    return remote.replace("https://", f"https://x-access-token:{token}@", 1)
 
 
 def _git_fetch_ref(
@@ -206,8 +216,18 @@ def _git_fetch_ref(
     """Shallow-fetch a ref and return a temp ref name (issue #81).
     tmp_ref=None skips fetch. Returns SHA of fetched ref."""
     resolved = tmp_ref or f"refs/shiori/tmp-{uuid.uuid4().hex}"
-    auth = _auth_args(provider) if provider else []
-    _git(auth + ["fetch", "origin", f"{ref}:{resolved}", "--depth=1"], cwd=cwd)
+    if provider:
+        # Get the current remote URL and add auth token
+        remote = _git(["remote", "get-url", "origin"], cwd=cwd)
+        authed = _authed_url(remote, provider)
+        _git(["remote", "set-url", "origin", authed], cwd=cwd)
+        try:
+            _git(["fetch", "origin", f"{ref}:{resolved}", "--depth=1"], cwd=cwd)
+        finally:
+            # Restore clean URL without token
+            _git(["remote", "set-url", "origin", remote], cwd=cwd)
+    else:
+        _git(["fetch", "origin", f"{ref}:{resolved}", "--depth=1"], cwd=cwd)
     return resolved
 
 
@@ -245,15 +265,19 @@ def sync_docs(
     When buffer specified (bulk path), uses ChunkBuffer for batch embedding."""
     repo_dir = settings.repo_dir(repo)
     remote = f"https://github.com/{repo}.git"
-    auth = _auth_args(provider)
+    authed_remote = _authed_url(remote, provider)
     if os.path.isdir(os.path.join(repo_dir, ".git")):
         # Overwrite even if old token-embedded URL remains in .git/config (idempotent).
+        _git(["remote", "set-url", "origin", authed_remote], cwd=repo_dir)
+        _git(["fetch", "--depth=1", "origin"], cwd=repo_dir)
+        # Restore clean URL (without token) after fetch
         _git(["remote", "set-url", "origin", remote], cwd=repo_dir)
-        _git(auth + ["fetch", "--depth=1", "origin"], cwd=repo_dir)
         _git(["reset", "--hard", "origin/HEAD"], cwd=repo_dir)
     else:
         os.makedirs(os.path.dirname(repo_dir), exist_ok=True)
-        _git(auth + ["clone", "--depth=1", remote, repo_dir])
+        _git(["clone", "--depth=1", authed_remote, repo_dir])
+        # Restore clean URL in the cloned repo
+        _git(["remote", "set-url", "origin", remote], cwd=repo_dir)
     head = _git(["rev-parse", "HEAD"], cwd=repo_dir)
 
     # Diff current file set against existing index
