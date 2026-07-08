@@ -429,36 +429,36 @@ class TestGitFetchRef:
             "fetch", "origin", "pull/42/head:refs/shiori/my-temp", "--depth=1",
         ]
 
-    @patch("shiori.github_sync._auth_args")
     @patch("shiori.github_sync._git")
-    def test_forwards_provider_auth(self, mock_git, mock_auth):
-        """provider が指定された場合、_auth_args の結果を git 引数に含める。"""
-        mock_auth.return_value = ["-c", "http.extraHeader=Authorization: Basic xxx"]
+    def test_forwards_provider_auth(self, mock_git):
+        fake_remote = "https://github.com/o/r.git"
+        fake_authed = "https://x-access-token:tok@github.com/o/r.git"
+        mock_git.side_effect = [fake_remote, None, None, None]
         provider = MagicMock()
+        provider.get_token.return_value = "tok"
 
         with patch("shiori.github_sync.uuid.uuid4") as mock_uuid:
             mock_uuid.return_value.hex = "abc"
             _git_fetch_ref("pull/1/head", cwd="/r", provider=provider)
 
-        called_args = mock_git.call_args[0][0]
-        assert called_args[:2] == ["-c", "http.extraHeader=Authorization: Basic xxx"]
-        assert "fetch" in called_args
-        mock_auth.assert_called_once_with(provider)
+        assert mock_git.call_count == 4
+        assert mock_git.call_args_list[0][0][0] == ["remote", "get-url", "origin"]
+        assert mock_git.call_args_list[1][0][0] == ["remote", "set-url", "origin", fake_authed]
+        assert mock_git.call_args_list[2][0][0] == [
+            "fetch", "origin", "pull/1/head:refs/shiori/tmp-abc", "--depth=1",
+        ]
+        assert mock_git.call_args_list[3][0][0] == ["remote", "set-url", "origin", fake_remote]
+        provider.get_token.assert_called_once()
 
-    @patch("shiori.github_sync._auth_args")
     @patch("shiori.github_sync._git")
-    def test_no_auth_when_provider_none(self, mock_git, mock_auth):
-        """provider=None なら認証引数は付与されない。"""
-        mock_auth.return_value = []
-
+    def test_no_auth_when_provider_none(self, mock_git):
         with patch("shiori.github_sync.uuid.uuid4") as mock_uuid:
             mock_uuid.return_value.hex = "abc"
             _git_fetch_ref("pull/1/head", cwd="/r", provider=None)
 
+        mock_git.assert_called_once()
         called_args = mock_git.call_args[0][0]
         assert called_args[0] == "fetch"
-        # _auth_args が呼ばれないことを確認
-        mock_auth.assert_not_called()
 
     @patch("shiori.github_sync._git")
     def test_fetch_failure_propagated(self, mock_git):
