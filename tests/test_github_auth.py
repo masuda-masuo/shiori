@@ -19,6 +19,7 @@ from shiori.config import Settings
 from shiori.github_auth import (
     AnonymousProvider,
     AppTokenProvider,
+    McpTokenProvider,
     StaticTokenProvider,
     TokenCommandProvider,
     build_token_provider,
@@ -53,7 +54,7 @@ def clean_env(monkeypatch):
 
 def test_provider_anonymous(clean_env):
     p = build_token_provider(Settings())
-    assert isinstance(p, AnonymousProvider)
+    assert isinstance(p, McpTokenProvider)
     assert p.get_token() is None
 
 

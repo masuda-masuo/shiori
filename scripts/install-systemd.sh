@@ -14,15 +14,11 @@ echo ""
 
 mkdir -p "$USER_UNIT_DIR"
 
-sed "s|@SHIORI_DIR@|$SHIORI_DIR|g" "$SCRIPT_DIR/shiori.service"           > "$USER_UNIT_DIR/shiori.service"
-sed "s|@SHIORI_DIR@|$SHIORI_DIR|g" "$SCRIPT_DIR/shiori-refresh.service"   > "$USER_UNIT_DIR/shiori-refresh.service"
-sed "s|@SHIORI_DIR@|$SHIORI_DIR|g" "$SCRIPT_DIR/shiori-refresh.timer"     > "$USER_UNIT_DIR/shiori-refresh.timer"
+sed "s|@SHIORI_DIR@|$SHIORI_DIR|g" "$SCRIPT_DIR/shiori.service" > "$USER_UNIT_DIR/shiori.service"
 
 systemctl --user daemon-reload
 
 systemctl --user enable --now shiori.service
-systemctl --user enable --now shiori-refresh.timer
-systemctl --user start shiori-refresh.service
 
 echo ""
 echo "==> Done.  Useful commands:"
