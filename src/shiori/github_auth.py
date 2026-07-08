@@ -9,6 +9,7 @@ Decisions:
 from __future__ import annotations
 
 import calendar
+import hashlib
 import logging
 import os
 import shlex
@@ -176,12 +177,25 @@ class McpTokenProvider(TokenProvider):
     and calls it to obtain a short-lived GitHub token.
     Same cache/expiry pattern as TokenCommandProvider.
     Falls back to anonymous if binary cannot be resolved.
+
+    Linux-only: the download step uses os.uname() to detect architecture and
+    fetches a Linux binary. The initial 3 steps (env/PATH/cache) are
+    platform-agnostic; only _download() is Linux-specific.
+
+    When bumping mcp-token version:
+      1. Update _TAG to the new release tag.
+      2. Download the two assets and compute SHA256:
+         curl -Lo /tmp/a https://github.com/masuda-masuo/mcp-launcher/releases/download/<tag>/mcp-token-linux-amd64
+         curl -Lo /tmp/b https://github.com/masuda-masuo/mcp-launcher/releases/download/<tag>/mcp-token-linux-arm64
+         sha256sum /tmp/a /tmp/b
+      3. Update _LINUX_AMD64_SHA256 and _LINUX_ARM64_SHA256 accordingly.
     """
 
     CACHE_SECONDS = 3300
     REFRESH_BEFORE = 300
     HARD_EXPIRY = 3600
 
+    _TAG = "mcp-token/v1.1.1"
     _LINUX_AMD64_SHA256 = "08d22380f0af932508aaaea80cb114acada1ef46d0a3b32507755c67f5f77bba"
     _LINUX_ARM64_SHA256 = "032ee0942fd4e2184158f111873c67f32d843def0cbefca576df614bfc8d3c64"
 
@@ -220,8 +234,7 @@ class McpTokenProvider(TokenProvider):
         arch = _detect_arch()
         expected_sha = self._LINUX_AMD64_SHA256 if arch == "amd64" else self._LINUX_ARM64_SHA256
         asset = f"mcp-token-linux-{arch}"
-        tag = "mcp-token/v1.1.1"
-        encoded_tag = tag.replace("/", "%2F")
+        encoded_tag = self._TAG.replace("/", "%2F")
         url = f"https://github.com/masuda-masuo/mcp-launcher/releases/download/{encoded_tag}/{asset}"
         log.info("downloading %s from %s", asset, url)
         token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
@@ -279,7 +292,6 @@ def _detect_arch() -> str:
 
 
 def _sha256_hex(data: bytes) -> str:
-    import hashlib
     return hashlib.sha256(data).hexdigest()
 
 
