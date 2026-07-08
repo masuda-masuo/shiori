@@ -6,7 +6,11 @@ RS256 keys are generated inside the test.
 
 from __future__ import annotations
 
+import os
+import stat
 import time
+from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import httpx
 import jwt
@@ -195,3 +199,119 @@ def test_token_command_provider_fallback(clean_env, monkeypatch):
     monkeypatch.setattr(ga.subprocess, "run", mock_run)
     # fallback to cached token
     assert p.get_token() == "ghs_old"
+
+
+#
+# McpTokenProvider tests
+#
+
+def test_mcp_provider_returns_none_when_no_binary(clean_env, tmp_path):
+    p = McpTokenProvider(str(tmp_path))
+    assert p.get_token() is None
+
+
+def test_mcp_provider_resolve_env_exe(clean_env, tmp_path, monkeypatch):
+    fake_bin = tmp_path / "mcp-token"
+    fake_bin.write_text("#!/bin/sh\necho ghs_fake")
+    fake_bin.chmod(0o755)
+    monkeypatch.setenv("MCP_TOKEN_EXE", str(fake_bin))
+    p = McpTokenProvider(str(tmp_path))
+    assert p._resolve_binary() == str(fake_bin)
+
+
+def test_mcp_provider_resolve_path(clean_env, tmp_path, monkeypatch):
+    """When MCP_TOKEN_EXE is not set and mcp-token is on PATH, use PATH."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    fake_bin = bindir / "mcp-token"
+    fake_bin.write_text("#!/bin/sh\necho ghs_path")
+    fake_bin.chmod(0o755)
+    monkeypatch.setenv("PATH", str(bindir), prepend=os.pathsep)
+    p = McpTokenProvider(str(tmp_path))
+    resolved = p._resolve_binary()
+    assert resolved == str(fake_bin)
+
+
+def test_mcp_provider_resolve_cache(clean_env, tmp_path):
+    cached = tmp_path / "mcp-token"
+    cached.write_text("#!/bin/sh\necho ghs_cached")
+    cached.chmod(0o755)
+    p = McpTokenProvider(str(tmp_path))
+    resolved = p._resolve_binary()
+    assert resolved == str(cached)
+
+
+def test_mcp_provider_refresh_calls_binary(clean_env, tmp_path, monkeypatch):
+    fake_bin = tmp_path / "mcp-token"
+    fake_bin.write_text("#!/bin/sh\necho ghs_token_from_binary")
+    fake_bin.chmod(0o755)
+    monkeypatch.setenv("PATH", str(tmp_path), prepend=os.pathsep)
+    p = McpTokenProvider(str(tmp_path))
+    token = p.get_token()
+    assert token == "ghs_token_from_binary"
+
+
+def test_mcp_provider_cache_expiry(clean_env, tmp_path, monkeypatch):
+    call_count = [0]
+
+    class TrackingProvider(McpTokenProvider):
+        def _refresh(self) -> None:
+            call_count[0] += 1
+            self._token = "ghs_tok"
+            self._fetched_at = time.time()
+
+    p = TrackingProvider(str(tmp_path))
+    assert p.get_token() == "ghs_tok"
+    assert call_count[0] == 1
+    # cached
+    assert p.get_token() == "ghs_tok"
+    assert call_count[0] == 1
+    # force expiry
+    p._fetched_at = 0.0
+    assert p.get_token() == "ghs_tok"
+    assert call_count[0] == 2
+
+
+def test_mcp_provider_download_fallback(clean_env, tmp_path, monkeypatch):
+    p = McpTokenProvider(str(tmp_path))
+    # mock _download to fail
+    monkeypatch.setattr(p, "_download", MagicMock(side_effect=RuntimeError("network error")))
+    resolved = p._resolve_binary()
+    assert resolved is None
+    # get_token returns None after resolution failure
+    assert p.get_token() is None
+
+
+def test_mcp_provider_refresh_failure_reuses_cached(clean_env, tmp_path, monkeypatch):
+    fake_bin = tmp_path / "mcp-token"
+    fake_bin.write_text("#!/bin/sh\necho ghs_initial")
+    fake_bin.chmod(0o755)
+    monkeypatch.setenv("PATH", str(tmp_path), prepend=os.pathsep)
+    p = McpTokenProvider(str(tmp_path))
+    assert p.get_token() == "ghs_initial"
+    # make binary fail next time
+    p._fetched_at = 0.0
+    fake_bin.write_text("#!/bin/sh\nexit 1")
+    fake_bin.chmod(0o755)
+    monkeypatch.setattr(p, "_binary", str(fake_bin))  # keep resolved
+    # should reuse cached token within HARD_EXPIRY
+    assert p.get_token() == "ghs_initial"
+
+
+def test_mcp_provider_detect_arch(monkeypatch):
+    from shiori.github_auth import _detect_arch
+
+    def fake_uname(machine):
+        class Fake:
+            def __init__(self, m):
+                self.machine = m
+        return Fake(machine)
+
+    monkeypatch.setattr(os, "uname", lambda: fake_uname("x86_64"))
+    assert _detect_arch() == "amd64"
+
+    monkeypatch.setattr(os, "uname", lambda: fake_uname("aarch64"))
+    assert _detect_arch() == "arm64"
+
+    monkeypatch.setattr(os, "uname", lambda: fake_uname("arm64"))
+    assert _detect_arch() == "arm64"
