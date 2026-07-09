@@ -14,7 +14,7 @@ class TestReport:
 
     def test_stats_basic(self):
         """stats template returns markdown table."""
-        tokei_out = '{"Python": {"lines": [{"name": "f.py", "code": 10, "comments": 2, "blanks": 3}]}, "Total": {"lines": [{"code": 10, "comments": 2, "blanks": 3, "name": "total"}]}}'
+        tokei_out = '{"Python": {"code": 10, "comments": 2, "blanks": 3, "reports": [{"name": "f.py", "stats": {"code": 10, "comments": 2, "blanks": 3}}]}, "Total": {"code": 10, "comments": 2, "blanks": 3}}'
         with (
             patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
             patch("shiori.mcp_server.os.path.isdir", return_value=True),
@@ -38,9 +38,9 @@ class TestReport:
     def test_stats_multiple_languages(self):
         """Multiple languages render as separate rows."""
         tokei_out = '''{
-  "Python": { "lines": [{"name": "a.py", "code": 10, "comments": 2, "blanks": 3}] },
-  "Rust": { "lines": [{"name": "b.rs", "code": 20, "comments": 4, "blanks": 5}] },
-  "Total": { "lines": [{"code": 30, "comments": 6, "blanks": 8, "name": "total"}] }
+  "Python": { "code": 10, "comments": 2, "blanks": 3, "reports": [{"name": "a.py", "stats": {"code": 10, "comments": 2, "blanks": 3}}] },
+  "Rust": { "code": 20, "comments": 4, "blanks": 5, "reports": [{"name": "b.rs", "stats": {"code": 20, "comments": 4, "blanks": 5}}] },
+  "Total": { "code": 30, "comments": 6, "blanks": 8 }
 }'''
         with (
             patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
@@ -85,10 +85,10 @@ class TestReport:
     def test_stats_sorted_alphabetically(self):
         """Languages are sorted alphabetically (case-insensitive)."""
         tokei_out = '''{
-  "Rust": { "lines": [{"name": "a.rs", "code": 1, "comments": 0, "blanks": 0}] },
-  "c": { "lines": [{"name": "a.c", "code": 2, "comments": 0, "blanks": 0}] },
-  "Python": { "lines": [{"name": "a.py", "code": 3, "comments": 0, "blanks": 0}] },
-  "Total": { "lines": [{"code": 6, "comments": 0, "blanks": 0, "name": "total"}] }
+  "Rust": { "code": 1, "comments": 0, "blanks": 0, "reports": [{"name": "a.rs", "stats": {"code": 1, "comments": 0, "blanks": 0}}] },
+  "c": { "code": 2, "comments": 0, "blanks": 0, "reports": [{"name": "a.c", "stats": {"code": 2, "comments": 0, "blanks": 0}}] },
+  "Python": { "code": 3, "comments": 0, "blanks": 0, "reports": [{"name": "a.py", "stats": {"code": 3, "comments": 0, "blanks": 0}}] },
+  "Total": { "code": 6, "comments": 0, "blanks": 0 }
 }'''
         with (
             patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
@@ -111,7 +111,7 @@ class TestReport:
 
     def test_repo_path_param(self):
         """path parameter scopes tokei to subdirectory."""
-        tokei_out = '{"Python": { "lines": [{"name": "a.py", "code": 1, "comments": 0, "blanks": 0}] }, "Total": { "lines": [{"code": 1, "comments": 0, "blanks": 0, "name": "total"}] }}'
+        tokei_out = '{"Python": { "code": 1, "comments": 0, "blanks": 0, "reports": [{"name": "a.py", "stats": {"code": 1, "comments": 0, "blanks": 0}}] }, "Total": { "code": 1, "comments": 0, "blanks": 0 }}'
         with (
             patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
             patch("shiori.mcp_server.os.path.isdir", return_value=True),
