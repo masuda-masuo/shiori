@@ -1014,30 +1014,27 @@ def _report_stats(target_path: str) -> str:
 
     rows: list[str] = []
     total_files = 0
-    total_code = 0
-    total_comments = 0
-    total_blanks = 0
 
     for lang in sorted_langs:
         info = data[lang]
-        lines = info.get("lines", [])
-        n_files = len(lines)
-        code = sum(l.get("code", 0) for l in lines)
-        comments = sum(l.get("comments", 0) for l in lines)
-        blanks = sum(l.get("blanks", 0) for l in lines)
-
+        n_files = len(info.get("reports", []))
+        code = info.get("code", 0)
+        comments = info.get("comments", 0)
+        blanks = info.get("blanks", 0)
         total_files += n_files
-        total_code += code
-        total_comments += comments
-        total_blanks += blanks
 
         rows.append(
             f"| {lang} | {n_files} | {code} | {comments} | {blanks} |"
         )
 
+    total = data.get("Total", {})
     header = "| Language | Files | Code | Comments | Blanks |"
     sep = "| --- | --- | --- | --- | --- |"
-    total_row = f"| **Total** | **{total_files}** | **{total_code}** | **{total_comments}** | **{total_blanks}** |"
+    total_row = (
+        f"| **Total** | **{total_files}** | "
+        f"**{total.get('code', 0)}** | **{total.get('comments', 0)}** | "
+        f"**{total.get('blanks', 0)}** |"
+    )
 
     return "\n".join([header, sep] + rows + [total_row])
 
