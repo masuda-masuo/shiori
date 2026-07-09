@@ -6,3 +6,21 @@ build/
 secrets/
 runtime/
 opencode.json
+
+# Cache & temp directories
+.cache/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.tox/
+.eggs/
+
+# Dependencies
+node_modules/
+
+# Build artifacts (Rust)
+target/
+
+# Framework artifacts
+.next/
