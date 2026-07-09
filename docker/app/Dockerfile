@@ -1,8 +1,10 @@
 FROM python:3.12-slim
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends git ca-certificates ripgrep tokei \
-    && rm -rf /var/lib/apt/lists/*
+    && apt-get install -y --no-install-recommends git ca-certificates ripgrep wget \
+    && rm -rf /var/lib/apt/lists/* \
+    && wget -qO- "https://github.com/XAMPPRocky/tokei/releases/download/v12.1.2/tokei-x86_64-unknown-linux-gnu.tar.gz" \
+    | tar xz -C /usr/local/bin tokei
 
 WORKDIR /app
 

@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -1004,7 +1005,6 @@ def _report_stats(target_path: str) -> str:
             f"tokei failed (exit {result.returncode}): {result.stderr.strip()}"
         )
 
-    import json
     data = json.loads(result.stdout)
 
     sorted_langs = sorted(
