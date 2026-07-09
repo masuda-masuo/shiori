@@ -129,3 +129,161 @@ class TestReport:
         cmd = mock_run.call_args[0][0]
         assert "src/" in cmd[-1]
         assert result["template"] == "stats"
+
+
+NDJSON_SYMBOLS = """\
+{"name":"my_func","path":"/data/repos/o__r/src/lib.py","line":10,"kind":"function","access":"public"}
+{"name":"MyClass","path":"/data/repos/o__r/src/lib.py","line":42,"kind":"class","access":"public"}
+{"name":"_helper","path":"/data/repos/o__r/src/lib.py","line":5,"kind":"function","access":"private"}
+{"name":"another_func","path":"/data/repos/o__r/src/utils.py","line":1,"kind":"function","access":"public"}
+{"name":"Hidden","path":"/data/repos/o__r/src/private.py","line":3,"kind":"class","access":"protected"}
+"""
+
+
+class TestSymbolIndex:
+    """symbol_index template (issue #154)."""
+
+    def test_basic(self):
+        """Basic symbol_index returns markdown table."""
+        with (
+            patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
+            patch("shiori.mcp_server.os.path.isdir", return_value=True),
+            patch("shiori.mcp_server.os.path.realpath", side_effect=lambda p: p),
+            patch("shiori.mcp_server.subprocess.run") as mock_run,
+        ):
+            mock_result = MagicMock()
+            mock_result.stdout = NDJSON_SYMBOLS
+            mock_result.returncode = 0
+            mock_result.stderr = ""
+            mock_run.return_value = mock_result
+
+            result = report(template="symbol_index")
+
+        assert result["template"] == "symbol_index"
+        assert "truncated" in result
+        assert result["truncated"] is False
+        md = result["markdown"]
+        assert "| symbol | kind | visibility | location |" in md
+        assert "| my_func | function | public | src/lib.py:10 |" in md
+        assert "| MyClass | class | public | src/lib.py:42 |" in md
+        assert "| _helper | function | private | src/lib.py:5 |" in md
+
+    def test_kind_filter(self):
+        """kind parameter filters to matching symbol kinds."""
+        with (
+            patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
+            patch("shiori.mcp_server.os.path.isdir", return_value=True),
+            patch("shiori.mcp_server.os.path.realpath", side_effect=lambda p: p),
+            patch("shiori.mcp_server.subprocess.run") as mock_run,
+        ):
+            mock_result = MagicMock()
+            mock_result.stdout = NDJSON_SYMBOLS
+            mock_result.returncode = 0
+            mock_result.stderr = ""
+            mock_run.return_value = mock_result
+
+            result = report(template="symbol_index", kind="class")
+
+        assert "| MyClass | class | public | src/lib.py:42 |" in result["markdown"]
+        assert "| Hidden | class | protected | src/private.py:3 |" in result["markdown"]
+        assert "my_func" not in result["markdown"]
+        assert "_helper" not in result["markdown"]
+
+    def test_public_only(self):
+        """public_only=True excludes private/protected symbols."""
+        with (
+            patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
+            patch("shiori.mcp_server.os.path.isdir", return_value=True),
+            patch("shiori.mcp_server.os.path.realpath", side_effect=lambda p: p),
+            patch("shiori.mcp_server.subprocess.run") as mock_run,
+        ):
+            mock_result = MagicMock()
+            mock_result.stdout = NDJSON_SYMBOLS
+            mock_result.returncode = 0
+            mock_result.stderr = ""
+            mock_run.return_value = mock_result
+
+            result = report(template="symbol_index", public_only=True)
+
+        assert "| my_func | function | public | src/lib.py:10 |" in result["markdown"]
+        assert "| MyClass | class | public | src/lib.py:42 |" in result["markdown"]
+        assert "| another_func | function | public | src/utils.py:1 |" in result["markdown"]
+        assert "_helper" not in result["markdown"]
+        assert "Hidden" not in result["markdown"]
+
+    def test_public_only_missing_access(self):
+        """Symbols without access field are kept when public_only=True."""
+        ndjson = """\
+{"name":"visible","path":"/data/repos/o__r/src/a.py","line":1,"kind":"function"}
+{"name":"hidden","path":"/data/repos/o__r/src/b.py","line":2,"kind":"function","access":"private"}
+"""
+        with (
+            patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
+            patch("shiori.mcp_server.os.path.isdir", return_value=True),
+            patch("shiori.mcp_server.os.path.realpath", side_effect=lambda p: p),
+            patch("shiori.mcp_server.subprocess.run") as mock_run,
+        ):
+            mock_result = MagicMock()
+            mock_result.stdout = ndjson
+            mock_result.returncode = 0
+            mock_result.stderr = ""
+            mock_run.return_value = mock_result
+
+            result = report(template="symbol_index", public_only=True)
+
+        assert "| visible | function |  | src/a.py:1 |" in result["markdown"]
+        assert "hidden" not in result["markdown"]
+
+    def test_max_results_truncation(self):
+        """max_results limits output and sets truncated flag."""
+        lines = "\n".join(
+            '{{"name":"s{}","path":"/data/repos/o__r/f.py","line":{},"kind":"function","access":"public"}}'.format(i, i)
+            for i in range(10)
+        )
+        with (
+            patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
+            patch("shiori.mcp_server.os.path.isdir", return_value=True),
+            patch("shiori.mcp_server.os.path.realpath", side_effect=lambda p: p),
+            patch("shiori.mcp_server.subprocess.run") as mock_run,
+        ):
+            mock_result = MagicMock()
+            mock_result.stdout = lines
+            mock_result.returncode = 0
+            mock_result.stderr = ""
+            mock_run.return_value = mock_result
+
+            result = report(template="symbol_index", max_results=3)
+
+        assert result["truncated"] is True
+        assert "*Truncated: showing 3 of 10 symbols.*" in result["markdown"]
+
+    def test_ctags_not_installed(self):
+        """Missing ctags raises RuntimeError."""
+        with (
+            patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
+            patch("shiori.mcp_server.os.path.isdir", return_value=True),
+            patch("shiori.mcp_server.os.path.realpath", side_effect=lambda p: p),
+            patch("shiori.mcp_server.subprocess.run", side_effect=FileNotFoundError),
+        ):
+            with pytest.raises(RuntimeError, match="universal-ctags is not installed"):
+                report(template="symbol_index")
+
+    def test_path_param(self):
+        """path parameter is passed to ctags target."""
+        with (
+            patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
+            patch("shiori.mcp_server.os.path.isdir", return_value=True),
+            patch("shiori.mcp_server.os.path.realpath", side_effect=lambda p: p),
+            patch("shiori.mcp_server.subprocess.run") as mock_run,
+        ):
+            mock_result = MagicMock()
+            mock_result.stdout = ""
+            mock_result.returncode = 0
+            mock_result.stderr = ""
+            mock_run.return_value = mock_result
+
+            report(template="symbol_index", path="src/")
+
+        cmd = mock_run.call_args[0][0]
+        # ctags command should include target_path (resolved base/path)
+        assert "src/" in cmd[-1]

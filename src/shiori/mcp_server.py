@@ -938,7 +938,57 @@ def grep_search(
 
 _REPORT_TEMPLATES: dict[str, str] = {
     "stats": "Language statistics via tokei (files / code / comments / blanks).",
+    "symbol_index": "Symbol index via universal-ctags (name / kind / visibility / location).",
 }
+
+
+def _run_ctags(target_path: str, base: str) -> list[dict[str, Any]]:
+    """Run universal-ctags and return list of parsed symbol dicts.
+
+    Shared helper used by symbol_index and module_tree (issue #155) templates.
+    Paths in the result are relative to *base*.
+    """
+    try:
+        result = subprocess.run(
+            ["ctags", "-R", "--output-format=json", "--fields=+na", "-f", "-", target_path],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except FileNotFoundError:
+        raise RuntimeError(
+            "universal-ctags is not installed in this container. "
+            "Add universal-ctags to the Dockerfile apt-get install line."
+        )
+
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"ctags failed (exit {result.returncode}): {result.stderr.strip()}"
+        )
+
+    symbols: list[dict[str, Any]] = []
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+
+        path = entry.get("path", "")
+        if path.startswith(base + "/"):
+            path = path[len(base) + 1:]
+
+        symbols.append({
+            "name": entry.get("name", ""),
+            "path": path,
+            "line": entry.get("line", 0),
+            "kind": entry.get("kind", ""),
+            "access": entry.get("access", ""),
+        })
+
+    return symbols
 
 
 @mcp.tool(name="shiori_report")
@@ -946,12 +996,19 @@ def report(
     template: str,
     repo: str | None = None,
     path: str | None = None,
+    kind: str | None = None,
+    public_only: bool = False,
+    max_results: int = 500,
 ) -> dict[str, Any]:
     """Generate a structured report about a repository.
 
-    template: report type ("stats" for language statistics via tokei)
+    template: report type ("stats" for language statistics via tokei,
+              "symbol_index" for symbol index via universal-ctags)
     repo: target repo ("owner/name") or None for default
     path: optional subdirectory within the repo to scope the report
+    kind: ctags kind filter (e.g. "function", "class"; symbol_index only)
+    public_only: exclude private/protected symbols (symbol_index only)
+    max_results: maximum symbols to return, default 500 (symbol_index only)
     """
     if template not in _REPORT_TEMPLATES:
         raise ValueError(
@@ -977,6 +1034,23 @@ def report(
 
     if template == "stats":
         markdown = _report_stats(target_path)
+    elif template == "symbol_index":
+        result = _report_symbol_index(
+            target_path=target_path,
+            base=base,
+            kind=kind,
+            public_only=public_only,
+            max_results=max_results,
+        )
+        markdown = result["markdown"]
+        truncated = result["truncated"]
+
+        return {
+            "repo": target,
+            "template": template,
+            "markdown": markdown,
+            "truncated": truncated,
+        }
 
     return {
         "repo": target,
@@ -1037,6 +1111,55 @@ def _report_stats(target_path: str) -> str:
     )
 
     return "\n".join([header, sep] + rows + [total_row])
+
+
+def _report_symbol_index(
+    target_path: str,
+    base: str,
+    kind: str | None = None,
+    public_only: bool = False,
+    max_results: int = 500,
+) -> dict[str, Any]:
+    """Run universal-ctags and format output as a Markdown table.
+
+    Returns dict with "markdown" (str) and "truncated" (bool).
+    """
+    symbols = _run_ctags(target_path, base)
+
+    if kind:
+        symbols = [s for s in symbols if s["kind"] == kind]
+
+    if public_only:
+        symbols = [
+            s for s in symbols
+            if s["access"] not in ("private", "protected")
+        ]
+
+    symbols.sort(key=lambda s: (s["path"], s["line"]))
+
+    total = len(symbols)
+    truncated = total > max_results
+    shown = symbols[:max_results]
+
+    rows: list[str] = []
+    for s in shown:
+        visibility = s["access"] if s["access"] else ""
+        rows.append(
+            f"| {s['name']} | {s['kind']} | {visibility} | {s['path']}:{s['line']} |"
+        )
+
+    header = "| symbol | kind | visibility | location |"
+    sep = "| --- | --- | --- | --- |"
+
+    parts: list[str] = [header, sep] + rows
+    if truncated:
+        parts.append("")
+        parts.append(f"*Truncated: showing {max_results} of {total} symbols.*")
+
+    return {
+        "markdown": "\n".join(parts),
+        "truncated": truncated,
+    }
 
 
 def ingest(rebuild: bool = False, repo: str | None = None) -> dict[str, Any]:
