@@ -1006,12 +1006,13 @@ def report(
     """Generate a structured report about a repository.
 
     template: report type ("stats" for language statistics via tokei,
-              "symbol_index" for symbol index via universal-ctags)
+              "symbol_index" for symbol index via universal-ctags,
+              "module_tree" for Mermaid mindmap of repo structure)
     repo: target repo ("owner/name") or None for default
     path: optional subdirectory within the repo to scope the report
     kind: ctags kind filter (e.g. "function", "class"; symbol_index only)
     public_only: exclude private/protected symbols (symbol_index only)
-    max_results: maximum symbols to return, default 500 (symbol_index only)
+    max_results: maximum nodes/symbols to return, default 500 (symbol_index/module_tree)
     """
     if template not in _REPORT_TEMPLATES:
         raise ValueError(
@@ -1255,7 +1256,7 @@ def _report_module_tree(
         total_nodes = _count_nodes(tree)
 
     root_name = os.path.basename(target_path.rstrip("/")) or os.path.basename(base)
-    lines = ["```mermaid", "mindmap", ""]
+    lines = ["```mermaid", "mindmap", f"  root(({root_name}))"]
 
     def _render(nodes: list[dict], indent: int = 2) -> list[str]:
         result: list[str] = []
@@ -1265,7 +1266,7 @@ def _report_module_tree(
                 result.extend(_render(n["children"], indent + 1))
         return result
 
-    lines.extend(_render(tree))
+    lines.extend(_render(tree, indent=3))
     if truncated:
         lines.append(f"  *Truncated: showing {total_nodes} directory nodes (symbol level omitted)*")
     lines.append("```")
