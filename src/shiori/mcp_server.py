@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -934,6 +935,112 @@ def grep_search(
         "matches": all_matches,
         "skipped_repos": skipped_repos,
     }
+
+_REPORT_TEMPLATES: dict[str, str] = {
+    "stats": "Language statistics via tokei (files / code / comments / blanks).",
+}
+
+
+@mcp.tool(name="shiori_report")
+def report(
+    template: str,
+    repo: str | None = None,
+    path: str | None = None,
+) -> dict[str, Any]:
+    """Generate a structured report about a repository.
+
+    template: report type ("stats" for language statistics via tokei)
+    repo: target repo ("owner/name") or None for default
+    path: optional subdirectory within the repo to scope the report
+    """
+    if template not in _REPORT_TEMPLATES:
+        raise ValueError(
+            f"Unknown template: '{template}'. "
+            f"Valid templates: {', '.join(sorted(_REPORT_TEMPLATES))}"
+        )
+
+    target = _resolve_repo(repo)
+    base = os.path.realpath(settings.repo_dir(target))
+
+    if not os.path.isdir(base):
+        raise FileNotFoundError(
+            f"Clone for {target} does not exist. Run python -m shiori ingest first."
+        )
+
+    if path:
+        resolved = os.path.realpath(os.path.join(base, path))
+        if not resolved.startswith(base + os.sep):
+            raise ValueError("path must be inside the repository")
+        target_path = resolved
+    else:
+        target_path = base
+
+    if template == "stats":
+        markdown = _report_stats(target_path)
+
+    return {
+        "repo": target,
+        "template": template,
+        "markdown": markdown,
+    }
+
+
+def _report_stats(target_path: str) -> str:
+    """Run tokei and format output as a Markdown table."""
+    try:
+        result = subprocess.run(
+            ["tokei", "--output", "json", target_path],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except FileNotFoundError:
+        raise RuntimeError(
+            "tokei is not installed in this container. "
+            "Add tokei to the Dockerfile apt-get install line."
+        )
+
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"tokei failed (exit {result.returncode}): {result.stderr.strip()}"
+        )
+
+    data = json.loads(result.stdout)
+
+    sorted_langs = sorted(
+        (lang for lang in data if lang != "Total"),
+        key=lambda k: k.lower(),
+    )
+
+    rows: list[str] = []
+    total_files = 0
+    total_code = 0
+    total_comments = 0
+    total_blanks = 0
+
+    for lang in sorted_langs:
+        info = data[lang]
+        lines = info.get("lines", [])
+        n_files = len(lines)
+        code = sum(l.get("code", 0) for l in lines)
+        comments = sum(l.get("comments", 0) for l in lines)
+        blanks = sum(l.get("blanks", 0) for l in lines)
+
+        total_files += n_files
+        total_code += code
+        total_comments += comments
+        total_blanks += blanks
+
+        rows.append(
+            f"| {lang} | {n_files} | {code} | {comments} | {blanks} |"
+        )
+
+    header = "| Language | Files | Code | Comments | Blanks |"
+    sep = "| --- | --- | --- | --- | --- |"
+    total_row = f"| **Total** | **{total_files}** | **{total_code}** | **{total_comments}** | **{total_blanks}** |"
+
+    return "\n".join([header, sep] + rows + [total_row])
+
 
 def ingest(rebuild: bool = False, repo: str | None = None) -> dict[str, Any]:
     """Sync docs/issues/code from GitHub and update index (diff sync, typically seconds).
