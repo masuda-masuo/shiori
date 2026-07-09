@@ -287,3 +287,168 @@ class TestSymbolIndex:
         cmd = mock_run.call_args[0][0]
         # ctags command should include target_path (resolved base/path)
         assert "src/" in cmd[-1]
+
+
+NDJSON_MODULE_TREE = """\
+{"name":"main","path":"/data/repos/o__r/src/main.py","line":1,"kind":"function","access":"public"}
+{"name":"MyClass","path":"/data/repos/o__r/src/main.py","line":5,"kind":"class","access":"public"}
+{"name":"helper","path":"/data/repos/o__r/src/main.py","line":3,"kind":"function","access":"private"}
+{"name":"my_method","path":"/data/repos/o__r/src/main.py","line":6,"kind":"method","access":"public","scope":"MyClass","scopeKind":"class"}
+{"name":"_inner","path":"/data/repos/o__r/src/main.py","line":7,"kind":"method","access":"private","scope":"MyClass","scopeKind":"class"}
+{"name":"setup","path":"/data/repos/o__r/tests/conftest.py","line":1,"kind":"function","access":"public"}
+"""
+
+
+class TestModuleTree:
+    """module_tree template (issue #155)."""
+
+    def test_basic(self):
+        """Basic module_tree returns Mermaid mindmap."""
+        with (
+            patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
+            patch("shiori.mcp_server.os.path.isdir", return_value=True),
+            patch("shiori.mcp_server.os.path.realpath", side_effect=lambda p: p),
+            patch("shiori.mcp_server.subprocess.run") as mock_run,
+        ):
+            mock_result = MagicMock()
+            mock_result.stdout = NDJSON_MODULE_TREE
+            mock_result.returncode = 0
+            mock_result.stderr = ""
+            mock_run.return_value = mock_result
+
+            result = report(template="module_tree")
+
+        assert result["template"] == "module_tree"
+        assert "truncated" in result
+        assert result["truncated"] is False
+        md = result["markdown"]
+        assert md.startswith("```mermaid")
+        assert "mindmap" in md
+        assert md.endswith("```")
+        assert "src" in md
+        assert "main.py" in md
+        assert "tests" in md
+        assert "conftest.py" in md
+
+    def test_symbol_hierarchy(self):
+        """Symbols are nested under files; scoped symbols under parents."""
+        with (
+            patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
+            patch("shiori.mcp_server.os.path.isdir", return_value=True),
+            patch("shiori.mcp_server.os.path.realpath", side_effect=lambda p: p),
+            patch("shiori.mcp_server.subprocess.run") as mock_run,
+        ):
+            mock_result = MagicMock()
+            mock_result.stdout = NDJSON_MODULE_TREE
+            mock_result.returncode = 0
+            mock_result.stderr = ""
+            mock_run.return_value = mock_result
+
+            result = report(template="module_tree")
+
+        md = result["markdown"]
+        assert "main" in md
+        assert "MyClass" in md
+        assert "my_method" in md
+        assert "helper" in md
+
+    def test_degrade_when_exceeds_max_nodes(self):
+        """Symbol level is dropped when node count exceeds max_nodes."""
+        ndjson_lines = []
+        for i in range(10):
+            ndjson_lines.append(
+                '{{"name":"f{}","path":"/data/repos/o__r/src/a.py","line":{},"kind":"function","access":"public"}}'.format(i, i)
+            )
+        ndjson = "\n".join(ndjson_lines)
+        with (
+            patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
+            patch("shiori.mcp_server.os.path.isdir", return_value=True),
+            patch("shiori.mcp_server.os.path.realpath", side_effect=lambda p: p),
+            patch("shiori.mcp_server.subprocess.run") as mock_run,
+        ):
+            mock_result = MagicMock()
+            mock_result.stdout = ndjson
+            mock_result.returncode = 0
+            mock_result.stderr = ""
+            mock_run.return_value = mock_result
+
+            result = report(template="module_tree", max_results=3)
+
+        assert result["truncated"] is True
+        md = result["markdown"]
+        assert "f0" not in md
+        assert "f1" not in md
+        # File should remain
+        assert "a.py" in md
+        # Directory should remain
+        assert "src" in md
+
+    def test_degrade_empty(self):
+        """Degradation with empty tree produces valid mindmap."""
+        with (
+            patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
+            patch("shiori.mcp_server.os.path.isdir", return_value=True),
+            patch("shiori.mcp_server.os.path.realpath", side_effect=lambda p: p),
+            patch("shiori.mcp_server.subprocess.run") as mock_run,
+        ):
+            mock_result = MagicMock()
+            mock_result.stdout = ""
+            mock_result.returncode = 0
+            mock_result.stderr = ""
+            mock_run.return_value = mock_result
+
+            result = report(template="module_tree")
+
+        assert result["truncated"] is False
+        md = result["markdown"]
+        assert md.startswith("```mermaid")
+        assert md.endswith("```")
+
+    def test_path_param(self):
+        """path parameter scopes ctags to subdirectory."""
+        with (
+            patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
+            patch("shiori.mcp_server.os.path.isdir", return_value=True),
+            patch("shiori.mcp_server.os.path.realpath", side_effect=lambda p: p),
+            patch("shiori.mcp_server.subprocess.run") as mock_run,
+        ):
+            mock_result = MagicMock()
+            mock_result.stdout = ""
+            mock_result.returncode = 0
+            mock_result.stderr = ""
+            mock_run.return_value = mock_result
+
+            report(template="module_tree", path="src/")
+
+        cmd = mock_run.call_args[0][0]
+        assert "src/" in cmd[-1]
+
+    def test_ctags_not_installed(self):
+        """Missing ctags raises RuntimeError."""
+        with (
+            patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
+            patch("shiori.mcp_server.os.path.isdir", return_value=True),
+            patch("shiori.mcp_server.os.path.realpath", side_effect=lambda p: p),
+            patch("shiori.mcp_server.subprocess.run", side_effect=FileNotFoundError),
+        ):
+            with pytest.raises(RuntimeError, match="universal-ctags is not installed"):
+                report(template="module_tree")
+
+    def test_no_symbols(self):
+        """Repo with no symbols produces mindmap with dir+file only."""
+        with (
+            patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
+            patch("shiori.mcp_server.os.path.isdir", return_value=True),
+            patch("shiori.mcp_server.os.path.realpath", side_effect=lambda p: p),
+            patch("shiori.mcp_server.subprocess.run") as mock_run,
+        ):
+            mock_result = MagicMock()
+            mock_result.stdout = ""
+            mock_result.returncode = 0
+            mock_result.stderr = ""
+            mock_run.return_value = mock_result
+
+            result = report(template="module_tree")
+
+        assert result["truncated"] is False
+        assert "Truncated" not in result["markdown"]

@@ -939,6 +939,7 @@ def grep_search(
 _REPORT_TEMPLATES: dict[str, str] = {
     "stats": "Language statistics via tokei (files / code / comments / blanks).",
     "symbol_index": "Symbol index via universal-ctags (name / kind / visibility / location).",
+    "module_tree": "Mermaid mindmap of repository structure (directory → file → class → function).",
 }
 
 
@@ -950,7 +951,7 @@ def _run_ctags(target_path: str, base: str) -> list[dict[str, Any]]:
     """
     try:
         result = subprocess.run(
-            ["ctags", "-R", "--output-format=json", "--fields=+na", "-f", "-", target_path],
+            ["ctags", "-R", "--output-format=json", "--fields=+naZ", "-f", "-", target_path],
             capture_output=True,
             text=True,
             timeout=30,
@@ -986,6 +987,8 @@ def _run_ctags(target_path: str, base: str) -> list[dict[str, Any]]:
             "line": entry.get("line", 0),
             "kind": entry.get("kind", ""),
             "access": entry.get("access", ""),
+            "scope": entry.get("scope", ""),
+            "scope_kind": entry.get("scopeKind", ""),
         })
 
     return symbols
@@ -1003,12 +1006,13 @@ def report(
     """Generate a structured report about a repository.
 
     template: report type ("stats" for language statistics via tokei,
-              "symbol_index" for symbol index via universal-ctags)
+              "symbol_index" for symbol index via universal-ctags,
+              "module_tree" for Mermaid mindmap of repo structure)
     repo: target repo ("owner/name") or None for default
     path: optional subdirectory within the repo to scope the report
     kind: ctags kind filter (e.g. "function", "class"; symbol_index only)
     public_only: exclude private/protected symbols (symbol_index only)
-    max_results: maximum symbols to return, default 500 (symbol_index only)
+    max_results: maximum nodes/symbols to return, default 500 (symbol_index/module_tree)
     """
     if template not in _REPORT_TEMPLATES:
         raise ValueError(
@@ -1034,6 +1038,19 @@ def report(
 
     if template == "stats":
         markdown = _report_stats(target_path)
+    elif template == "module_tree":
+        result = _report_module_tree(
+            target_path=target_path,
+            base=base,
+            max_nodes=max_results,
+        )
+        return {
+            "repo": target,
+            "template": template,
+            "markdown": result["markdown"],
+            "truncated": result["truncated"],
+        }
+
     elif template == "symbol_index":
         result = _report_symbol_index(
             target_path=target_path,
@@ -1160,6 +1177,101 @@ def _report_symbol_index(
         "markdown": "\n".join(parts),
         "truncated": truncated,
     }
+
+
+_MODULE_TREE_MAX_NODES = 300
+
+_TREE_DIR = "d"
+_TREE_FILE = "f"
+_TREE_SYM = "s"
+
+
+def _report_module_tree(
+    target_path: str,
+    base: str,
+    max_nodes: int = _MODULE_TREE_MAX_NODES,
+) -> dict[str, Any]:
+    """Build a Mermaid mindmap of the repo structure from ctags data.
+
+    Returns dict with "markdown" and "truncated".
+    """
+    symbols = _run_ctags(target_path, base)
+
+    file_paths: set[str] = set()
+    for s in symbols:
+        file_paths.add(s["path"])
+
+    all_dirs: set[str] = set()
+    for fp in sorted(file_paths):
+        d = os.path.dirname(fp)
+        while d and d != ".":
+            all_dirs.add(d)
+            d = os.path.dirname(d)
+
+    def _count_nodes(nodes: list[dict]) -> int:
+        n = len(nodes)
+        for x in nodes:
+            n += _count_nodes(x.get("children", []))
+        return n
+
+    def _build_tree(dir_path: str) -> list[dict]:
+        children: list[dict] = []
+        for d in sorted(x for x in all_dirs if os.path.dirname(x) == dir_path):
+            sub = _build_tree(d)
+            children.append(dict(name=os.path.basename(d), children=sub, t=_TREE_DIR))
+        for fp in sorted(x for x in file_paths if os.path.dirname(x) == dir_path):
+            file_syms = [s for s in symbols if s["path"] == fp]
+            sym_children = _build_symbol_children(file_syms)
+            children.append(dict(name=os.path.basename(fp), children=sym_children, t=_TREE_FILE))
+        return children
+
+    def _build_symbol_children(file_syms: list[dict]) -> list[dict]:
+        top = [s for s in file_syms if not s.get("scope")]
+        children: list[dict] = []
+        for s in top:
+            if not s["name"]:
+                continue
+            subs = [x for x in file_syms if x.get("scope") == s["name"]]
+            sub_c = []
+            for ss in subs:
+                if ss["name"]:
+                    sub_c.append(dict(name=ss["name"], children=[], t=_TREE_SYM))
+            children.append(dict(name=s["name"], children=sub_c, t=_TREE_SYM))
+        return children
+
+    tree = _build_tree("")
+    total_nodes = _count_nodes(tree)
+    truncated = total_nodes > max_nodes
+
+    if truncated:
+        def _strip_symbols(nodes: list[dict]) -> list[dict]:
+            result: list[dict] = []
+            for n in nodes:
+                if n.get("t") == _TREE_SYM:
+                    continue
+                kids = _strip_symbols(n.get("children", []))
+                result.append(dict(name=n["name"], children=kids, t=n.get("t")))
+            return result
+        tree = _strip_symbols(tree)
+        total_nodes = _count_nodes(tree)
+
+    root_name = os.path.basename(target_path.rstrip("/")) or os.path.basename(base)
+    lines = ["```mermaid", "mindmap", f"  root(({root_name}))"]
+
+    def _render(nodes: list[dict], indent: int = 2) -> list[str]:
+        result: list[str] = []
+        for n in nodes:
+            result.append(f"{'  ' * indent}{n['name']}")
+            if n.get("children"):
+                result.extend(_render(n["children"], indent + 1))
+        return result
+
+    lines.extend(_render(tree, indent=3))
+    if truncated:
+        lines.append(f"  *Truncated: showing {total_nodes} directory nodes (symbol level omitted)*")
+    lines.append("```")
+
+    return {"markdown": '\n'.join(lines), "truncated": truncated}
 
 
 def ingest(rebuild: bool = False, repo: str | None = None) -> dict[str, Any]:
