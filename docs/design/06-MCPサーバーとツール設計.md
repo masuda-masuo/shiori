@@ -29,7 +29,7 @@
 |---|---|
 | `age_seconds` が stale 閾値超過 | 最終同期から長時間経過。索引が古い可能性。閾値は auto sync 有効時 `max(sync_interval_seconds * 30, 300秒)`、無効時は固定 24 時間（issue #187） |
 | `consecutive_failures > 0` | 同期が連続失敗中。`last_error` を併記（issue #187） |
-| token provider の降格・構築失敗 | mcp_token が匿名へフォールバック中（issue #188）、または provider 構築自体が失敗（`token_provider: "error"`。issue #193） |
+| token provider の構築失敗 | provider 構築自体が失敗（`token_provider: "error"`。issue #193）。設定した provider がトークンを取れない場合は静かに降格せず例外になり、`consecutive_failures` / `last_error` 側に出る（issue #188） |
 | `chunks["issue"] + chunks["pr_review"] < items_in_db // 2` | issue_items に比べ検索可能チャンクが極端に少ない。bot 除外や索引欠落の可能性 |
 | sync_state に未登録カテゴリ | 一部カテゴリが未同期。差分同期が必要 |
 

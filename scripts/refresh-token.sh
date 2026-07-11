@@ -1,8 +1,15 @@
 #!/usr/bin/env bash
-# Mint a short-lived GitHub token into runtime/github-token (mcp-token model).
-# The app container reads it via GITHUB_TOKEN_COMMAND=cat /run/shiori/github-token.
-# TokenCommandProvider reuses the token for up to 50 min, so the file must stay
-# fresher than 10 min.  --loop runs every 300 s (5 min) -- do not increase.
+# Mint a short-lived GitHub token into runtime/github-token (token-file bridge;
+# detailed design/15).  Runs on the *host*, where mcp-token can reach the OS
+# keystore; the app container only ever reads the resulting 1-hour token via
+# GITHUB_TOKEN_COMMAND=cat /run/shiori/github-token.
+#
+# One shot per invocation.  Scheduling is systemd's job: shiori-refresh.timer
+# fires this every 300 s, and shiori.service runs it once as ExecStartPre so the
+# file is fresh at boot.  TokenCommandProvider reuses a token it has read for up
+# to 50 min while the token itself lives 60 min, so the file must stay fresher
+# than 10 min -- do not lengthen the timer interval.  (This coupling is what
+# detailed design/15's on-demand mint socket is meant to remove.)
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -106,16 +113,5 @@ download_mcp_token() {
 # --- resolve and use ---
 MCP_TOKEN_EXE=$(resolve_mcp_token) || exit 1
 
-refresh() {
-  "$MCP_TOKEN_EXE" github > runtime/github-token.tmp
-  mv -f runtime/github-token.tmp runtime/github-token
-}
-
-if [ "${1:-}" = "--loop" ]; then
-  while true; do
-    refresh || echo "refresh-token: mint failed; keeping previous token" >&2
-    sleep 300
-  done
-else
-  refresh
-fi
+"$MCP_TOKEN_EXE" github > runtime/github-token.tmp
+mv -f runtime/github-token.tmp runtime/github-token

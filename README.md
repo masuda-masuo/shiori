@@ -107,4 +107,6 @@ MCP クライアントからは `http://localhost:8765/mcp`（streamable HTTP）
 - `docs/design/00-基本設計.md` — 全体像と設計方針・決定ログ
 - `docs/design/01〜12-*.md` — トピック別の詳細設計（各ファイルに v1 の決定を記録）
 - `docs/design/13-プロダクト定義とユースケース.md` — プロダクト定義・ツールカタログ（4 層モデル）・ユースケース集
+- `docs/design/14-マルチソース抽象化.md` — GitHub 以外のソースを載せるための抽象化
+- `docs/design/15-トークン供給経路.md` — 認証方式の選択規則（消費者の位置と更新責任）
 - `docs/guides/セットアップ.md` — セットアップ・運用手順

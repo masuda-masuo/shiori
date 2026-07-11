@@ -1,31 +1,30 @@
 # 詳細設計/07: db / app の 2 サービス分離。データとモデルは named volume に永続化。
 # ingest は使い捨てのワンショット（profiles: ["ingest"]）。
-# 認証: build_token_provider() が App > TokenCommand > PAT > mcp-token > 匿名の
-# 優先順位で自動選択する（詳細設計/09）。
-# compose デプロイの推奨は GitHub App 秘密鍵ファイル方式（GITHUB_APP_ID /
-# GITHUB_APP_PRIVATE_KEY_PATH を docker-compose.override.yml の secrets で
-# 読み取り専用マウント。masuda-masuo/dev-infra#4 / #5 で実運用確定済み）。
-# もう一つの正規経路として TokenCommand の token-file 橋渡し方式も配線済み
-#（scripts/refresh-token.{sh,bat} がホストで runtime/github-token を発行し
-# 続け、app/ingest はそれを GITHUB_TOKEN_COMMAND=cat /run/shiori/github-token
-# で読むだけ。issue #150/#188/#198）。こちらは .env で GITHUB_TOKEN_COMMAND
-# を設定したときだけ有効になる**明示 opt-in**。無設定なら従来どおり
-# mcp-token -> anonymous フォールバックで、公開リポジトリのみの利用は
-# 認証設定なしで動く（README / セットアップ.md の約束を維持）。
-# この配線は e52ceeb まで main に存在したが、13ecbba（issue #170）で
-# McpTokenProvider 一本化のため一度削除され、以後 compose デプロイの認証が
-# 壊れていた（issue #198 の正体）。本PRで復元・変数名をホスト/コンテナとも
-# GITHUB_TOKEN_COMMAND に統一。旧 .env の SHIORI_TOKEN_COMMAND は
-# GITHUB_TOKEN_COMMAND にリネームすること（しないと未設定扱いになる）。
-# mcp-token モデル（McpTokenProvider が mcp-token バイナリを自動解決し短命
-# トークンをキャッシュする方式）は OS keystore にホストプロセスとして直接
-# 届くネイティブ実行向けであり、コンテナ内からは keystore の D-Bus session
-# bus が bus オーナー UID しか受け付けないため mint に失敗し、警告ログ1行の
-# まま匿名へ静かにフォールバックする（issue #188）。shiori_status の
-# token_provider フィールドで実効 provider を確認できる。
-# 選択規則: credential の消費者がホストプロセスなら keystore/mcp-token
-# モデル、消費者がコンテナ内なら鍵/トークンを消費者側に運ぶ
-# （ファイルマウント or 注入）。
+#
+# 認証（詳細設計/09・15）: build_token_provider() が
+# App > TokenCommand > PAT > 匿名 の優先順位で選択する。
+# app / ingest は**コンテナ内**でトークンを消費するので、keystore には届かない
+# （D-Bus session bus が bus オーナー UID しか受け付けない）。したがって
+# credential を消費者側に運ぶ2方式のどちらかを使う:
+#
+#   1. GitHub App 秘密鍵ファイル方式 — GITHUB_APP_ID /
+#      GITHUB_APP_PRIVATE_KEY_PATH を docker-compose.override.yml の secrets で
+#      読み取り専用マウント。コンテナ内プロセスが自分で mint / 再発行するので
+#      ホスト側に可動部が不要（非24h稼働の VM 向け。dev-infra#4 / #5）。
+#   2. token-file 橋渡し方式 — ホストの scripts/refresh-token.sh が mcp-token で
+#      OS keystore から短命トークンを mint し runtime/github-token に書き続け、
+#      コンテナは GITHUB_TOKEN_COMMAND=cat /run/shiori/github-token で読むだけ。
+#      **秘密鍵はコンテナにもディスクにも入らない**代わり、更新タイマーが
+#      load-bearing になる（常時稼働機向け。issue #150/#188/#198）。
+#
+# どちらも .env / override で明示設定したときだけ有効になる。無設定なら匿名で、
+# 公開リポジトリのみの利用は認証設定なしで動く（README / セットアップ.md の約束）。
+# 明示設定したのに動かない場合は静かに匿名へ落ちず RuntimeError で失敗する。
+#
+# 「コンテナ内から mcp-token で keystore を叩く」経路（旧 McpTokenProvider）は
+# 原理的に成立せず、失敗しても警告1行で匿名へ静かに落ちるため撤去した（#188）。
+# 選択規則と将来の on-demand mint socket 方式は詳細設計/15 を参照。
+#
 # 同期は serve のバックグラウンドポーリング（SHIORI_SYNC_INTERVAL_SECONDS）に一本化。
 services:
   db:
