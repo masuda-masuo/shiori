@@ -1,4 +1,8 @@
-# 詳細設計/07: db / app の 2 サービス分離。データとモデルは named volume に永続化。
+# 詳細設計/07: db / app の 2 サービス分離。DB とモデルは named volume に永続化。
+# repos クローンだけは bind mount (./data:/data)。外部ツール (sunaba 等) が
+# ホスト側から ./data/repos/<owner>__<name> を直接読んでコピーするため
+# (詳細設計/12、sunaba#532)。named volume だと docker data-root の
+# パーミッションで他ユーザーから到達できず、この連携が成立しない。
 # ingest は使い捨てのワンショット（profiles: ["ingest"]）。
 #
 # 認証（詳細設計/09・15）: build_token_provider() が
@@ -84,7 +88,7 @@ services:
       GITHUB_TOKEN_COMMAND: ${GITHUB_TOKEN_COMMAND:-}
     volumes:
       - models:/models   # 埋め込みモデルの重みキャッシュ
-      - repos:/data      # git クローン先
+      - ./data:/data     # git クローン先 (ホスト可読 bind mount; 詳細設計/12)
       - ./runtime:/run/shiori:ro  # 上記トークンファイルの読み取り専用マウント(issue #198)
     ports:
       - "8765:8765"
@@ -115,7 +119,7 @@ services:
       GITHUB_TOKEN_COMMAND: ${GITHUB_TOKEN_COMMAND:-}
     volumes:
       - models:/models
-      - repos:/data
+      - ./data:/data
       - ./runtime:/run/shiori:ro
     depends_on:
       db:
@@ -124,5 +128,4 @@ services:
 volumes:
   dbdata:
   models:
-  repos:
 
