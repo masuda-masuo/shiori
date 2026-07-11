@@ -215,3 +215,91 @@ class TestStatusCodeAdded:
         assert "code_added" in repo_info
         assert "code_indexed" not in repo_info
         assert repo_info["code_added"] is None
+
+
+class TestStatusAutoSyncRunning:
+    """status() の auto_sync_running フィールド（issue #187: 設定値でなく実際のスレッド生存）。"""
+
+    def _run_status(self, mock_settings):
+        with (
+            patch("shiori.mcp_server._conn"),
+            patch("shiori.mcp_server.settings", mock_settings),
+            patch("shiori.mcp_server.db.get_sync_runs", return_value={}),
+            patch("shiori.mcp_server.db.get_chunk_counts", return_value={}),
+            patch("shiori.mcp_server.db.get_issue_item_count", return_value=0),
+            patch("shiori.mcp_server.db.get_cursors", return_value={}),
+        ):
+            mock_settings.repos = ["o/r"]
+            mock_settings.sync_interval_seconds = 10
+            return status()
+
+    def test_false_when_thread_never_started(self):
+        """スレッドが一度も起動していない場合は False。"""
+        with patch("shiori.mcp_server._auto_sync_thread", None):
+            result = self._run_status(MagicMock())
+        assert result["auto_sync_running"] is False
+
+    def test_true_when_thread_alive(self):
+        """生存しているスレッドがあれば True。"""
+        fake_thread = MagicMock()
+        fake_thread.is_alive.return_value = True
+        with patch("shiori.mcp_server._auto_sync_thread", fake_thread):
+            result = self._run_status(MagicMock())
+        assert result["auto_sync_running"] is True
+
+    def test_false_when_thread_died(self):
+        """スレッドオブジェクトは存在するが死んでいる場合は False。
+
+        設定値（sync_interval_seconds > 0）だけを見て「動いている」と偽らないことを確認する。
+        """
+        dead_thread = MagicMock()
+        dead_thread.is_alive.return_value = False
+        with patch("shiori.mcp_server._auto_sync_thread", dead_thread):
+            result = self._run_status(MagicMock())
+        assert result["auto_sync_running"] is False
+        assert result["sync_interval_seconds"] == 10  # config still reports enabled
+
+    def test_last_attempt_and_error_fields_present_with_no_sync_run(self):
+        """同期記録が無い(初回起動)リポジトリでも last_attempt_at/last_error/consecutive_failures を返す。"""
+        with patch("shiori.mcp_server._auto_sync_thread", None):
+            result = self._run_status(MagicMock())
+        repo_info = result["repos"]["o/r"]
+        assert repo_info["last_attempt_at"] is None
+        assert repo_info["last_error"] is None
+        assert repo_info["consecutive_failures"] == 0
+
+    def test_attempt_fields_pass_through_from_sync_runs(self):
+        """db.get_sync_runs が返す attempt 情報がそのまま status() の出力に反映される。"""
+        mock_settings = MagicMock()
+        with (
+            patch("shiori.mcp_server._conn"),
+            patch("shiori.mcp_server.settings", mock_settings),
+            patch("shiori.mcp_server._auto_sync_thread", None),
+            patch(
+                "shiori.mcp_server.db.get_sync_runs",
+                return_value={
+                    "o/r": {
+                        "last_synced_at": None,
+                        "age_seconds": None,
+                        "route": None,
+                        "docs_updated": None,
+                        "issues_indexed": None,
+                        "code_added": None,
+                        "last_attempt_at": "2026-07-10T00:14:15+00:00",
+                        "last_error": "git fetch failed (exit 128): Invalid username or token",
+                        "consecutive_failures": 42,
+                    }
+                },
+            ),
+            patch("shiori.mcp_server.db.get_chunk_counts", return_value={}),
+            patch("shiori.mcp_server.db.get_issue_item_count", return_value=0),
+            patch("shiori.mcp_server.db.get_cursors", return_value={}),
+        ):
+            mock_settings.repos = ["o/r"]
+            mock_settings.sync_interval_seconds = 10
+            result = status()
+
+        repo_info = result["repos"]["o/r"]
+        assert repo_info["last_attempt_at"] == "2026-07-10T00:14:15+00:00"
+        assert repo_info["consecutive_failures"] == 42
+        assert any("42 consecutive sync failures" in w for w in repo_info["warnings"])

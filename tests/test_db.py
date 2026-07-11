@@ -10,7 +10,9 @@ from shiori.db import (
     drop_heavy_indexes,
     get_pr_changes,
     get_pr_head_sha,
+    get_sync_runs,
     migrate_light,
+    record_sync_attempt,
     upsert_pr_changes,
 )
 
@@ -418,3 +420,113 @@ class TestBulkInsertChunks:
         # 11:embedding
         embedding_str = params[11]
         assert embedding_str == "[0.100000,0.200000,0.300000]"
+
+
+# ── record_sync_attempt / get_sync_runs (issue #187) ──
+
+
+class TestRecordSyncAttempt:
+    """record_sync_attempt の振る舞い（issue #187: 試行の記録）。"""
+
+    def _mock_conn(self):
+        conn = MagicMock()
+        cursor = MagicMock()
+        conn.cursor.return_value.__enter__.return_value = cursor
+        return conn, cursor
+
+    def test_success_upserts_and_commits(self):
+        """success=True では last_error=NULL / consecutive_failures=0 にリセットする。"""
+        conn, cursor = self._mock_conn()
+
+        record_sync_attempt(conn, "o/r", success=True)
+
+        sql = cursor.execute.call_args[0][0]
+        params = cursor.execute.call_args[0][1]
+        assert "consecutive_failures = 0" in sql
+        assert "last_error = NULL" in sql
+        assert params == ("o/r",)
+        conn.commit.assert_called_once()
+
+    def test_failure_increments_and_records_error(self):
+        """success=False ではエラーを記録し、consecutive_failures をインクリメントする。"""
+        conn, cursor = self._mock_conn()
+
+        record_sync_attempt(conn, "o/r", success=False, error="git fetch failed (exit 128)")
+
+        sql = cursor.execute.call_args[0][0]
+        params = cursor.execute.call_args[0][1]
+        assert "consecutive_failures = sync_runs.consecutive_failures + 1" in sql
+        assert params == ("o/r", "git fetch failed (exit 128)")
+        conn.commit.assert_called_once()
+
+    def test_failure_truncates_long_error(self):
+        """異常に長いエラーメッセージは切り詰められる（行の無制限肥大化を防ぐ）。"""
+        conn, cursor = self._mock_conn()
+        long_error = "x" * 5000
+
+        record_sync_attempt(conn, "o/r", success=False, error=long_error)
+
+        params = cursor.execute.call_args[0][1]
+        assert len(params[1]) <= 2000
+
+    def test_failure_with_none_error_stores_empty_string(self):
+        """error=None（success=False）でも例外にならず空文字列を記録する。"""
+        conn, cursor = self._mock_conn()
+
+        record_sync_attempt(conn, "o/r", success=False, error=None)
+
+        params = cursor.execute.call_args[0][1]
+        assert params == ("o/r", "")
+
+
+class TestGetSyncRuns:
+    """get_sync_runs の振る舞い（issue #187: last_attempt_at/last_error/consecutive_failures）。"""
+
+    def _mock_conn(self, rows: list[tuple]):
+        conn = MagicMock()
+        cursor = MagicMock()
+        cursor.fetchall.return_value = rows
+        conn.cursor.return_value.__enter__.return_value = cursor
+        return conn
+
+    def test_successful_repo_includes_attempt_fields(self):
+        """成功済みリポジトリは success detail と attempt detail の両方を返す。"""
+        from datetime import datetime, timezone
+
+        finished_at = datetime(2026, 7, 10, 12, 0, 0, tzinfo=timezone.utc)
+        last_attempt_at = datetime(2026, 7, 10, 12, 0, 5, tzinfo=timezone.utc)
+        conn = self._mock_conn(
+            [("o/r", "auto", finished_at, 300, 5, 10, 2, last_attempt_at, None, 0)]
+        )
+
+        result = get_sync_runs(conn)
+
+        info = result["o/r"]
+        assert info["last_synced_at"] == finished_at.isoformat()
+        assert info["age_seconds"] == 300
+        assert info["last_attempt_at"] == last_attempt_at.isoformat()
+        assert info["last_error"] is None
+        assert info["consecutive_failures"] == 0
+
+    def test_never_succeeded_repo_has_null_success_fields(self):
+        """一度も成功していないリポジトリでも attempt 情報だけは行として存在する。"""
+        from datetime import datetime, timezone
+
+        last_attempt_at = datetime(2026, 7, 10, 12, 0, 5, tzinfo=timezone.utc)
+        conn = self._mock_conn(
+            [
+                (
+                    "o/r", None, None, None, None, None, None,
+                    last_attempt_at, "git fetch failed (exit 128)", 5,
+                )
+            ]
+        )
+
+        result = get_sync_runs(conn)
+
+        info = result["o/r"]
+        assert info["last_synced_at"] is None
+        assert info["age_seconds"] is None
+        assert info["last_attempt_at"] == last_attempt_at.isoformat()
+        assert info["last_error"] == "git fetch failed (exit 128)"
+        assert info["consecutive_failures"] == 5
