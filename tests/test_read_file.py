@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, mock_open, patch
 
+import pytest
+
+from shiori import mcp_server
 from shiori.mcp_server import (
     _LARGE_FILE_THRESHOLD,
     read_file,
@@ -359,3 +362,177 @@ class TestStatusTokenProvider:
         result = self._run_status("mcp_token", None)
         assert result["token_provider"] == "mcp_token"
         assert not any("falling back" in w for w in result["repos"]["o/r"]["warnings"])
+
+
+class TestStatusTokenProviderError:
+    """status() must never raise even when build_token_provider() itself
+    raises (issue #193: GitHub App config only partially set causes
+    build_token_provider() to raise ValueError, which previously propagated
+    out of status() unhandled -- a regression from #188/#192).
+    """
+
+    def _run_status(self, build_token_provider_side_effect):
+        with (
+            patch("shiori.mcp_server._conn"),
+            patch("shiori.mcp_server.settings") as mock_settings,
+            patch("shiori.mcp_server.db.get_sync_runs", return_value={}),
+            patch("shiori.mcp_server.db.get_chunk_counts", return_value={}),
+            patch("shiori.mcp_server.db.get_issue_item_count", return_value=0),
+            patch("shiori.mcp_server.db.get_cursors", return_value={}),
+            patch(
+                "shiori.mcp_server.build_token_provider",
+                side_effect=build_token_provider_side_effect,
+            ),
+        ):
+            mock_settings.repos = ["o/r"]
+            mock_settings.sync_interval_seconds = 0
+            return status()
+
+    def test_does_not_raise_on_incomplete_app_config(self):
+        """build_token_provider() raising ValueError does not propagate out of status()."""
+        result = self._run_status(
+            ValueError(
+                "GitHub App configuration is incomplete. Set GITHUB_APP_ID / "
+                "and GITHUB_APP_PRIVATE_KEY(_PATH) / GITHUB_APP_INSTALLATION_ID."
+            )
+        )
+        assert result["token_provider"] == "error"
+
+    def test_warning_includes_exception_message(self):
+        """The warning surfaced to the caller includes the original exception message."""
+        result = self._run_status(
+            ValueError(
+                "GitHub App configuration is incomplete. Set GITHUB_APP_ID / "
+                "and GITHUB_APP_PRIVATE_KEY(_PATH) / GITHUB_APP_INSTALLATION_ID."
+            )
+        )
+        warnings = result["repos"]["o/r"]["warnings"]
+        assert any("GitHub App configuration is incomplete" in w for w in warnings)
+
+    def test_does_not_raise_on_arbitrary_exception(self):
+        """Any exception from build_token_provider(), not just ValueError, is caught."""
+        result = self._run_status(RuntimeError("boom"))
+        assert result["token_provider"] == "error"
+        assert any(
+            "boom" in w for w in result["repos"]["o/r"]["warnings"]
+        )
+
+    def test_normal_path_unaffected_when_no_error(self):
+        """When build_token_provider() succeeds normally, no error warning is added."""
+        mock_provider = MagicMock()
+        mock_provider.name = "app"
+        with (
+            patch("shiori.mcp_server._conn"),
+            patch("shiori.mcp_server.settings") as mock_settings,
+            patch("shiori.mcp_server.db.get_sync_runs", return_value={}),
+            patch("shiori.mcp_server.db.get_chunk_counts", return_value={}),
+            patch("shiori.mcp_server.db.get_issue_item_count", return_value=0),
+            patch("shiori.mcp_server.db.get_cursors", return_value={}),
+            patch("shiori.mcp_server.build_token_provider", return_value=mock_provider),
+            patch("shiori.mcp_server.get_mcp_token_fallback_reason", return_value=None),
+        ):
+            mock_settings.repos = ["o/r"]
+            mock_settings.sync_interval_seconds = 0
+            result = status()
+        assert result["token_provider"] == "app"
+        assert not any(
+            "token_provider could not be determined" in w
+            for w in result["repos"]["o/r"]["warnings"]
+        )
+
+
+class TestStatusAutoSyncLastError:
+    """status() の auto_sync_last_error フィールド(issue #196)。
+
+    _auto_sync_last_error は _auto_sync_loop が更新するモジュールレベル状態で、
+    DB 接続自体が死んでいて record_sync_attempt が書き込めないケースでも
+    最後の auto-sync 失敗を可視化する最後の手段。
+    """
+
+    def _run_status(self):
+        with (
+            patch("shiori.mcp_server._conn"),
+            patch("shiori.mcp_server.settings") as mock_settings,
+            patch("shiori.mcp_server.db.get_sync_runs", return_value={}),
+            patch("shiori.mcp_server.db.get_chunk_counts", return_value={}),
+            patch("shiori.mcp_server.db.get_issue_item_count", return_value=0),
+            patch("shiori.mcp_server.db.get_cursors", return_value={}),
+            patch("shiori.mcp_server.build_token_provider", return_value=MagicMock()),
+            patch("shiori.mcp_server.get_mcp_token_fallback_reason", return_value=None),
+        ):
+            mock_settings.repos = ["o/r"]
+            mock_settings.sync_interval_seconds = 10
+            return status()
+
+    def test_reports_error_when_set(self):
+        """_auto_sync_last_error がセットされているとき status() に反映される。"""
+        with patch("shiori.mcp_server._auto_sync_last_error", "connection refused"):
+            result = self._run_status()
+        assert result["auto_sync_last_error"] == "connection refused"
+
+    def test_reports_none_when_not_set(self):
+        """_auto_sync_last_error が None のときは None を返す。"""
+        with patch("shiori.mcp_server._auto_sync_last_error", None):
+            result = self._run_status()
+        assert result["auto_sync_last_error"] is None
+
+
+class TestAutoSyncLoopLastError:
+    """_auto_sync_loop() が _auto_sync_last_error を更新すること(issue #196)。
+
+    _auto_sync_loop は無限ループなので、time.sleep をモックして2周だけ回した後に
+    脱出させる(StopIteration は try/except の外側の time.sleep から送出されるため
+    auto-sync の失敗として握りつぶされない)。
+    """
+
+    def test_sets_error_on_failure_then_clears_on_next_success(self):
+        """1周目の失敗でエラーがセットされ、2周目の成功でクリアされる。"""
+        outcomes = [RuntimeError("db unreachable"), {"status": "ok", "repos": {}}]
+
+        def fake_do_sync(route):
+            outcome = outcomes.pop(0)
+            if isinstance(outcome, Exception):
+                raise outcome
+            return outcome
+
+        sleep_calls = {"n": 0}
+
+        def fake_sleep(interval):
+            sleep_calls["n"] += 1
+            if sleep_calls["n"] > 2:
+                raise StopIteration("stop the loop")
+
+        with (
+            patch("shiori.mcp_server._do_sync", side_effect=fake_do_sync),
+            patch("shiori.mcp_server.time.sleep", side_effect=fake_sleep),
+            patch("shiori.mcp_server._auto_sync_last_error", None),
+        ):
+            with pytest.raises(StopIteration):
+                mcp_server._auto_sync_loop(10)
+
+            # Two _do_sync calls happened (fail, then succeed) before the
+            # loop was interrupted by the 3rd sleep() call.
+            assert outcomes == []
+            assert mcp_server._auto_sync_last_error is None
+
+    def test_error_message_captured_on_failure(self):
+        """失敗直後(次の成功前)は例外メッセージが _auto_sync_last_error に入る。"""
+        def fake_do_sync(route):
+            raise RuntimeError("db unreachable")
+
+        sleep_calls = {"n": 0}
+
+        def fake_sleep(interval):
+            sleep_calls["n"] += 1
+            if sleep_calls["n"] > 1:
+                raise StopIteration("stop the loop")
+
+        with (
+            patch("shiori.mcp_server._do_sync", side_effect=fake_do_sync),
+            patch("shiori.mcp_server.time.sleep", side_effect=fake_sleep),
+            patch("shiori.mcp_server._auto_sync_last_error", None),
+        ):
+            with pytest.raises(StopIteration):
+                mcp_server._auto_sync_loop(10)
+
+            assert mcp_server._auto_sync_last_error == "db unreachable"

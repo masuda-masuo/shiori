@@ -109,49 +109,66 @@ def run_ingest(
         for repo in targets:
             log.info("=== %s ===", repo)
 
-            # docs phase
-            t0 = time.monotonic()
-            n_docs = sync_docs(
-                settings, conn, embedder, repo, provider,
-                buffer=buffer if is_bulk else None,
-            )
-            if is_bulk:
-                n_flushed = buffer.flush()
-                conn.commit()  # Commit metadata (doc_files, set_cursor)
-                log.info("docs flushed: %d chunks", n_flushed)
-            t_docs = time.monotonic() - t0
-            log.info("docs: %d files updated (%.1fs)", n_docs, t_docs)
+            try:
+                # docs phase
+                t0 = time.monotonic()
+                n_docs = sync_docs(
+                    settings, conn, embedder, repo, provider,
+                    buffer=buffer if is_bulk else None,
+                )
+                if is_bulk:
+                    n_flushed = buffer.flush()
+                    conn.commit()  # Commit metadata (doc_files, set_cursor)
+                    log.info("docs flushed: %d chunks", n_flushed)
+                t_docs = time.monotonic() - t0
+                log.info("docs: %d files updated (%.1fs)", n_docs, t_docs)
 
-            # issues phase
-            t0 = time.monotonic()
-            n_items = sync_issues(
-                settings, conn, embedder, repo, provider,
-                buffer=buffer if is_bulk else None,
-            )
-            if is_bulk:
-                n_flushed = buffer.flush()
-                conn.commit()  # Commit metadata (issue_items, set_cursor)
-                log.info("issues flushed: %d chunks", n_flushed)
-            t_issues = time.monotonic() - t0
-            log.info("issues/PR: %d items indexed (%.1fs)", n_items, t_issues)
+                # issues phase
+                t0 = time.monotonic()
+                n_items = sync_issues(
+                    settings, conn, embedder, repo, provider,
+                    buffer=buffer if is_bulk else None,
+                )
+                if is_bulk:
+                    n_flushed = buffer.flush()
+                    conn.commit()  # Commit metadata (issue_items, set_cursor)
+                    log.info("issues flushed: %d chunks", n_flushed)
+                t_issues = time.monotonic() - t0
+                log.info("issues/PR: %d items indexed (%.1fs)", n_items, t_issues)
 
-            # code phase
-            t0 = time.monotonic()
-            n_code = sync_code(
-                settings, conn, embedder, repo, provider,
-                buffer=buffer if is_bulk else None,
-            )
-            if is_bulk:
-                n_flushed = buffer.flush()
-                conn.commit()  # Commit metadata (doc_files, set_cursor)
-                log.info("code flushed: %d chunks", n_flushed)
-            t_code = time.monotonic() - t0
-            log.info("code: %d files updated (%.1fs)", n_code, t_code)
+                # code phase
+                t0 = time.monotonic()
+                n_code = sync_code(
+                    settings, conn, embedder, repo, provider,
+                    buffer=buffer if is_bulk else None,
+                )
+                if is_bulk:
+                    n_flushed = buffer.flush()
+                    conn.commit()  # Commit metadata (doc_files, set_cursor)
+                    log.info("code flushed: %d chunks", n_flushed)
+                t_code = time.monotonic() - t0
+                log.info("code: %d files updated (%.1fs)", n_code, t_code)
 
-            finished_at = db.record_sync_run(
-                conn, repo, route, n_docs, n_items, n_code
-            )
-            log.info("synced at %s (route=%s)", finished_at.isoformat(), route)
+                finished_at = db.record_sync_run(
+                    conn, repo, route, n_docs, n_items, n_code
+                )
+                # Record the successful attempt so shiori_status can report it and
+                # so a failure streak from a prior CLI/compose ingest run is
+                # cleared (issue #194 -- record_sync_run alone does not reset
+                # consecutive_failures, only record_sync_attempt(success=True)
+                # does; mirrors _do_sync in mcp_server.py, the MCP-tool ingest
+                # path this CLI/compose path duplicates).
+                db.record_sync_attempt(conn, repo, success=True)
+                log.info("synced at %s (route=%s)", finished_at.isoformat(), route)
+            except Exception as exc:
+                # Record the failed attempt so shiori_status can surface it
+                # (issue #194, same as the _do_sync path in mcp_server.py) --
+                # without this, a repo whose CLI/compose ingest fails every time
+                # leaves no trace at all and the "consecutive failures" warning
+                # never fires for this route.
+                conn.rollback()
+                db.record_sync_attempt(conn, repo, success=False, error=str(exc))
+                raise
 
         # --- Bulk path: create heavy indexes in batch ---
         if is_bulk:

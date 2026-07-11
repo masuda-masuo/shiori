@@ -63,8 +63,10 @@ UID での実行、あるいは mcp-token のファイル keystore フォール�
 
 認証が構成の意図より弱い provider に静かに落ちていないかは `shiori_status` の
 `token_provider` フィールド（実際に選択された provider: `app` / `static` /
-`token_command` / `mcp_token` / `anonymous`）と、mcp_token がフォールバック中
-であることを示す `warnings` で確認できる。
+`token_command` / `mcp_token` / `anonymous` / `error`）と、mcp_token がフォールバック中
+であることを示す `warnings` で確認できる。provider 構築自体が失敗する状態
+（例: App 設定の一部欠けによる `ValueError`）でも `shiori_status` は落ちず、
+`token_provider: "error"` + 例外メッセージ入りの warning を返す（issue #193）。
 
 ## 設定（環境変数）
 

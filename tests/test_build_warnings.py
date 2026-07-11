@@ -267,3 +267,32 @@ class TestTokenProviderFallbackWarning:
         info = {"age_seconds": 100}
         result = _build_warnings(info, {}, 0, {"docs": "x"})
         assert not any("falling back to anonymous" in w for w in result)
+
+
+# ── Token provider construction error (issue #193) ──
+
+
+class TestTokenProviderErrorWarning:
+    """_build_warnings: build_token_provider() 自体が例外を投げた場合の警告(issue #193)。"""
+
+    def test_warns_when_error_present(self):
+        """token_provider_error があるとき警告を出す。"""
+        info = {
+            "age_seconds": 100,
+            "token_provider_error": "GitHub App configuration is incomplete...",
+        }
+        result = _build_warnings(info, {}, 0, {"docs": "x"})
+        assert any("token_provider could not be determined" in w for w in result)
+        assert any("GitHub App configuration is incomplete" in w for w in result)
+
+    def test_no_warning_when_error_absent(self):
+        """token_provider_error が None のときは警告なし。"""
+        info = {"age_seconds": 100, "token_provider_error": None}
+        result = _build_warnings(info, {}, 0, {"docs": "x"})
+        assert not any("token_provider could not be determined" in w for w in result)
+
+    def test_no_warning_when_error_key_absent(self):
+        """token_provider_error キー自体が無い場合も警告なし。"""
+        info = {"age_seconds": 100}
+        result = _build_warnings(info, {}, 0, {"docs": "x"})
+        assert not any("token_provider could not be determined" in w for w in result)

@@ -11,7 +11,7 @@ WORKDIR /app
 COPY pyproject.toml README.md ./
 RUN mkdir -p src/shiori && touch src/shiori/__init__.py \
     && pip install torch --index-url https://download.pytorch.org/whl/cpu \
-    && pip install --no-cache-dir .
+    && pip install --no-cache-dir .[embed]
 
 COPY src ./src
 RUN pip install --no-cache-dir --no-deps --force-reinstall .
