@@ -1464,6 +1464,16 @@ def _build_warnings(
             "Private repo sync / rate limits may be affected"
         )
 
+    # Token provider construction failure: build_token_provider() raised (e.g.
+    # incomplete GitHub App config) instead of returning a provider (issue #193).
+    # status() must never fail just because the auth config is broken -- that's
+    # exactly the situation an operator needs status() to diagnose.
+    token_provider_error = info.get("token_provider_error")
+    if token_provider_error:
+        warnings.append(
+            f"token_provider could not be determined: {token_provider_error}"
+        )
+
     # Structural gap: issue_items exists but chunks are extremely few
     # Include pr_review in comparison (prevent false positives on high-review repos. Issue #35)
     total_issue_chunks = chunk_counts.get("issue", 0) + chunk_counts.get("pr_review", 0)
@@ -1592,21 +1602,39 @@ def status() -> dict[str, Any]:
     Also reports auto_sync_running (actual thread liveness, not just config), and
     token_provider: the effective auth provider actually selected by
     build_token_provider() ("app" | "static" | "token_command" | "mcp_token" |
-    "anonymous"), not just what the config *intends* -- if mcp_token has been
-    silently falling back to anonymous (e.g. mint failing inside a container;
-    issue #188), this reports "anonymous" and a matching warning is added."""
+    "anonymous" | "error"), not just what the config *intends* -- if mcp_token
+    has been silently falling back to anonymous (e.g. mint failing inside a
+    container; issue #188), this reports "anonymous" and a matching warning is
+    added. If build_token_provider() itself raises (e.g. incomplete GitHub App
+    config), this reports "error" with the exception message in a matching
+    warning instead of letting the whole tool call fail (issue #193) -- this
+    tool is exactly what an operator reaches for while diagnosing an auth
+    config problem, so it must never fail for that same reason."""
     # Cheap: just selects a TokenProvider class based on Settings, no I/O of its
     # own. The *fallback* state below comes from get_mcp_token_fallback_reason(),
     # which is fed by real McpTokenProvider usage elsewhere in the process (sync,
     # pr_diff, read_pr_file) -- status() itself never calls get_token() so it
     # never triggers a mint attempt just by being polled.
-    provider = build_token_provider(settings)
-    token_provider = provider.name
-    token_provider_fallback_reason = (
-        get_mcp_token_fallback_reason() if token_provider == "mcp_token" else None
-    )
-    if token_provider_fallback_reason:
-        token_provider = "anonymous"
+    try:
+        provider = build_token_provider(settings)
+        token_provider = provider.name
+        token_provider_fallback_reason = (
+            get_mcp_token_fallback_reason() if token_provider == "mcp_token" else None
+        )
+        if token_provider_fallback_reason:
+            token_provider = "anonymous"
+        token_provider_error = None
+    except Exception as exc:
+        # build_token_provider() intentionally raises ValueError when the
+        # GitHub App env vars are only partially configured (github_auth.py) --
+        # useful for the sync path (fail fast), but status() is the tool an
+        # operator reaches for *while* diagnosing an auth problem, so it must
+        # never fail itself just because the auth config is broken (issue #193,
+        # a regression from #188/#192 which made status() call
+        # build_token_provider() unconditionally with no error handling).
+        token_provider = "error"
+        token_provider_fallback_reason = None
+        token_provider_error = str(exc)
 
     with _conn() as conn:
         runs = db.get_sync_runs(conn)
@@ -1630,11 +1658,13 @@ def status() -> dict[str, Any]:
             info["code_chunks"] = chunk_counts.get("code", 0)
             info["items_in_db"] = items_in_db
             info["cursors"] = cursors
-            # Only used to let _build_warnings render the downgrade warning;
+            # Only used to let _build_warnings render the downgrade/error warning;
             # not part of this function's per-repo return shape (popped below).
             info["token_provider_fallback_reason"] = token_provider_fallback_reason
+            info["token_provider_error"] = token_provider_error
             warnings = _build_warnings(info, chunk_counts, items_in_db, cursors)
             info.pop("token_provider_fallback_reason", None)
+            info.pop("token_provider_error", None)
             info["warnings"] = warnings
             repos[repo] = info
     return {

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -181,3 +181,119 @@ class TestIngestRebuildGuard:
             msg = str(exc_info.value)
             assert "SHIORI_ALLOW_REBUILD" in msg
             assert "python -m shiori ingest --rebuild" in msg
+
+
+# ===================================================================
+# run_ingest (ingest.py): sync attempt recording (issue #194)
+# ===================================================================
+
+
+class TestRunIngestSyncAttemptRecording:
+    """run_ingest() の per-repo ループが record_sync_attempt を呼ぶこと(issue #194).
+
+    PR #191 は mcp_server.py の _do_sync() にのみ試行記録を追加していたため、
+    CLI/compose 経由の run_ingest() 経路では成功/失敗のいずれでも
+    record_sync_attempt が呼ばれず、consecutive_failures 系の警告が
+    ingest 経路の失敗に対して永遠に発火しない問題があった。
+    """
+
+    def _mock_conn(self):
+        """advisory lock 取得(fetchone -> (True,))と chunks 集計(fetchall -> [])を
+        返すダミーの conn/cursor を用意する。"""
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_cursor.fetchone.return_value = (True,)
+        mock_cursor.fetchall.return_value = []
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+        return mock_conn
+
+    def test_success_records_sync_attempt_success(self):
+        """全フェーズ成功時、record_sync_attempt(success=True) が呼ばれる。
+
+        これが consecutive_failures をリセットする経路であり、record_sync_run だけでは
+        リセットされない(issue #194 (b): 古い失敗警告が消えない実害の直接の修正対象)。
+        """
+        from shiori.ingest import run_ingest
+
+        mock_conn = self._mock_conn()
+        mock_settings = MagicMock()
+        mock_settings.repos = ["owner/repo"]
+
+        with (
+            patch("shiori.ingest.db.connect", return_value=mock_conn),
+            patch("shiori.ingest.db.migrate"),
+            patch("shiori.ingest.db.migrate_light"),
+            patch("shiori.ingest._is_bulk_path", return_value=False),
+            patch("shiori.ingest.build_token_provider", return_value=MagicMock()),
+            patch("shiori.ingest.Embedder", return_value=MagicMock()),
+            patch("shiori.ingest.sync_docs", return_value=1),
+            patch("shiori.ingest.sync_issues", return_value=2),
+            patch("shiori.ingest.sync_code", return_value=3),
+            patch(
+                "shiori.ingest.db.record_sync_run",
+                return_value=MagicMock(isoformat=lambda: "2026-01-01T00:00:00+00:00"),
+            ),
+            patch("shiori.ingest.db.record_sync_attempt") as mock_record_attempt,
+        ):
+            run_ingest(settings=mock_settings)
+
+        mock_record_attempt.assert_called_once_with(
+            mock_conn, "owner/repo", success=True
+        )
+
+    def test_failure_rolls_back_records_attempt_and_reraises(self):
+        """フェーズが例外を送出したとき、rollback -> record_sync_attempt(success=False,
+        error=...) -> re-raise される(issue #194 (a): 失敗が不可視だった実害の直接の修正対象)。
+
+        _do_sync (mcp_server.py) と同じ流儀: 例外は握りつぶさず、記録してから
+        呼び出し元へ伝播させる。
+        """
+        from shiori.ingest import run_ingest
+
+        mock_conn = self._mock_conn()
+        mock_settings = MagicMock()
+        mock_settings.repos = ["owner/repo"]
+
+        with (
+            patch("shiori.ingest.db.connect", return_value=mock_conn),
+            patch("shiori.ingest.db.migrate"),
+            patch("shiori.ingest.db.migrate_light"),
+            patch("shiori.ingest._is_bulk_path", return_value=False),
+            patch("shiori.ingest.build_token_provider", return_value=MagicMock()),
+            patch("shiori.ingest.Embedder", return_value=MagicMock()),
+            patch("shiori.ingest.sync_docs", side_effect=RuntimeError("sync failed")),
+            patch("shiori.ingest.db.record_sync_attempt") as mock_record_attempt,
+        ):
+            with pytest.raises(RuntimeError, match="sync failed"):
+                run_ingest(settings=mock_settings)
+
+        mock_conn.rollback.assert_called_once()
+        mock_record_attempt.assert_called_once_with(
+            mock_conn, "owner/repo", success=False, error="sync failed"
+        )
+
+    def test_failure_in_second_phase_still_records_attempt(self):
+        """docs フェーズは成功し issues フェーズで失敗する場合でも記録される。"""
+        from shiori.ingest import run_ingest
+
+        mock_conn = self._mock_conn()
+        mock_settings = MagicMock()
+        mock_settings.repos = ["owner/repo"]
+
+        with (
+            patch("shiori.ingest.db.connect", return_value=mock_conn),
+            patch("shiori.ingest.db.migrate"),
+            patch("shiori.ingest.db.migrate_light"),
+            patch("shiori.ingest._is_bulk_path", return_value=False),
+            patch("shiori.ingest.build_token_provider", return_value=MagicMock()),
+            patch("shiori.ingest.Embedder", return_value=MagicMock()),
+            patch("shiori.ingest.sync_docs", return_value=1),
+            patch("shiori.ingest.sync_issues", side_effect=RuntimeError("issues failed")),
+            patch("shiori.ingest.db.record_sync_attempt") as mock_record_attempt,
+        ):
+            with pytest.raises(RuntimeError, match="issues failed"):
+                run_ingest(settings=mock_settings)
+
+        mock_record_attempt.assert_called_once_with(
+            mock_conn, "owner/repo", success=False, error="issues failed"
+        )

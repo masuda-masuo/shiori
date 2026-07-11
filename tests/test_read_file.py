@@ -359,3 +359,80 @@ class TestStatusTokenProvider:
         result = self._run_status("mcp_token", None)
         assert result["token_provider"] == "mcp_token"
         assert not any("falling back" in w for w in result["repos"]["o/r"]["warnings"])
+
+
+class TestStatusTokenProviderError:
+    """status() must never raise even when build_token_provider() itself
+    raises (issue #193: GitHub App config only partially set causes
+    build_token_provider() to raise ValueError, which previously propagated
+    out of status() unhandled -- a regression from #188/#192).
+    """
+
+    def _run_status(self, build_token_provider_side_effect):
+        with (
+            patch("shiori.mcp_server._conn"),
+            patch("shiori.mcp_server.settings") as mock_settings,
+            patch("shiori.mcp_server.db.get_sync_runs", return_value={}),
+            patch("shiori.mcp_server.db.get_chunk_counts", return_value={}),
+            patch("shiori.mcp_server.db.get_issue_item_count", return_value=0),
+            patch("shiori.mcp_server.db.get_cursors", return_value={}),
+            patch(
+                "shiori.mcp_server.build_token_provider",
+                side_effect=build_token_provider_side_effect,
+            ),
+        ):
+            mock_settings.repos = ["o/r"]
+            mock_settings.sync_interval_seconds = 0
+            return status()
+
+    def test_does_not_raise_on_incomplete_app_config(self):
+        """build_token_provider() raising ValueError does not propagate out of status()."""
+        result = self._run_status(
+            ValueError(
+                "GitHub App configuration is incomplete. Set GITHUB_APP_ID / "
+                "and GITHUB_APP_PRIVATE_KEY(_PATH) / GITHUB_APP_INSTALLATION_ID."
+            )
+        )
+        assert result["token_provider"] == "error"
+
+    def test_warning_includes_exception_message(self):
+        """The warning surfaced to the caller includes the original exception message."""
+        result = self._run_status(
+            ValueError(
+                "GitHub App configuration is incomplete. Set GITHUB_APP_ID / "
+                "and GITHUB_APP_PRIVATE_KEY(_PATH) / GITHUB_APP_INSTALLATION_ID."
+            )
+        )
+        warnings = result["repos"]["o/r"]["warnings"]
+        assert any("GitHub App configuration is incomplete" in w for w in warnings)
+
+    def test_does_not_raise_on_arbitrary_exception(self):
+        """Any exception from build_token_provider(), not just ValueError, is caught."""
+        result = self._run_status(RuntimeError("boom"))
+        assert result["token_provider"] == "error"
+        assert any(
+            "boom" in w for w in result["repos"]["o/r"]["warnings"]
+        )
+
+    def test_normal_path_unaffected_when_no_error(self):
+        """When build_token_provider() succeeds normally, no error warning is added."""
+        mock_provider = MagicMock()
+        mock_provider.name = "app"
+        with (
+            patch("shiori.mcp_server._conn"),
+            patch("shiori.mcp_server.settings") as mock_settings,
+            patch("shiori.mcp_server.db.get_sync_runs", return_value={}),
+            patch("shiori.mcp_server.db.get_chunk_counts", return_value={}),
+            patch("shiori.mcp_server.db.get_issue_item_count", return_value=0),
+            patch("shiori.mcp_server.db.get_cursors", return_value={}),
+            patch("shiori.mcp_server.build_token_provider", return_value=mock_provider),
+            patch("shiori.mcp_server.get_mcp_token_fallback_reason", return_value=None),
+        ):
+            mock_settings.repos = ["o/r"]
+            mock_settings.sync_interval_seconds = 0
+            result = status()
+        assert result["token_provider"] == "app"
+        assert not any(
+            "token_provider could not be determined" in w
+            for w in result["repos"]["o/r"]["warnings"]
+        )
