@@ -425,3 +425,153 @@ class TestDoSyncPreLoopFailureRecording:
 
             with pytest.raises(ValueError, match="original failure"):
                 _do_sync()
+
+
+# ===================================================================
+# _do_sync: mid-stage failure recording (issue #196)
+# DB接続後・per-repoループ前(bulk判定 / migrate / advisory lock 取得)
+# ===================================================================
+
+
+class TestDoSyncMidStageFailureRecording:
+    """_do_sync() の DB接続後・per-repoループ前の失敗記録(issue #196)。
+
+    pre-loop(provider/embedder 構築、DB接続前)とは別の中段の try/except:
+    bulk-path 検出・migrate・advisory lock 取得の失敗は、既に生きている conn を
+    使って rollback → 全対象 repo へ record_sync_attempt(success=False) → 再raise
+    される。_record_pre_loop_sync_failure のような使い捨て接続は開かない。
+    """
+
+    def _mock_conn_cm(self, cursor_execute_side_effect=None):
+        """`with _conn() as conn:` として振る舞うダミー conn。
+
+        conn.cursor() はコンテキストマネージャとして cursor を返す。
+        cursor_execute_side_effect を渡すと cursor.execute に仕込む
+        (advisory lock 取得失敗の模擬用)。
+        """
+        mock_conn = MagicMock()
+        mock_conn.__enter__.return_value = mock_conn
+        mock_conn.__exit__.return_value = False
+        mock_cursor = MagicMock()
+        if cursor_execute_side_effect is not None:
+            mock_cursor.execute.side_effect = cursor_execute_side_effect
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+        return mock_conn
+
+    def test_migrate_failure_recorded_for_all_targets_with_live_conn(self):
+        """db.migrate() の失敗で、生きている conn を使って全対象 repo に記録される。"""
+        mock_conn = self._mock_conn_cm()
+
+        with (
+            patch("shiori.mcp_server.settings") as mock_settings,
+            patch("shiori.mcp_server._sync_lock") as mock_lock,
+            patch("shiori.mcp_server.build_token_provider", return_value=MagicMock()),
+            patch("shiori.mcp_server._get_embedder", return_value=MagicMock()),
+            patch("shiori.mcp_server._conn", return_value=mock_conn) as mock_conn_factory,
+            patch("shiori.mcp_server._is_bulk_path", return_value=False),
+            patch(
+                "shiori.mcp_server.db.migrate",
+                side_effect=RuntimeError("migrate failed"),
+            ),
+            patch("shiori.mcp_server.db.record_sync_attempt") as mock_record_attempt,
+        ):
+            mock_settings.repos = ["owner/repo1", "owner/repo2"]
+            mock_lock.acquire.return_value = True
+
+            with pytest.raises(RuntimeError, match="migrate failed"):
+                _do_sync()
+
+        # rollback happens before recording; recording targets every repo and
+        # uses the already-open conn (no throwaway connection: _conn called once).
+        mock_conn.rollback.assert_called_once()
+        assert mock_conn_factory.call_count == 1
+        assert mock_record_attempt.call_count == 2
+        mock_record_attempt.assert_any_call(
+            mock_conn, "owner/repo1", success=False, error="migrate failed"
+        )
+        mock_record_attempt.assert_any_call(
+            mock_conn, "owner/repo2", success=False, error="migrate failed"
+        )
+
+    def test_advisory_lock_acquisition_failure_recorded(self):
+        """advisory lock 取得の execute 失敗でも記録され、元例外が伝播する。"""
+
+        def explode_on_lock_query(query, *args, **kwargs):
+            if "pg_try_advisory_lock" in query:
+                raise RuntimeError("lock query failed")
+
+        mock_conn = self._mock_conn_cm(
+            cursor_execute_side_effect=explode_on_lock_query
+        )
+
+        with (
+            patch("shiori.mcp_server.settings") as mock_settings,
+            patch("shiori.mcp_server._sync_lock") as mock_lock,
+            patch("shiori.mcp_server.build_token_provider", return_value=MagicMock()),
+            patch("shiori.mcp_server._get_embedder", return_value=MagicMock()),
+            patch("shiori.mcp_server._conn", return_value=mock_conn),
+            patch("shiori.mcp_server._is_bulk_path", return_value=False),
+            patch("shiori.mcp_server.db.migrate"),
+            patch("shiori.mcp_server.db.record_sync_attempt") as mock_record_attempt,
+        ):
+            mock_settings.repos = ["owner/repo"]
+            mock_lock.acquire.return_value = True
+
+            with pytest.raises(RuntimeError, match="lock query failed"):
+                _do_sync()
+
+        mock_conn.rollback.assert_called_once()
+        mock_record_attempt.assert_called_once_with(
+            mock_conn, "owner/repo", success=False, error="lock query failed"
+        )
+
+    def test_bulk_path_detection_failure_recorded(self):
+        """_is_bulk_path() の失敗(中段の最初のステップ)でも記録される。"""
+        mock_conn = self._mock_conn_cm()
+
+        with (
+            patch("shiori.mcp_server.settings") as mock_settings,
+            patch("shiori.mcp_server._sync_lock") as mock_lock,
+            patch("shiori.mcp_server.build_token_provider", return_value=MagicMock()),
+            patch("shiori.mcp_server._get_embedder", return_value=MagicMock()),
+            patch("shiori.mcp_server._conn", return_value=mock_conn),
+            patch(
+                "shiori.mcp_server._is_bulk_path",
+                side_effect=RuntimeError("bulk detection failed"),
+            ),
+            patch("shiori.mcp_server.db.record_sync_attempt") as mock_record_attempt,
+        ):
+            mock_settings.repos = ["owner/repo"]
+            mock_lock.acquire.return_value = True
+
+            with pytest.raises(RuntimeError, match="bulk detection failed"):
+                _do_sync()
+
+        mock_record_attempt.assert_called_once_with(
+            mock_conn, "owner/repo", success=False, error="bulk detection failed"
+        )
+
+    def test_sync_lock_released_after_mid_stage_failure(self):
+        """中段失敗後も _sync_lock が release されること(外側の finally 経路)。"""
+        mock_conn = self._mock_conn_cm()
+
+        with (
+            patch("shiori.mcp_server.settings") as mock_settings,
+            patch("shiori.mcp_server._sync_lock") as mock_lock,
+            patch("shiori.mcp_server.build_token_provider", return_value=MagicMock()),
+            patch("shiori.mcp_server._get_embedder", return_value=MagicMock()),
+            patch("shiori.mcp_server._conn", return_value=mock_conn),
+            patch("shiori.mcp_server._is_bulk_path", return_value=False),
+            patch(
+                "shiori.mcp_server.db.migrate",
+                side_effect=RuntimeError("migrate failed"),
+            ),
+            patch("shiori.mcp_server.db.record_sync_attempt"),
+        ):
+            mock_settings.repos = ["owner/repo"]
+            mock_lock.acquire.return_value = True
+
+            with pytest.raises(RuntimeError, match="migrate failed"):
+                _do_sync()
+
+        mock_lock.release.assert_called_once()
