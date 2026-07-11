@@ -5,6 +5,18 @@
 # compose デプロイの推奨は GitHub App 秘密鍵ファイル方式（GITHUB_APP_ID /
 # GITHUB_APP_PRIVATE_KEY_PATH を docker-compose.override.yml の secrets で
 # 読み取り専用マウント。masuda-masuo/dev-infra#4 / #5 で実運用確定済み）。
+# もう一つの正規経路として TokenCommand の token-file 橋渡し方式も配線済み
+#（scripts/refresh-token.{sh,bat} がホストで runtime/github-token を発行し
+# 続け、app/ingest はそれを GITHUB_TOKEN_COMMAND=cat /run/shiori/github-token
+# で読むだけ。issue #150/#188/#198）。こちらは .env で GITHUB_TOKEN_COMMAND
+# を設定したときだけ有効になる**明示 opt-in**。無設定なら従来どおり
+# mcp-token -> anonymous フォールバックで、公開リポジトリのみの利用は
+# 認証設定なしで動く（README / セットアップ.md の約束を維持）。
+# この配線は e52ceeb まで main に存在したが、13ecbba（issue #170）で
+# McpTokenProvider 一本化のため一度削除され、以後 compose デプロイの認証が
+# 壊れていた（issue #198 の正体）。本PRで復元・変数名をホスト/コンテナとも
+# GITHUB_TOKEN_COMMAND に統一。旧 .env の SHIORI_TOKEN_COMMAND は
+# GITHUB_TOKEN_COMMAND にリネームすること（しないと未設定扱いになる）。
 # mcp-token モデル（McpTokenProvider が mcp-token バイナリを自動解決し短命
 # トークンをキャッシュする方式）は OS keystore にホストプロセスとして直接
 # 届くネイティブ実行向けであり、コンテナ内からは keystore の D-Bus session
@@ -62,9 +74,19 @@ services:
       SHIORI_CODE_EXTENSIONS: ${SHIORI_CODE_EXTENSIONS:-}
       SHIORI_CODE_EXCLUDE_GLOBS: ${SHIORI_CODE_EXCLUDE_GLOBS:-}
       GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      # token-file 橋渡し方式(scripts/refresh-token.{sh,bat} が発行する
+      # runtime/github-token をホスト側で更新し続け、コンテナはそれを
+      # cat で読むだけ; issue #150/#188/#198)。**明示 opt-in**: .env で
+      # GITHUB_TOKEN_COMMAND=cat /run/shiori/github-token を設定した場合のみ
+      # 有効になる。既定(未設定)は空パススルーで、従来どおり
+      # mcp-token -> anonymous フォールバック(公開リポは無設定で同期可)。
+      # 既定値を cat に固定すると無設定環境で TokenCommandProvider が選ばれ、
+      # トークンファイル不在の RuntimeError で全 sync が落ちる退行になる。
+      GITHUB_TOKEN_COMMAND: ${GITHUB_TOKEN_COMMAND:-}
     volumes:
       - models:/models   # 埋め込みモデルの重みキャッシュ
       - repos:/data      # git クローン先
+      - ./runtime:/run/shiori:ro  # 上記トークンファイルの読み取り専用マウント(issue #198)
     ports:
       - "8765:8765"
     depends_on:
@@ -90,9 +112,12 @@ services:
       SHIORI_CODE_EXTENSIONS: ${SHIORI_CODE_EXTENSIONS:-}
       SHIORI_CODE_EXCLUDE_GLOBS: ${SHIORI_CODE_EXCLUDE_GLOBS:-}
       GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      # app サービスと同じ token-file 橋渡し方式(明示 opt-in; issue #198)。
+      GITHUB_TOKEN_COMMAND: ${GITHUB_TOKEN_COMMAND:-}
     volumes:
       - models:/models
       - repos:/data
+      - ./runtime:/run/shiori:ro
     depends_on:
       db:
         condition: service_healthy

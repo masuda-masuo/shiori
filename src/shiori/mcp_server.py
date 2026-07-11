@@ -296,6 +296,7 @@ def _do_sync(
                 if is_bulk:
                     buffer = ChunkBuffer(conn, embedder, batch_size=_BULK_BUFFER_SIZE)
 
+                failed_repos: dict[str, str] = {}
                 for repo in targets:
                     try:
                         n_docs = sync_docs(
@@ -335,16 +336,39 @@ def _do_sync(
                         )
                     except Exception as exc:
                         # Record the failed attempt so shiori_status can report it
-                        # (issue #187), even though _do_sync still re-raises below
-                        # to preserve existing caller-facing error behavior (ingest()
-                        # surfaces the error; _auto_sync_loop logs it).
+                        # (issue #187). record_sync_run / record_sync_attempt each
+                        # commit on their own (db.py), so this rollback only
+                        # discards *this* repo's own uncommitted work -- any
+                        # earlier repo in this same loop already landed via its
+                        # own commit and is unaffected (issue #199 rollback-scope
+                        # question).
                         conn.rollback()
                         db.record_sync_attempt(conn, repo, success=False, error=str(exc))
-                        raise
+                        if is_bulk:
+                            # Bulk (initial full ingest) has no per-repo resume
+                            # story, so a partial failure still aborts the whole
+                            # run immediately, same as before (issue #199).
+                            raise
+                        # Diff sync (normal operation): one repo's failure must
+                        # not block the rest (issue #199) -- record and move on,
+                        # then raise an aggregate error once every repo has had
+                        # a chance to run.
+                        failed_repos[repo] = str(exc)
+                        log.exception(
+                            "sync failed for %s (route=%s), continuing with "
+                            "remaining repos", repo, route,
+                        )
 
                 # --- Bulk path: create heavy indexes in batch (issue #72) ---
                 if is_bulk:
                     db.create_heavy_indexes(conn)
+
+                if failed_repos:
+                    detail = "; ".join(f"{r}: {e}" for r, e in failed_repos.items())
+                    raise RuntimeError(
+                        f"sync failed for {len(failed_repos)}/{len(targets)} "
+                        f"repo(s): {detail}"
+                    )
 
             finally:
                 with conn.cursor() as cur:

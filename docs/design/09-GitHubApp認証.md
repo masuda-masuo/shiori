@@ -55,6 +55,33 @@ bus オーナー UID しか受け付けないため、コンテナ内では mcp-
 | --- | --- | --- |
 | ネイティブ実行（例: Windows ホストの venv で直接 `python -m shiori serve`） | ホストプロセス | mcp-token モデル（`GITHUB_TOKEN_COMMAND=mcp-token github`）。keystore に直接届く |
 | compose デプロイ（`app` / `ingest`） | コンテナ内プロセス | **GitHub App 秘密鍵ファイル方式**（`GITHUB_APP_ID` / `GITHUB_APP_PRIVATE_KEY_PATH` を `docker-compose.override.yml` の `secrets` で読み取り専用マウント。masuda-masuo/dev-infra#4 / #5 で実運用確定済み） |
+| compose デプロイ（`app` / `ingest`）の代替経路 | コンテナ内プロセス | **TokenCommand の token-file 橋渡し方式**（`scripts/refresh-token.{sh,bat}` がホストで短命トークンを `runtime/github-token` に発行し続け、`docker-compose.yml` が `./runtime` を `/run/shiori:ro` でマウント、`.env` で `GITHUB_TOKEN_COMMAND=cat /run/shiori/github-token` を**明示 opt-in** して読む。App 秘密鍵ファイル方式と並ぶ正規経路として `docker-compose.yml` に配線済み。issue #150/#188/#198） |
+
+`docker-compose.yml` 本体は token-file 橋渡し方式の配線として `GITHUB_TOKEN_COMMAND` の
+パススルー（既定は空）と `./runtime:/run/shiori:ro` マウントを常時持つが、方式自体は
+`.env` で `GITHUB_TOKEN_COMMAND` を設定したときだけ有効になる**明示 opt-in**。
+無設定の環境（README / セットアップ.md の「公開リポジトリのみなら認証設定なしで OK」の
+標準手順）では従来どおり mcp-token → anonymous フォールバックで動き、この経路の追加に
+よる挙動変化はない。App 秘密鍵ファイル方式を使う場合は `docker-compose.override.yml` で
+`GITHUB_APP_*` を設定すれば `build_token_provider()` の優先順位
+（App > TokenCommand > PAT > 匿名）によりそちらが選ばれる — 両立可能で、排他ではない。
+
+この token-file 橋渡し方式は e52ceeb まで main に存在したが、13ecbba（issue #170）で
+McpTokenProvider 一本化のため一度削除され、以後 compose デプロイの認証が壊れていた
+（issue #198 の正体）。issue #198 で復元し、ホスト側変数名を `SHIORI_TOKEN_COMMAND` から
+`GITHUB_TOKEN_COMMAND` に統一した。旧 `.env` で `SHIORI_TOKEN_COMMAND=...` を使っていた
+環境は `GITHUB_TOKEN_COMMAND=...` にリネームすること（しないと未設定扱いになり匿名へ
+フォールバックする）。
+
+`GITHUB_TOKEN_COMMAND` を明示設定したのに `runtime/github-token` が存在しない/空の場合
+（token-file 運用を opt-in したのに refresh-token が動いていない等）:
+`TokenCommandProvider._refresh()` は `cat` の失敗（非ゼロ終了・空 stdout）を検出すると
+`token command returned empty output` を warning ログに出したうえで、キャッシュ済みトークンが
+なければ `RuntimeError("token command failed and no cached token available")` を送出する。
+これは黙って匿名にフォールバックする経路ではなく、`sync_docs`/`sync_issues` 呼び出し時に
+例外として表面化し、`record_sync_attempt(success=False, error=...)` 経由で `shiori_status` の
+`last_error` に載る（issue #192 の可視化と整合）。原則: **明示設定 = fail loud
+（設定したのに動かない状態を隠さない）、無設定 = 従来挙動（匿名で動くものは動き続ける）**。
 
 コンテナ内での keystore アクセスを正式サポートする案（bus マウント + オーナー
 UID での実行、あるいは mcp-token のファイル keystore フォールバック）も検討した

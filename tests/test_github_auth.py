@@ -60,6 +60,21 @@ def test_provider_anonymous(clean_env):
     assert p.get_token() is None
 
 
+def test_provider_empty_token_command_falls_through(clean_env):
+    """GITHUB_TOKEN_COMMAND が空文字のとき従来どおり mcp-token に落ちる(#198 退行防止)。
+
+    compose の `GITHUB_TOKEN_COMMAND: ${GITHUB_TOKEN_COMMAND:-}` パススルーは
+    .env 未設定時にコンテナへ空文字を渡す。これが TokenCommandProvider を
+    選んでしまうと、無設定環境(公開リポのみ・認証なし)で `cat` 失敗 ->
+    RuntimeError で全 sync が落ちる退行になる。空文字は未設定と同義に
+    扱われなければならない(config.py の `or None`)。
+    """
+    clean_env.setenv("GITHUB_TOKEN_COMMAND", "")
+    p = build_token_provider(Settings())
+    assert isinstance(p, McpTokenProvider)
+    assert p.get_token() is None
+
+
 def test_provider_static(clean_env):
     clean_env.setenv("GITHUB_TOKEN", "ghp_xxx")
     p = build_token_provider(Settings())

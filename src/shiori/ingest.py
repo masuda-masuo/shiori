@@ -106,6 +106,7 @@ def run_ingest(
         if is_bulk:
             buffer = ChunkBuffer(conn, embedder, batch_size=_BULK_BUFFER_SIZE)
 
+        failed_repos: dict[str, str] = {}
         for repo in targets:
             log.info("=== %s ===", repo)
 
@@ -165,10 +166,28 @@ def run_ingest(
                 # (issue #194, same as the _do_sync path in mcp_server.py) --
                 # without this, a repo whose CLI/compose ingest fails every time
                 # leaves no trace at all and the "consecutive failures" warning
-                # never fires for this route.
+                # never fires for this route. record_sync_run / record_sync_attempt
+                # each commit on their own (db.py), so this rollback only discards
+                # *this* repo's own uncommitted work -- an earlier repo in this
+                # same loop already landed via its own commit (issue #199
+                # rollback-scope question).
                 conn.rollback()
                 db.record_sync_attempt(conn, repo, success=False, error=str(exc))
-                raise
+                if is_bulk:
+                    # Bulk (initial full ingest) has no per-repo resume story, so
+                    # a partial failure still aborts the whole run immediately,
+                    # same as before (issue #199).
+                    raise
+                # Diff sync (normal operation, mirrors _do_sync in
+                # mcp_server.py): one repo's failure must not block the rest
+                # (issue #199) -- record and move on, then raise an aggregate
+                # error (and thus a non-zero CLI exit) once every repo has had
+                # a chance to run.
+                failed_repos[repo] = str(exc)
+                log.exception(
+                    "sync failed for %s (route=%s), continuing with remaining repos",
+                    repo, route,
+                )
 
         # --- Bulk path: create heavy indexes in batch ---
         if is_bulk:
@@ -186,6 +205,12 @@ def run_ingest(
 
         t_total_elapsed = time.monotonic() - t_total
         log.info("total ingest time: %.1fs", t_total_elapsed)
+
+        if failed_repos:
+            detail = "; ".join(f"{r}: {e}" for r, e in failed_repos.items())
+            raise RuntimeError(
+                f"sync failed for {len(failed_repos)}/{len(targets)} repo(s): {detail}"
+            )
 
     finally:
         with conn.cursor() as cur:
