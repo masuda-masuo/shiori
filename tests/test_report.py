@@ -549,3 +549,42 @@ class TestApiReference:
         assert result["truncated"] is True
         assert "## src/a.py" in result["markdown"]
         assert "## src/b.py" not in result["markdown"]
+
+    def test_only_gap_chunks(self):
+        """api_reference returns empty string when only gap chunks exist for a path."""
+        dummy_chunks = [
+            {
+                "path": "src/a.py",
+                "heading_path": "a.py",
+                "line": 5,
+                "end_line": 8,
+                "content": "[a.py] (module)\ngap chunk",
+                "prog_lang": "python",
+            },
+        ]
+
+        with (
+            patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
+            patch("shiori.mcp_server.os.path.isdir", return_value=True),
+            patch("shiori.mcp_server.os.path.realpath", side_effect=lambda p: p),
+            patch("shiori.mcp_server._conn"),
+            patch("shiori.mcp_server.db.get_code_chunks", return_value=dummy_chunks),
+        ):
+            result = report(template="api_reference", prog_lang="python", path="src/")
+
+        assert result["markdown"] == ""
+        assert result["truncated"] is False
+
+    def test_empty_results(self):
+        """api_reference returns empty string and truncated=False when no chunks are returned."""
+        with (
+            patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
+            patch("shiori.mcp_server.os.path.isdir", return_value=True),
+            patch("shiori.mcp_server.os.path.realpath", side_effect=lambda p: p),
+            patch("shiori.mcp_server._conn"),
+            patch("shiori.mcp_server.db.get_code_chunks", return_value=[]),
+        ):
+            result = report(template="api_reference", prog_lang="python", path="src/")
+
+        assert result["markdown"] == ""
+        assert result["truncated"] is False

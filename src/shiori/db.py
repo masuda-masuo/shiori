@@ -804,7 +804,7 @@ def get_code_chunks(
     query = """
         SELECT path, heading_path, line, end_line, content, prog_lang
         FROM chunks
-        WHERE repo = %s AND source_type = 'code'
+        WHERE repo = %s AND source_type = 'code' AND content NOT LIKE '[%] (module)%'
     """
     params = [repo]
     if prog_lang:
