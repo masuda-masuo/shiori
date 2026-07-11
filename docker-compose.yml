@@ -5,6 +5,13 @@
 # compose デプロイの推奨は GitHub App 秘密鍵ファイル方式（GITHUB_APP_ID /
 # GITHUB_APP_PRIVATE_KEY_PATH を docker-compose.override.yml の secrets で
 # 読み取り専用マウント。masuda-masuo/dev-infra#4 / #5 で実運用確定済み）。
+# 本ファイルが実際に配線している既定経路は TokenCommand の token-file 橋渡し
+# 方式（App 秘密鍵ファイル方式と並ぶ正規経路。scripts/refresh-token.{sh,bat}
+# がホストで runtime/github-token を発行し続け、app/ingest はそれを
+# GITHUB_TOKEN_COMMAND=cat /run/shiori/github-token で読むだけ。
+# issue #150/#188/#198）。App 鍵ファイル方式を使う場合は
+# docker-compose.override.yml で GITHUB_APP_* を設定すれば優先順位により
+# そちらが選ばれる。
 # mcp-token モデル（McpTokenProvider が mcp-token バイナリを自動解決し短命
 # トークンをキャッシュする方式）は OS keystore にホストプロセスとして直接
 # 届くネイティブ実行向けであり、コンテナ内からは keystore の D-Bus session
@@ -62,9 +69,16 @@ services:
       SHIORI_CODE_EXTENSIONS: ${SHIORI_CODE_EXTENSIONS:-}
       SHIORI_CODE_EXCLUDE_GLOBS: ${SHIORI_CODE_EXCLUDE_GLOBS:-}
       GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      # token-file 橋渡し方式(scripts/refresh-token.{sh,bat} が発行する
+      # runtime/github-token をホスト側で更新し続け、コンテナはそれを
+      # cat で読むだけ; issue #150/#188/#198)。既定値はそのスクリプトの
+      # 規約(runtime/github-token -> /run/shiori/github-token)に一致させる。
+      # 明示的に GITHUB_TOKEN_COMMAND を設定すればそちらが優先される。
+      GITHUB_TOKEN_COMMAND: ${GITHUB_TOKEN_COMMAND:-cat /run/shiori/github-token}
     volumes:
       - models:/models   # 埋め込みモデルの重みキャッシュ
       - repos:/data      # git クローン先
+      - ./runtime:/run/shiori:ro  # 上記トークンファイルの読み取り専用マウント(issue #198)
     ports:
       - "8765:8765"
     depends_on:
@@ -90,9 +104,12 @@ services:
       SHIORI_CODE_EXTENSIONS: ${SHIORI_CODE_EXTENSIONS:-}
       SHIORI_CODE_EXCLUDE_GLOBS: ${SHIORI_CODE_EXCLUDE_GLOBS:-}
       GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      # app サービスと同じ token-file 橋渡し方式(issue #198)。
+      GITHUB_TOKEN_COMMAND: ${GITHUB_TOKEN_COMMAND:-cat /run/shiori/github-token}
     volumes:
       - models:/models
       - repos:/data
+      - ./runtime:/run/shiori:ro
     depends_on:
       db:
         condition: service_healthy

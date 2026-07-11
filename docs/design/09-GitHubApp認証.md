@@ -55,6 +55,21 @@ bus オーナー UID しか受け付けないため、コンテナ内では mcp-
 | --- | --- | --- |
 | ネイティブ実行（例: Windows ホストの venv で直接 `python -m shiori serve`） | ホストプロセス | mcp-token モデル（`GITHUB_TOKEN_COMMAND=mcp-token github`）。keystore に直接届く |
 | compose デプロイ（`app` / `ingest`） | コンテナ内プロセス | **GitHub App 秘密鍵ファイル方式**（`GITHUB_APP_ID` / `GITHUB_APP_PRIVATE_KEY_PATH` を `docker-compose.override.yml` の `secrets` で読み取り専用マウント。masuda-masuo/dev-infra#4 / #5 で実運用確定済み） |
+| compose デプロイ（`app` / `ingest`）の代替経路 | コンテナ内プロセス | **TokenCommand の token-file 橋渡し方式**（`scripts/refresh-token.{sh,bat}` がホストで短命トークンを `runtime/github-token` に発行し続け、`docker-compose.yml` が `./runtime` を `/run/shiori:ro` でマウント、`GITHUB_TOKEN_COMMAND` の既定値 `cat /run/shiori/github-token` で読む。App 秘密鍵ファイル方式と並ぶ正規経路として `docker-compose.yml` に実装済み。issue #150/#188/#198） |
+
+`docker-compose.yml` 本体は上記 2 経路のうち token-file 橋渡し方式の配線（environment の
+`GITHUB_TOKEN_COMMAND` 既定値 + `./runtime:/run/shiori:ro` マウント）を常時持つ。App 秘密鍵
+ファイル方式を使う場合は `docker-compose.override.yml` で `GITHUB_APP_*` を設定すれば
+`build_token_provider()` の優先順位（App > TokenCommand > PAT > 匿名）によりそちらが選ばれる
+— 両立可能で、排他ではない。
+
+`runtime/github-token` が存在しない/空の場合（token-file 未セットアップのままの起動など）:
+`TokenCommandProvider._refresh()` は `cat` の失敗（非ゼロ終了・空 stdout）を検出すると
+`token command returned empty output` を warning ログに出したうえで、キャッシュ済みトークンが
+なければ `RuntimeError("token command failed and no cached token available")` を送出する。
+これは黙って匿名にフォールバックする経路ではなく、`sync_docs`/`sync_issues` 呼び出し時に
+例外として表面化し、`record_sync_attempt(success=False, error=...)` 経由で `shiori_status` の
+`last_error` に載る（issue #192 の可視化と整合）。
 
 コンテナ内での keystore アクセスを正式サポートする案（bus マウント + オーナー
 UID での実行、あるいは mcp-token のファイル keystore フォールバック）も検討した
