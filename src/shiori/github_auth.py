@@ -323,6 +323,15 @@ def build_token_provider(settings: "Settings") -> TokenProvider:  # type: ignore
         return TokenCommandProvider(settings.github_token_command)
 
     if settings.github_token:
+        if settings.github_token.startswith("ghs_"):
+            log.warning(
+                "GITHUB_TOKEN starts with 'ghs_' (a GitHub App installation "
+                "token, which expires in about 1 hour). It will be used as a "
+                "static token and will silently stop working once it expires. "
+                "Prefer GITHUB_APP_ID/GITHUB_APP_PRIVATE_KEY/"
+                "GITHUB_APP_INSTALLATION_ID or GITHUB_TOKEN_COMMAND for a "
+                "token that refreshes itself (issue #187)."
+            )
         return StaticTokenProvider(settings.github_token)
 
     return McpTokenProvider(settings.data_dir)
