@@ -118,8 +118,13 @@ class TestResolveRepos:
             _resolve_repos("*")
 
     def test_explicit_repo(self, monkeypatch):
-        """Explicit repo string is returned as a single-element list."""
-        monkeypatch.setattr("shiori.mcp_server.settings.repos", ["o/r"])
+        """Explicit configured repo string is returned as a single-element list.
+
+        (Was ``settings.repos = ["o/r"]`` / ``_resolve_repos("owner/repo")``
+        pre-#189, which relied on the since-fixed passthrough-without-
+        validation bug; updated to use a repo that's actually configured.)
+        """
+        monkeypatch.setattr("shiori.mcp_server.settings.repos", ["owner/repo"])
         assert _resolve_repos("owner/repo") == ["owner/repo"]
 
     def test_none_delegates_to_resolve_repo(self, monkeypatch):
