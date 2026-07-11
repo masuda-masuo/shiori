@@ -1119,6 +1119,7 @@ _REPORT_TEMPLATES: dict[str, str] = {
     "stats": "Language statistics via tokei (files / code / comments / blanks).",
     "symbol_index": "Symbol index via universal-ctags (name / kind / visibility / location).",
     "module_tree": "Mermaid mindmap of repository structure (directory → file → class → function).",
+    "api_reference": "API reference showing classes, functions and docstrings.",
 }
 
 
@@ -1181,12 +1182,15 @@ def report(
     kind: str | None = None,
     public_only: bool = False,
     max_results: int = 500,
+    prog_lang: str | None = None,
+    max_chars: int = 50000,
 ) -> dict[str, Any]:
     """Generate a structured report about a repository.
 
     template: report type ("stats" for language statistics via tokei,
               "symbol_index" for symbol index via universal-ctags,
-              "module_tree" for Mermaid mindmap of repo structure)
+              "module_tree" for Mermaid mindmap of repo structure,
+              "api_reference" for API reference showing classes, functions and docstrings)
     repo: target repo ("owner/name"), or a short name if it uniquely
           matches one configured (indexed) repo (e.g. "shiori" ->
           "owner/shiori"); None for default
@@ -1194,6 +1198,8 @@ def report(
     kind: ctags kind filter (e.g. "function", "class"; symbol_index only)
     public_only: exclude private/protected symbols (symbol_index only)
     max_results: maximum nodes/symbols to return, default 500 (symbol_index/module_tree)
+    prog_lang: programming language filter (e.g. "python"; api_reference only)
+    max_chars: maximum output characters, default 50000 (api_reference only)
     """
     if template not in _REPORT_TEMPLATES:
         raise ValueError(
@@ -1219,6 +1225,11 @@ def report(
 
     if template == "stats":
         markdown = _report_stats(target_path)
+        return {
+            "repo": target,
+            "template": template,
+            "markdown": markdown,
+        }
     elif template == "module_tree":
         result = _report_module_tree(
             target_path=target_path,
@@ -1250,10 +1261,71 @@ def report(
             "truncated": truncated,
         }
 
+    elif template == "api_reference":
+        result = _report_api_reference(
+            target_repo=target,
+            path_prefix=path,
+            prog_lang=prog_lang,
+            max_chars=max_chars,
+        )
+        return {
+            "repo": target,
+            "template": template,
+            "markdown": result["markdown"],
+            "truncated": result["truncated"],
+        }
+
+    raise AssertionError("Unreachable template code path")
+
+
+def _report_api_reference(
+    target_repo: str,
+    path_prefix: str | None = None,
+    prog_lang: str | None = None,
+    max_chars: int = 50000,
+) -> dict[str, Any]:
+    """Generate API reference report (issue #156)."""
+    with _conn() as conn:
+        chunks = db.get_code_chunks(
+            conn,
+            repo=target_repo,
+            prog_lang=prog_lang,
+            path_prefix=path_prefix,
+        )
+
+    markdown_lines: list[str] = []
+    current_length = 0
+    truncated = False
+    current_path = None
+
+    for chunk in chunks:
+        content = chunk["content"]
+        first_line = content.split("\n")[0] if content else ""
+        if first_line.startswith("[") and first_line.endswith("(module)"):
+            continue
+
+        path = chunk["path"]
+        path_header = ""
+        if path != current_path:
+            path_header = f"## {path}\n\n"
+
+        line_range = f"L{chunk['line']}-L{chunk['end_line']}"
+        lang = chunk.get("prog_lang") or ""
+        chunk_md = f"{line_range}\n```{lang}\n{content}\n```\n\n"
+
+        added_md = path_header + chunk_md
+
+        if current_length + len(added_md) > max_chars:
+            truncated = True
+            break
+
+        markdown_lines.append(added_md)
+        current_length += len(added_md)
+        current_path = path
+
     return {
-        "repo": target,
-        "template": template,
-        "markdown": markdown,
+        "markdown": "".join(markdown_lines).strip(),
+        "truncated": truncated,
     }
 
 
