@@ -4,6 +4,26 @@ Decisions:
 - App preferred, then TokenCommand, then GITHUB_TOKEN, then anonymous.
 - Installation token expires in 1 hour; refreshes 5 min before expiry.
 - Private key only passed to ingest process (not MCP server; see detailed design/07, 09).
+
+Deployment model (issue #188): the right provider for a given deployment is decided
+by *where the token consumer runs*, not by which provider "feels" more modern:
+
+- Consumer runs as a host process that can reach the OS keystore (e.g. a native
+  ``python -m shiori serve`` on a machine with mcp-launcher's keystore set up):
+  McpTokenProvider (the mcp-token model) is correct and needs no secrets on disk.
+- Consumer runs inside a container (the compose ``app``/``ingest`` services): the
+  keystore's D-Bus Secret Service is not reachable from inside a container (the
+  session bus only accepts the bus-owner UID), so McpTokenProvider resolves the
+  mcp-token binary successfully but its mint step fails and it silently falls back
+  to anonymous (a single warning log line). For compose deployments, ship the
+  credential to the consumer instead: a GitHub App private key file
+  (``GITHUB_APP_ID`` / ``GITHUB_APP_PRIVATE_KEY_PATH``) mounted read-only via
+  ``docker-compose.override.yml`` + secrets (see detailed design/09,
+  masuda-masuo/dev-infra#4 / dev-infra#5 for the confirmed operational pattern).
+
+General rule: if the credential consumer is a host process, use the
+keystore/mcp-token model; if the consumer is inside a container, carry the
+key/token to the consumer (file mount or injection) instead.
 """
 
 from __future__ import annotations
@@ -18,6 +38,7 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass
+from typing import ClassVar
 
 import httpx
 import jwt
@@ -26,9 +47,38 @@ log = logging.getLogger(__name__)
 
 API = "https://api.github.com"
 
+# Module-level: outcome of the most recent McpTokenProvider.get_token() call
+# anywhere in this process (issue #188). None means the last known outcome was
+# a real token (or McpTokenProvider has never run yet); a string means it fell
+# back to anonymous, and holds the reason. This is deliberately independent of
+# any single McpTokenProvider *instance* -- callers like shiori_status build a
+# fresh, short-lived provider per call (see build_token_provider), so instance
+# state alone would never reveal a fallback observed by, e.g., the long-running
+# auto-sync loop's own provider.
+_mcp_token_last_fallback_reason: str | None = None
+
+
+def get_mcp_token_fallback_reason() -> str | None:
+    """Reason string if McpTokenProvider most recently fell back to anonymous
+    (mcp-token binary unresolved, or resolved but mint failed) anywhere in this
+    process; None if the last known outcome was a real token, or McpTokenProvider
+    has never been used yet (issue #188).
+    """
+    return _mcp_token_last_fallback_reason
+
+
+def _record_mcp_token_outcome(reason: str | None) -> None:
+    """Update the module-level fallback state (issue #188)."""
+    global _mcp_token_last_fallback_reason
+    _mcp_token_last_fallback_reason = reason
+
 
 class TokenProvider:
     """Abstract token supplier. get_token() returning None means anonymous (no auth)."""
+
+    #: Stable identifier surfaced via shiori_status's token_provider field
+    #: (issue #188). Subclasses override with their own name.
+    name: ClassVar[str] = "unknown"
 
     def get_token(self) -> str | None:
         raise NotImplementedError
@@ -37,6 +87,8 @@ class TokenProvider:
 class AnonymousProvider(TokenProvider):
     """No authentication. Public repos only (strict rate limits)."""
 
+    name: ClassVar[str] = "anonymous"
+
     def get_token(self) -> str | None:
         return None
 
@@ -44,6 +96,8 @@ class AnonymousProvider(TokenProvider):
 @dataclass
 class StaticTokenProvider(TokenProvider):
     """Static token, e.g. long-lived PAT."""
+
+    name: ClassVar[str] = "static"
 
     token: str
 
@@ -56,6 +110,8 @@ class AppTokenProvider(TokenProvider):
     get_token() re-issues if not obtained or within REFRESH_BEFORE seconds of expiry.
     Ensures tokens survive long ingests (CPU embedding can exceed 1 hour).
 """
+
+    name: ClassVar[str] = "app"
 
     REFRESH_BEFORE = 300  # Re-issue 5 min before expiry
 
@@ -127,6 +183,8 @@ class TokenCommandProvider(TokenProvider):
     Caches for 55 min, re-runs 5 min before expiry. Falls back on failure.
     """
 
+    name: ClassVar[str] = "token_command"
+
     CACHE_SECONDS = 3300      # 55 min (GitHub installation token = 1 hour)
     REFRESH_BEFORE = 300      # 5 min
     HARD_EXPIRY = 3600        # 60 min — fallback window on command failure
@@ -178,6 +236,15 @@ class McpTokenProvider(TokenProvider):
     Same cache/expiry pattern as TokenCommandProvider.
     Falls back to anonymous if binary cannot be resolved.
 
+    Intended for **native execution** — a host process that can reach the OS
+    keystore mcp-token reads from (see module docstring / issue #188). Inside a
+    container the binary typically still resolves (it's just a file), but the
+    mint step fails because the keystore's D-Bus session bus rejects any UID
+    other than its owner; get_token() then returns None (anonymous) with only a
+    warning log line. That silent downgrade is tracked at module level via
+    :func:`get_mcp_token_fallback_reason` so ``shiori_status`` can surface it
+    even though a fresh, short-lived provider is normally built per call.
+
     Linux-only: the download step uses os.uname() to detect architecture and
     fetches a Linux binary. The initial 3 steps (env/PATH/cache) are
     platform-agnostic; only _download() is Linux-specific.
@@ -190,6 +257,8 @@ class McpTokenProvider(TokenProvider):
          sha256sum /tmp/a /tmp/b
       3. Update _LINUX_AMD64_SHA256 and _LINUX_ARM64_SHA256 accordingly.
     """
+
+    name: ClassVar[str] = "mcp_token"
 
     CACHE_SECONDS = 3300
     REFRESH_BEFORE = 300
@@ -207,6 +276,20 @@ class McpTokenProvider(TokenProvider):
         self._fetched_at: float = 0.0
 
     def get_token(self) -> str | None:
+        token = self._get_token_inner()
+        # Recorded at module level (not just on self) so that shiori_status,
+        # which builds a fresh short-lived provider per call, can still see
+        # that *some* McpTokenProvider in this process recently fell back to
+        # anonymous (issue #188) -- the instance that observed the failure is
+        # normally long gone by the time status() runs.
+        _record_mcp_token_outcome(
+            None
+            if token is not None
+            else "mcp-token binary unresolved or mint failed; falling back to anonymous"
+        )
+        return token
+
+    def _get_token_inner(self) -> str | None:
         if self._binary_resolved and self._binary is None:
             if self._token is not None and time.time() < self._fetched_at + self.HARD_EXPIRY:
                 return self._token

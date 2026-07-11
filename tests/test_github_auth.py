@@ -19,6 +19,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from shiori import github_auth
 from shiori.config import Settings
 from shiori.github_auth import (
+    AnonymousProvider,
     AppTokenProvider,
     McpTokenProvider,
     StaticTokenProvider,
@@ -331,3 +332,76 @@ def test_mcp_provider_detect_arch(monkeypatch):
 
     monkeypatch.setattr(os, "uname", lambda: fake_uname("arm64"))
     assert _detect_arch() == "arm64"
+
+
+#
+# Provider name attribute (issue #188): shiori_status reports this via
+# build_token_provider(settings).name so it can surface the *actual* provider
+# selected, not just what the raw config implies.
+#
+
+
+def test_provider_names(clean_env, rsa_pem):
+    assert AnonymousProvider().name == "anonymous"
+    assert StaticTokenProvider("ghp_xxx").name == "static"
+    assert TokenCommandProvider("echo x").name == "token_command"
+    assert AppTokenProvider("1", rsa_pem, "2").name == "app"
+    assert McpTokenProvider("/tmp").name == "mcp_token"
+
+
+def test_build_token_provider_name_matches_selected_class(clean_env):
+    """build_token_provider's return value exposes .name matching the class actually
+    selected (mcp_token here, since no App/TokenCommand/PAT env is set)."""
+    p = build_token_provider(Settings())
+    assert isinstance(p, McpTokenProvider)
+    assert p.name == "mcp_token"
+
+
+#
+# McpTokenProvider silent fallback-to-anonymous tracking (issue #188)
+#
+# McpTokenProvider is meant for native execution where the host process can
+# reach the OS keystore mcp-token reads from. Inside a container the binary
+# still resolves but minting fails, and get_token() silently returns None
+# (anonymous) with only a warning log line. shiori_status can't inspect the
+# McpTokenProvider instance responsible (a fresh, short-lived one is built per
+# call), so the outcome is tracked at module level instead.
+#
+
+
+def test_no_fallback_reason_before_any_use(clean_env, monkeypatch):
+    """Module state starts clean (no McpTokenProvider has run yet in this test)."""
+    monkeypatch.setattr(github_auth, "_mcp_token_last_fallback_reason", None)
+    assert github_auth.get_mcp_token_fallback_reason() is None
+
+
+def test_fallback_reason_recorded_when_binary_unresolved(clean_env, tmp_path, monkeypatch):
+    """get_token() returning None (no binary found) is recorded at module level."""
+    monkeypatch.setattr(github_auth, "_mcp_token_last_fallback_reason", None)
+    p = McpTokenProvider(str(tmp_path))
+    assert p.get_token() is None
+    assert github_auth.get_mcp_token_fallback_reason() is not None
+
+
+def test_fallback_reason_cleared_after_successful_token(clean_env, tmp_path, monkeypatch):
+    """A later successful get_token() clears the module-level fallback state
+    (issue #188 asks for the *current* effective provider, not a permanent scar)."""
+    monkeypatch.setattr(github_auth, "_mcp_token_last_fallback_reason", "stale reason from before")
+    fake_bin = tmp_path / "mcp-token"
+    fake_bin.write_text("#!/bin/sh\necho ghs_recovered")
+    fake_bin.chmod(0o755)
+    monkeypatch.setenv("PATH", str(tmp_path), prepend=os.pathsep)
+    p = McpTokenProvider(str(tmp_path))
+    assert p.get_token() == "ghs_recovered"
+    assert github_auth.get_mcp_token_fallback_reason() is None
+
+
+def test_fallback_reason_survives_across_separate_provider_instances(clean_env, tmp_path, monkeypatch):
+    """The whole point of module-level (not instance) state: a *different*
+    McpTokenProvider instance built later (as shiori_status does on every call)
+    still sees a fallback observed by an earlier, now-discarded instance."""
+    monkeypatch.setattr(github_auth, "_mcp_token_last_fallback_reason", None)
+    p1 = McpTokenProvider(str(tmp_path))
+    assert p1.get_token() is None  # no binary -> falls back, recorded at module level
+    del p1
+    assert github_auth.get_mcp_token_fallback_reason() is not None

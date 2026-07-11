@@ -1,9 +1,19 @@
 # 詳細設計/07: db / app の 2 サービス分離。データとモデルは named volume に永続化。
 # ingest は使い捨てのワンショット（profiles: ["ingest"]）。
-# 認証は mcp-token モデル（mcp-launcher の security-model）: サーバープロセス内で
-# McpTokenProvider が mcp-token バイナリを自動解決（env→PATH→cache→download）し、
-# 短命トークンを期限管理してキャッシュする。GitHub App の鍵はコンテナに渡らない。
-# build_token_provider() が認証方式を自動選択する。
+# 認証: build_token_provider() が App > TokenCommand > PAT > mcp-token > 匿名の
+# 優先順位で自動選択する（詳細設計/09）。
+# compose デプロイの推奨は GitHub App 秘密鍵ファイル方式（GITHUB_APP_ID /
+# GITHUB_APP_PRIVATE_KEY_PATH を docker-compose.override.yml の secrets で
+# 読み取り専用マウント。masuda-masuo/dev-infra#4 / #5 で実運用確定済み）。
+# mcp-token モデル（McpTokenProvider が mcp-token バイナリを自動解決し短命
+# トークンをキャッシュする方式）は OS keystore にホストプロセスとして直接
+# 届くネイティブ実行向けであり、コンテナ内からは keystore の D-Bus session
+# bus が bus オーナー UID しか受け付けないため mint に失敗し、警告ログ1行の
+# まま匿名へ静かにフォールバックする（issue #188）。shiori_status の
+# token_provider フィールドで実効 provider を確認できる。
+# 選択規則: credential の消費者がホストプロセスなら keystore/mcp-token
+# モデル、消費者がコンテナ内なら鍵/トークンを消費者側に運ぶ
+# （ファイルマウント or 注入）。
 # 同期は serve のバックグラウンドポーリング（SHIORI_SYNC_INTERVAL_SECONDS）に一本化。
 services:
   db:
