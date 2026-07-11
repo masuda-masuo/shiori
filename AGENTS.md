@@ -34,7 +34,7 @@ README や design.md の正規パターンを確認してから操作する。
 
 - `shiori_status`: 索引の鮮度確認（自動同期が有効なら通常不要）
 
-## code-sandbox-mcp
+## sunaba
 
 **正規パターン: `run_container_and_exec` でワンショット実行**
 
@@ -68,5 +68,5 @@ run_container_and_exec(
 
 - テスト実行: `PYTHONPATH=src python3 -m pytest tests/ -v`
 - 本番環境では `psycopg` が必要 → Docker Compose で PostgreSQL を起動
-- リポジトリ: masuda-masuo/shiori, masuda-masuo/code-sandbox-mcp
+- リポジトリ: masuda-masuo/shiori, masuda-masuo/sunaba
 - 索引更新（CLI）: `python -m shiori ingest`（`shiori_ingest` MCP ツールは廃止）
