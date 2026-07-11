@@ -66,6 +66,13 @@ bus オーナー UID しか受け付けないため、コンテナ内では mcp-
 `GITHUB_APP_*` を設定すれば `build_token_provider()` の優先順位
 （App > TokenCommand > PAT > 匿名）によりそちらが選ばれる — 両立可能で、排他ではない。
 
+この token-file 橋渡し方式は e52ceeb まで main に存在したが、13ecbba（issue #170）で
+McpTokenProvider 一本化のため一度削除され、以後 compose デプロイの認証が壊れていた
+（issue #198 の正体）。issue #198 で復元し、ホスト側変数名を `SHIORI_TOKEN_COMMAND` から
+`GITHUB_TOKEN_COMMAND` に統一した。旧 `.env` で `SHIORI_TOKEN_COMMAND=...` を使っていた
+環境は `GITHUB_TOKEN_COMMAND=...` にリネームすること（しないと未設定扱いになり匿名へ
+フォールバックする）。
+
 `GITHUB_TOKEN_COMMAND` を明示設定したのに `runtime/github-token` が存在しない/空の場合
 （token-file 運用を opt-in したのに refresh-token が動いていない等）:
 `TokenCommandProvider._refresh()` は `cat` の失敗（非ゼロ終了・空 stdout）を検出すると

@@ -12,6 +12,11 @@
 # を設定したときだけ有効になる**明示 opt-in**。無設定なら従来どおり
 # mcp-token -> anonymous フォールバックで、公開リポジトリのみの利用は
 # 認証設定なしで動く（README / セットアップ.md の約束を維持）。
+# この配線は e52ceeb まで main に存在したが、13ecbba（issue #170）で
+# McpTokenProvider 一本化のため一度削除され、以後 compose デプロイの認証が
+# 壊れていた（issue #198 の正体）。本PRで復元・変数名をホスト/コンテナとも
+# GITHUB_TOKEN_COMMAND に統一。旧 .env の SHIORI_TOKEN_COMMAND は
+# GITHUB_TOKEN_COMMAND にリネームすること（しないと未設定扱いになる）。
 # mcp-token モデル（McpTokenProvider が mcp-token バイナリを自動解決し短命
 # トークンをキャッシュする方式）は OS keystore にホストプロセスとして直接
 # 届くネイティブ実行向けであり、コンテナ内からは keystore の D-Bus session
