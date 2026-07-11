@@ -77,9 +77,50 @@ def _infer_repo_from_cwd() -> str | None:
     return None
 
 
+def _validate_repo_name(repo: str) -> str:
+    """Validate/resolve an explicit ``repo`` argument (issue #189).
+
+    Before this, any non-empty ``repo`` string was passed through
+    unchanged, so an unresolvable repo name and a resolvable-but-not-yet-
+    indexed repo both surfaced downstream as the *same* "not indexed"
+    error -- which points the caller at a useless ``ingest`` retry when
+    the real problem is the argument itself.  This separates the two:
+
+    - Exact ``"owner/name"`` match in ``settings.repos`` -> returned as-is.
+    - A short name (no ``/``) that uniquely matches one configured repo's
+      ``name`` component -> resolved to the full ``"owner/name"`` form
+      (e.g. ``"shiori"`` -> ``"masuda-masuo/shiori"``).
+    - A short name matching more than one configured repo -> ``ValueError``
+      listing the ambiguous candidates.
+    - Anything else (unresolvable full name or short name) -> ``ValueError``
+      with the full indexed-repo list, so callers can tell "unknown repo"
+      apart from "known repo, not indexed yet".
+
+    When ``SHIORI_REPOS`` is unset (``settings.repos`` empty) there is
+    nothing configured to validate against, so *repo* is returned
+    unchanged (matches pre-#189 behavior for that case).
+    """
+    if not settings.repos:
+        return repo
+    if repo in settings.repos:
+        return repo
+    if "/" not in repo:
+        matches = [r for r in settings.repos if r.split("/", 1)[-1] == repo]
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            raise ValueError(
+                f'ambiguous repo "{repo}". Candidates: {", ".join(matches)}. '
+                'Specify the full "owner/repo" form.'
+            )
+    raise ValueError(
+        f'unknown repo "{repo}". Indexed repos: {", ".join(settings.repos)}'
+    )
+
+
 def _resolve_repo(repo: str | None) -> str:
     if repo:
-        return repo
+        return _validate_repo_name(repo)
     if not settings.repos:
         raise ValueError("SHIORI_REPOS not set")
     inferred = _infer_repo_from_cwd()
@@ -92,6 +133,19 @@ def _resolve_repo(repo: str | None) -> str:
         ", ".join(settings.repos),
     )
     return settings.repos[0]
+
+
+def _resolve_repo_filter(repo: str | None) -> str | None:
+    """Resolve an optional ``repo`` *search filter* (issue #189).
+
+    Unlike :func:`_resolve_repo`, ``None`` here means "no filter -- search
+    across every configured repo", not "fall back to the default repo",
+    so ``None`` passes through unchanged.  A given value is still
+    validated / short-name-resolved via :func:`_validate_repo_name`.
+    """
+    if repo is None:
+        return None
+    return _validate_repo_name(repo)
 
 
 def _resolve_repos(repo: str | None) -> list[str]:
@@ -398,11 +452,14 @@ def semantic_search(
     """Semantic search (entry). Strong for paraphrasing, concept, cross-lingual queries.
     Hybrid with keyword search internally.
     kind: 'issue' | 'pr' — further filter source_type='issue'/'pr_review' results
-          by thread type. No effect on doc/code results (issue #98)."""
+          by thread type. No effect on doc/code results (issue #98).
+    repo: "owner/name" filter, or a short name if it uniquely matches one
+          configured (indexed) repo (e.g. "shiori" -> "owner/shiori").
+          Omit to search across all indexed repos."""
     with _conn() as conn:
         return search.semantic_search(
             settings, conn, _get_embedder(), query,
-            _make_filters(source_type, language, state, repo, path_prefix, updated_after, prog_lang, kind),
+            _make_filters(source_type, language, state, _resolve_repo_filter(repo), path_prefix, updated_after, prog_lang, kind),
             top_k,
             sort_by,
             sort_order,
@@ -429,11 +486,14 @@ def keyword_search(
     Multi-token queries use OR matching by default (any token can match); tokens that match more/strongly rank higher.
     Pass match_all=True for AND behavior (all tokens must match the same chunk).
     kind: 'issue' | 'pr' — further filter source_type='issue'/'pr_review' results
-          by thread type. No effect on doc/code results (issue #98)."""
+          by thread type. No effect on doc/code results (issue #98).
+    repo: "owner/name" filter, or a short name if it uniquely matches one
+          configured (indexed) repo (e.g. "shiori" -> "owner/shiori").
+          Omit to search across all indexed repos."""
     with _conn() as conn:
         return search.keyword_search(
             settings, conn, query,
-            _make_filters(source_type, language, state, repo, path_prefix, updated_after, prog_lang, kind),
+            _make_filters(source_type, language, state, _resolve_repo_filter(repo), path_prefix, updated_after, prog_lang, kind),
             top_k,
             sort_by,
             sort_order,
@@ -453,7 +513,10 @@ def list_tree(
     repo: str | None = None,
 ) -> list[dict[str, Any]]:
     """List indexed doc/code file paths. Filter by path/source_type/extension.
-    Understand repo structure and locate files."""
+    Understand repo structure and locate files.
+    repo: "owner/name", or a short name if it uniquely matches one
+          configured (indexed) repo (e.g. "shiori" -> "owner/shiori").
+          Omit for the default configured repo."""
     # Validation
     if source_type is not None and source_type not in _VALID_SOURCE_TYPES:
         raise ValueError(
@@ -513,7 +576,10 @@ def read_file(
     repo: str | None = None,
 ) -> dict[str, Any]:
     """Read full file (or range) from clone (not index).
-    PR head files via read_pr_file or GitHub MCP."""
+    PR head files via read_pr_file or GitHub MCP.
+    repo: "owner/name", or a short name if it uniquely matches one
+          configured (indexed) repo (e.g. "shiori" -> "owner/shiori").
+          Omit for the default configured repo."""
     target = _resolve_repo(repo)
     base = os.path.realpath(settings.repo_dir(target))
     full = os.path.realpath(os.path.join(base, path))
@@ -608,7 +674,13 @@ def read_issue(
     Bot comments included (identifiable via is_bot).
     Each item has a state field: for kind='pr_review' it is the review
     submission state (APPROVED/COMMENTED/CHANGES_REQUESTED); for other
-    kinds it is the overall issue state (open/closed)."""
+    kinds it is the overall issue state (open/closed).
+    repo: "owner/name", or a short name if it uniquely matches one
+          configured (indexed) repo (e.g. "shiori" -> "owner/shiori").
+          Omit for the default configured repo. An unresolvable repo
+          raises immediately with the indexed-repo list, distinct from
+          the "not indexed" error for a known repo whose issue hasn't
+          been ingested yet."""
     if number is not None and numbers is not None:
         raise ValueError("number and numbers cannot be specified together")
     target = _resolve_repo(repo)
@@ -642,7 +714,10 @@ def pr_changes(
 ) -> dict[str, Any]:
     """PR change file map (metadata pointer; issue #54, #100).
     Stored: head_sha / path / status / additions / deletions / changes / blob_url
-    Not stored: patch hunks (via GitHub MCP) and PR head files (via shiori_read_pr_file)."""
+    Not stored: patch hunks (via GitHub MCP) and PR head files (via shiori_read_pr_file).
+    repo: "owner/name", or a short name if it uniquely matches one
+          configured (indexed) repo (e.g. "shiori" -> "owner/shiori").
+          Omit for the default configured repo."""
     target = _resolve_repo(repo)
     with _conn() as conn:
         files, head_sha, base_sha = db.get_pr_changes(conn, target, number)
@@ -729,7 +804,8 @@ def pr_diff(
 
     number: PR番号
     path: 特定ファイルのパスのみ取得（省略時は全ファイル）
-    repo: リポジトリ名
+    repo: "owner/name"形式。一意に定まる短縮名（"owner/"なし）も可
+          （例: "shiori" -> "owner/shiori"）。省略時は既定の設定済みリポジトリ。
     """
     target = _resolve_repo(repo)
     with _conn() as conn:
@@ -760,6 +836,9 @@ def pr_review_comments(number: int, repo: str | None = None) -> dict[str, Any]:
     issue_items テーブルに保存済みの kind='pr_review_comment' を取得する。
     ファイルパス、行番号、本文、作成者、作成日時を含む。
     レビュー履歴の確認や他のレビュアーのコメント把握に使う。
+
+    repo: "owner/name"形式。一意に定まる短縮名（"owner/"なし）も可
+          （例: "shiori" -> "owner/shiori"）。省略時は既定の設定済みリポジトリ。
     """
     target = _resolve_repo(repo)
     with _conn() as conn:
@@ -780,7 +859,10 @@ def read_pr_file(
     end_line: int | None = None,
     repo: str | None = None,
 ) -> dict[str, Any]:
-    """Read PR head file content (or range). Delegated from read_file with PR-specific fetch."""
+    """Read PR head file content (or range). Delegated from read_file with PR-specific fetch.
+    repo: "owner/name", or a short name if it uniquely matches one
+          configured (indexed) repo (e.g. "shiori" -> "owner/shiori").
+          Omit for the default configured repo."""
     target = _resolve_repo(repo)
     base = os.path.realpath(settings.repo_dir(target))
 
@@ -849,7 +931,9 @@ def grep_search(
     Each match includes a "repo" field identifying the source repository.
 
     pattern: search pattern (regex or fixed string)
-    repo: target repo ("owner/name"), "*" for all repos, or None for default
+    repo: target repo ("owner/name"), a short name if it uniquely matches
+          one configured (indexed) repo (e.g. "shiori" -> "owner/shiori"),
+          "*" for all repos, or None for default
     path: optional file/subdir path within repo to scope the search
     regex: True (default) for regex search, False for fixed-string search.
           Patterns containing literal ``[...]`` (character classes) should use
@@ -1008,7 +1092,9 @@ def report(
     template: report type ("stats" for language statistics via tokei,
               "symbol_index" for symbol index via universal-ctags,
               "module_tree" for Mermaid mindmap of repo structure)
-    repo: target repo ("owner/name") or None for default
+    repo: target repo ("owner/name"), or a short name if it uniquely
+          matches one configured (indexed) repo (e.g. "shiori" ->
+          "owner/shiori"); None for default
     path: optional subdirectory within the repo to scope the report
     kind: ctags kind filter (e.g. "function", "class"; symbol_index only)
     public_only: exclude private/protected symbols (symbol_index only)
@@ -1386,6 +1472,9 @@ def issue_links(number: int, repo: str | None = None) -> dict[str, Any]:
     参照している他の issue/PR の一覧。
 
     重複チェック、epic 構築、回帰追跡に使う。
+
+    repo: "owner/name"形式。一意に定まる短縮名（"owner/"なし）も可
+          （例: "shiori" -> "owner/shiori"）。省略時は既定の設定済みリポジトリ。
     """
     target = _resolve_repo(repo)
     with _conn() as conn:
