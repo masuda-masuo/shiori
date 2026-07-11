@@ -1,0 +1,7 @@
+[Unit]
+Description=Shiori GitHub Token Refresh
+
+[Service]
+Type=oneshot
+WorkingDirectory=@SHIORI_DIR@
+ExecStart=@SHIORI_DIR@/scripts/refresh-token.sh
