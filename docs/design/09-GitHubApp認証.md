@@ -36,6 +36,36 @@ MCP サーバーは GitHub に触れない」という前提だったが、issue
    PAT 運用時も `GITHUB_TOKEN` は全サービスに渡す。
 6. **依存追加: `pyjwt[crypto]`**（RS256 署名に cryptography が必要）。
 
+## 実行環境ごとの認証方式（issue #188）
+
+`McpTokenProvider`（`GITHUB_TOKEN_COMMAND` 経由、あるいは env→PATH→cache→download
+で自動解決する mcp-token モデル。issue #170/#173）は **mcp-launcher の OS
+keystore にホストプロセスとして直接届く環境向け**であり、compose デプロイの
+`app`/`ingest` コンテナ内では前提が崩れる。keystore の D-Bus Secret Service は
+bus オーナー UID しか受け付けないため、コンテナ内では mcp-token バイナリの解決
+自体は成功するが mint（トークン取得）が失敗し、警告ログ1行のまま匿名へ静かに
+フォールバックする（`McpTokenProvider` は元々 anonymous フォールバックを持つ
+設計だが、compose 環境ではそれが常態化してしまう）。
+
+選択規則（一般則）: **credential の消費者がホストプロセスなら keystore/mcp-token
+モデル、消費者がコンテナ内なら鍵/トークンを消費者側に運ぶ（ファイルマウント or
+注入）。** 決定変数はツールの選択ではなく「credential の消費者がどこで動くか」。
+
+| 実行環境 | 消費者 | 推奨方式 |
+| --- | --- | --- |
+| ネイティブ実行（例: Windows ホストの venv で直接 `python -m shiori serve`） | ホストプロセス | mcp-token モデル（`GITHUB_TOKEN_COMMAND=mcp-token github`）。keystore に直接届く |
+| compose デプロイ（`app` / `ingest`） | コンテナ内プロセス | **GitHub App 秘密鍵ファイル方式**（`GITHUB_APP_ID` / `GITHUB_APP_PRIVATE_KEY_PATH` を `docker-compose.override.yml` の `secrets` で読み取り専用マウント。masuda-masuo/dev-infra#4 / #5 で実運用確定済み） |
+
+コンテナ内での keystore アクセスを正式サポートする案（bus マウント + オーナー
+UID での実行、あるいは mcp-token のファイル keystore フォールバック）も検討した
+が、UID 制約が deployment ごとに異なり汎用解にしにくいため見送った
+（「検討事項 / 未決」参照）。
+
+認証が構成の意図より弱い provider に静かに落ちていないかは `shiori_status` の
+`token_provider` フィールド（実際に選択された provider: `app` / `static` /
+`token_command` / `mcp_token` / `anonymous`）と、mcp_token がフォールバック中
+であることを示す `warnings` で確認できる。
+
 ## 設定（環境変数）
 
 | 変数 | 説明 |
@@ -343,6 +373,11 @@ issue #116 で廃止された `runner` を除く最新の全サービス構成�
   必要になったら `SHIORI_REPOS` の repo ごとに installation を引く map を追加する。
 - MCP サーバー自体の認可（OAuth 2.1）。本書のスコープ外
   （localhost 超えの公開時に別途設計。`基本設計` 未決事項に追加）。
+- コンテナ内での mcp-token/keystore アクセスの正式サポート（issue #188 論点2）。
+  bus マウント + keystore オーナー UID での実行、あるいは mcp-token のファイル
+  keystore フォールバックが候補だが、UID 制約が deployment ごとに異なり汎用解に
+  しにくいため見送り。「実行環境ごとの認証方式」の表（App 秘密鍵ファイル方式）
+  で十分という結論（issue #188）。
 
 ## 基本設計.md への反映
 
