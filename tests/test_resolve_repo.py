@@ -6,7 +6,13 @@ from unittest.mock import patch
 
 import pytest
 
-from shiori.mcp_server import _infer_repo_from_cwd, _resolve_repo, _resolve_repos
+from shiori.mcp_server import (
+    _infer_repo_from_cwd,
+    _resolve_repo,
+    _resolve_repo_filter,
+    _resolve_repos,
+    _validate_repo_name,
+)
 
 
 class TestResolveRepo:
@@ -127,3 +133,106 @@ class TestResolveRepos:
         result = _resolve_repos("*")
         result.append("x/y")
         assert "x/y" not in _resolve_repos("*")
+
+
+class TestValidateRepoName:
+    """Behavior of _validate_repo_name (issue #189)."""
+
+    def test_full_name_exact_match(self, monkeypatch):
+        """A full "owner/name" already in settings.repos is returned as-is."""
+        monkeypatch.setattr(
+            "shiori.mcp_server.settings.repos",
+            ["masuda-masuo/shiori", "masuda-masuo/code-sandbox-mcp"],
+        )
+        assert _validate_repo_name("masuda-masuo/shiori") == "masuda-masuo/shiori"
+
+    def test_unique_short_name_resolves(self, monkeypatch):
+        """A short name that uniquely matches one configured repo resolves to it."""
+        monkeypatch.setattr(
+            "shiori.mcp_server.settings.repos",
+            ["masuda-masuo/shiori", "masuda-masuo/code-sandbox-mcp"],
+        )
+        assert (
+            _validate_repo_name("code-sandbox-mcp")
+            == "masuda-masuo/code-sandbox-mcp"
+        )
+
+    def test_ambiguous_short_name_raises(self, monkeypatch):
+        """A short name matching more than one configured repo is rejected
+        with the ambiguous candidates listed."""
+        monkeypatch.setattr(
+            "shiori.mcp_server.settings.repos", ["org1/tools", "org2/tools"]
+        )
+        with pytest.raises(ValueError, match="ambiguous repo") as exc:
+            _validate_repo_name("tools")
+        assert "org1/tools" in str(exc.value)
+        assert "org2/tools" in str(exc.value)
+
+    def test_unknown_repo_lists_indexed_repos(self, monkeypatch):
+        """An unresolvable repo name raises with the full indexed-repo list,
+        distinct from a "not indexed" data error."""
+        monkeypatch.setattr(
+            "shiori.mcp_server.settings.repos",
+            ["masuda-masuo/shiori", "masuda-masuo/code-sandbox-mcp"],
+        )
+        with pytest.raises(ValueError, match="unknown repo") as exc:
+            _validate_repo_name("totally-bogus-repo-xyz")
+        msg = str(exc.value)
+        assert "totally-bogus-repo-xyz" in msg
+        assert "masuda-masuo/shiori" in msg
+        assert "masuda-masuo/code-sandbox-mcp" in msg
+
+    def test_unknown_full_name_also_lists_indexed_repos(self, monkeypatch):
+        """A well-formed "owner/name" not in settings.repos is unknown too."""
+        monkeypatch.setattr("shiori.mcp_server.settings.repos", ["o/r1"])
+        with pytest.raises(ValueError, match="unknown repo"):
+            _validate_repo_name("o/other")
+
+    def test_no_repos_configured_passthrough(self, monkeypatch):
+        """With SHIORI_REPOS unset there's nothing to validate against, so
+        the repo is returned unchanged (legacy behavior preserved)."""
+        monkeypatch.setattr("shiori.mcp_server.settings.repos", [])
+        assert _validate_repo_name("anything/goes") == "anything/goes"
+
+
+class TestResolveRepoWithValidation:
+    """_resolve_repo delegates explicit repo validation to _validate_repo_name."""
+
+    def test_unique_short_name_resolves(self, monkeypatch):
+        monkeypatch.setattr(
+            "shiori.mcp_server.settings.repos",
+            ["masuda-masuo/shiori", "masuda-masuo/code-sandbox-mcp"],
+        )
+        assert _resolve_repo("code-sandbox-mcp") == "masuda-masuo/code-sandbox-mcp"
+
+    def test_unknown_repo_raises_with_indexed_list(self, monkeypatch):
+        monkeypatch.setattr(
+            "shiori.mcp_server.settings.repos",
+            ["masuda-masuo/shiori", "masuda-masuo/code-sandbox-mcp"],
+        )
+        with pytest.raises(ValueError, match="unknown repo"):
+            _resolve_repo("totally-bogus-repo-xyz")
+
+
+class TestResolveRepoFilter:
+    """Behavior of _resolve_repo_filter (issue #189, search-tool repo filter)."""
+
+    def test_none_passes_through(self, monkeypatch):
+        """None means "no filter, search all repos", unlike _resolve_repo."""
+        monkeypatch.setattr("shiori.mcp_server.settings.repos", ["o/r1", "o/r2"])
+        assert _resolve_repo_filter(None) is None
+
+    def test_short_name_resolves(self, monkeypatch):
+        monkeypatch.setattr(
+            "shiori.mcp_server.settings.repos",
+            ["masuda-masuo/shiori", "masuda-masuo/code-sandbox-mcp"],
+        )
+        assert (
+            _resolve_repo_filter("code-sandbox-mcp")
+            == "masuda-masuo/code-sandbox-mcp"
+        )
+
+    def test_unknown_repo_raises(self, monkeypatch):
+        monkeypatch.setattr("shiori.mcp_server.settings.repos", ["o/r1"])
+        with pytest.raises(ValueError, match="unknown repo"):
+            _resolve_repo_filter("bogus")

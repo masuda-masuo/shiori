@@ -313,3 +313,60 @@ class TestReadIssueNumbers:
         conn.cursor.return_value.__enter__.return_value = cursor
         conn.__enter__.return_value = conn
         return conn
+
+
+class TestReadIssueRepoResolution:
+    """read_issue distinguishes unknown repo vs known-repo-not-indexed (issue #189)."""
+
+    def _mock_conn_with_rows(self, rows: list[tuple]) -> MagicMock:
+        conn = MagicMock()
+        cursor = MagicMock()
+        cursor.fetchall.return_value = rows
+        conn.cursor.return_value.__enter__.return_value = cursor
+        conn.__enter__.return_value = conn
+        return conn
+
+    def test_known_repo_not_indexed_issue_gives_ingest_guidance(self, monkeypatch):
+        """A configured/known repo with 0 rows for the issue still raises the
+        original "not indexed, run ingest" message -- unlike an unknown repo,
+        which is rejected before any DB query even runs."""
+        monkeypatch.setattr(
+            settings, "repos", ["masuda-masuo/shiori", "masuda-masuo/code-sandbox-mcp"]
+        )
+        mock_conn = self._mock_conn_with_rows([])
+        with patch("shiori.mcp_server._conn", return_value=mock_conn):
+            with pytest.raises(ValueError) as exc:
+                read_issue(531, repo="masuda-masuo/shiori")
+        msg = str(exc.value)
+        assert "is not indexed" in msg
+        assert "unknown repo" not in msg
+
+    def test_unknown_repo_raises_before_hitting_db(self, monkeypatch):
+        """An unresolvable repo argument fails fast with the indexed-repo
+        list, and never reaches _read_issue_single / the DB at all."""
+        monkeypatch.setattr(
+            settings, "repos", ["masuda-masuo/shiori", "masuda-masuo/code-sandbox-mcp"]
+        )
+        with patch("shiori.mcp_server._read_issue_single") as mock_single:
+            with pytest.raises(ValueError) as exc:
+                read_issue(531, repo="totally-bogus-repo-xyz")
+        msg = str(exc.value)
+        assert "unknown repo" in msg
+        assert "masuda-masuo/shiori" in msg
+        assert "masuda-masuo/code-sandbox-mcp" in msg
+        mock_single.assert_not_called()
+
+    def test_short_name_resolves_and_reads(self, monkeypatch):
+        """A short name that uniquely matches an indexed repo is accepted
+        (issue #189 completion condition: code-sandbox-mcp -> owner/code-sandbox-mcp)."""
+        monkeypatch.setattr(
+            settings, "repos", ["masuda-masuo/shiori", "masuda-masuo/code-sandbox-mcp"]
+        )
+        rows = [
+            (0, "issue", "Title", "human", False, "open", None, None,
+             "body", "https://github.com/masuda-masuo/code-sandbox-mcp/issues/531", None),
+        ]
+        mock_conn = self._mock_conn_with_rows(rows)
+        with patch("shiori.mcp_server._conn", return_value=mock_conn):
+            result = read_issue(531, repo="code-sandbox-mcp")
+        assert result["repo"] == "masuda-masuo/code-sandbox-mcp"
