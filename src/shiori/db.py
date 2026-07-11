@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 
 import psycopg
+from psycopg import sql
 
 from .config import Settings
 
@@ -17,6 +18,57 @@ log = logging.getLogger(__name__)
 
 def connect(settings: Settings) -> psycopg.Connection:
     return psycopg.connect(settings.database_url, autocommit=False)
+
+
+#: Every table keyed by ``repo``.  ``forget_repo`` (drop one repo) and the
+#: rebuild TRUNCATE (drop them all) both read this list, so a table added to
+#: the schema cannot be remembered by one and forgotten by the other.  Before
+#: this existed, rebuild truncated only 4 of the 6 and left ``pr_changes`` /
+#: ``sync_runs`` behind.
+REPO_SCOPED_TABLES: tuple[str, ...] = (
+    "chunks",
+    "doc_files",
+    "issue_items",
+    "pr_changes",
+    "sync_state",
+    "sync_runs",
+)
+
+
+def truncate_all_repos(conn: psycopg.Connection) -> None:
+    """Discard the whole index and every sync cursor (the ``rebuild`` path)."""
+    with conn.cursor() as cur:
+        cur.execute(
+            sql.SQL("TRUNCATE {}").format(
+                sql.SQL(", ").join(sql.Identifier(t) for t in REPO_SCOPED_TABLES)
+            )
+        )
+
+
+def forget_repo(conn: psycopg.Connection, repo: str) -> dict[str, int]:
+    """Drop every row belonging to *repo*. Returns rows deleted per table.
+
+    Deliberately does **not** check *repo* against the ``SHIORI_REPOS``
+    allowlist: a repo worth forgetting has usually already been dropped from
+    that list (a repository that was renamed, say), so requiring membership
+    would refuse exactly the cases this exists for.
+
+    A table that does not exist yet (fresh DB) counts as 0 rows rather than
+    raising -- there is simply nothing indexed to forget.
+    """
+    deleted: dict[str, int] = {}
+    with conn.cursor() as cur:
+        for table in REPO_SCOPED_TABLES:
+            cur.execute("SELECT to_regclass(%s)", (table,))
+            if cur.fetchone()[0] is None:
+                deleted[table] = 0
+                continue
+            cur.execute(
+                sql.SQL("DELETE FROM {} WHERE repo = %s").format(sql.Identifier(table)),
+                (repo,),
+            )
+            deleted[table] = cur.rowcount
+    return deleted
 
 
 SCHEMA_SQL = """
