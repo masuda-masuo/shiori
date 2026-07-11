@@ -8,6 +8,7 @@ from shiori.db import (
     bulk_insert_chunks,
     create_heavy_indexes,
     drop_heavy_indexes,
+    get_code_chunks,
     get_pr_changes,
     get_pr_head_sha,
     get_sync_runs,
@@ -530,3 +531,31 @@ class TestGetSyncRuns:
         assert info["last_attempt_at"] == last_attempt_at.isoformat()
         assert info["last_error"] == "git fetch failed (exit 128)"
         assert info["consecutive_failures"] == 5
+
+
+class TestGetCodeChunks:
+    """get_code_chunks: API reference reports data retrieval."""
+
+    def _mock_conn(self, rows: list[tuple]):
+        conn = MagicMock()
+        cursor = MagicMock()
+        cursor.fetchall.return_value = rows
+        conn.cursor.return_value.__enter__.return_value = cursor
+        return conn, cursor
+
+    def test_basic_retrieval_excludes_module_gap_chunks(self):
+        """get_code_chunks builds correct SQL query and executes it with filters."""
+        conn, cursor = self._mock_conn([])
+
+        get_code_chunks(conn, "o/r", prog_lang="python", path_prefix="src/")
+
+        sql = cursor.execute.call_args[0][0]
+        params = cursor.execute.call_args[0][1]
+
+        assert "SELECT path, heading_path, line, end_line, content, prog_lang" in sql
+        assert "FROM chunks" in sql
+        assert "WHERE repo = %s AND source_type = 'code' AND content NOT LIKE '[%] (module)%'" in sql
+        assert "AND prog_lang = %s" in sql
+        assert "AND path LIKE %s || '%'" in sql
+        assert "ORDER BY path, line" in sql
+        assert params == ["o/r", "python", "src/"]
