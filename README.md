@@ -102,6 +102,19 @@ docker compose run --rm ingest
 
 MCP クライアントからは `http://localhost:8765/mcp`（streamable HTTP）に接続する。詳細は `docs/guides/セットアップ.md`。
 
+### 索引からリポジトリを外す
+
+`SHIORI_REPOS` から消しただけでは、そのリポジトリの行と clone は索引に残り続ける（検索に出てくる）。`forget` で落とす:
+
+```bash
+docker compose run --rm app python -m shiori forget --repo owner/name
+```
+
+削除した行数をテーブルごとに表示し、ローカルの clone も消す（`--keep-clone` で残せる）。
+`SHIORI_REPOS` に載っている必要はない — リネーム後の旧リポジトリ名など、**すでに一覧から外したもの**を消すためのコマンドなので。
+
+`ingest --rebuild` は全リポジトリの索引を捨てて作り直すため、1つ外すためだけに使うと巻き添えが大きい。
+
 ## ドキュメント構成
 
 - `docs/design/00-基本設計.md` — 全体像と設計方針・決定ログ

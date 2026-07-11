@@ -286,10 +286,7 @@ def _do_sync(
                 if is_bulk:
                     if rebuild:
                         log.warning("rebuild: discarding existing index and sync cursors")
-                        with conn.cursor() as cur:
-                            cur.execute(
-                                "TRUNCATE chunks, doc_files, issue_items, sync_state"
-                            )
+                        db.truncate_all_repos(conn)
                         conn.commit()
                     db.drop_heavy_indexes(conn)
 

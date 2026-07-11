@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
 import time
 
 from . import db
@@ -40,6 +41,61 @@ def _is_bulk_path(conn, rebuild: bool) -> bool:
             return True
         cur.execute("SELECT count(*) FROM chunks")
         return cur.fetchone()[0] == 0
+
+
+def run_forget(
+    repos: list[str],
+    settings: Settings | None = None,
+    keep_clone: bool = False,
+) -> dict[str, dict[str, int]]:
+    """Drop *repos* from the index. Returns rows deleted per repo per table.
+
+    Exists because the only way to remove a stale repo used to be ``--rebuild``,
+    which discards *every* repo and re-indexes from scratch.
+
+    Takes the same advisory lock as ingest: deleting rows underneath a running
+    sync would let that sync re-insert what we just deleted.
+    """
+    settings = settings or load_settings()
+    conn = db.connect(settings)
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT pg_try_advisory_lock(%s)", (SYNC_LOCK_KEY,))
+            row = cur.fetchone()
+            assert row is not None  # a scalar SELECT always yields one row
+            if not row[0]:
+                raise SystemExit("sync is running in another process; try again later")
+
+        result: dict[str, dict[str, int]] = {}
+        for repo in repos:
+            deleted = db.forget_repo(conn, repo)
+            conn.commit()
+            result[repo] = deleted
+            log.info(
+                "forget %s: %d rows deleted (%s)",
+                repo,
+                sum(deleted.values()),
+                ", ".join(f"{t}={n}" for t, n in deleted.items() if n),
+            )
+
+            if keep_clone:
+                continue
+            repo_dir = settings.repo_dir(repo)
+            if os.path.isdir(repo_dir):
+                shutil.rmtree(repo_dir)
+                log.info("forget %s: removed clone %s", repo, repo_dir)
+
+            if repo in settings.repos:
+                log.warning(
+                    "forget %s: still listed in SHIORI_REPOS -- the next sync "
+                    "will index it again",
+                    repo,
+                )
+        return result
+    finally:
+        with conn.cursor() as cur:
+            cur.execute("SELECT pg_advisory_unlock(%s)", (SYNC_LOCK_KEY,))
+        conn.close()
 
 
 def run_ingest(
@@ -96,8 +152,7 @@ def run_ingest(
         if is_bulk:
             if rebuild:
                 log.warning("rebuild: discarding existing index and sync cursors")
-                with conn.cursor() as cur:
-                    cur.execute("TRUNCATE chunks, doc_files, issue_items, sync_state")
+                db.truncate_all_repos(conn)
                 conn.commit()
             db.drop_heavy_indexes(conn)
 
