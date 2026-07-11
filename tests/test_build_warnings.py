@@ -236,3 +236,34 @@ class TestConsecutiveFailuresWarning:
         info = {"age_seconds": 100}
         result = _build_warnings(info, {}, 0, {"docs": "x"})
         assert not any("consecutive sync failures" in w for w in result)
+
+
+# ── Token provider fallback warning (issue #188) ──
+
+
+class TestTokenProviderFallbackWarning:
+    """_build_warnings: mcp_token が anonymous へ静かにフォールバックした場合の警告(issue #188)。"""
+
+    def test_warns_when_fallback_reason_present(self):
+        """token_provider_fallback_reason があるとき警告を出す。"""
+        info = {
+            "age_seconds": 100,
+            "token_provider_fallback_reason": (
+                "mcp-token binary unresolved or mint failed; falling back to anonymous"
+            ),
+        }
+        result = _build_warnings(info, {}, 0, {"docs": "x"})
+        assert any("falling back to anonymous" in w for w in result)
+        assert any("mcp_token" in w for w in result)
+
+    def test_no_warning_when_fallback_reason_absent(self):
+        """token_provider_fallback_reason が None のときは警告なし。"""
+        info = {"age_seconds": 100, "token_provider_fallback_reason": None}
+        result = _build_warnings(info, {}, 0, {"docs": "x"})
+        assert not any("falling back to anonymous" in w for w in result)
+
+    def test_no_warning_when_fallback_reason_key_absent(self):
+        """token_provider_fallback_reason キー自体が無い場合も警告なし。"""
+        info = {"age_seconds": 100}
+        result = _build_warnings(info, {}, 0, {"docs": "x"})
+        assert not any("falling back to anonymous" in w for w in result)

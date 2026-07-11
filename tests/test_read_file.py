@@ -303,3 +303,59 @@ class TestStatusAutoSyncRunning:
         assert repo_info["last_attempt_at"] == "2026-07-10T00:14:15+00:00"
         assert repo_info["consecutive_failures"] == 42
         assert any("42 consecutive sync failures" in w for w in repo_info["warnings"])
+
+
+class TestStatusTokenProvider:
+    """status() の token_provider フィールド(issue #188)。
+
+    build_token_provider() が実際に選んだ provider の .name を返すこと、
+    mcp_token が anonymous へフォールバック中はそれを反映して "anonymous" を
+    返し、対応する警告も出ることを確認する。
+    """
+
+    def _run_status(self, provider_name, fallback_reason):
+        mock_provider = MagicMock()
+        mock_provider.name = provider_name
+        with (
+            patch("shiori.mcp_server._conn"),
+            patch("shiori.mcp_server.settings") as mock_settings,
+            patch("shiori.mcp_server.db.get_sync_runs", return_value={}),
+            patch("shiori.mcp_server.db.get_chunk_counts", return_value={}),
+            patch("shiori.mcp_server.db.get_issue_item_count", return_value=0),
+            patch("shiori.mcp_server.db.get_cursors", return_value={}),
+            patch("shiori.mcp_server.build_token_provider", return_value=mock_provider),
+            patch(
+                "shiori.mcp_server.get_mcp_token_fallback_reason",
+                return_value=fallback_reason,
+            ),
+        ):
+            mock_settings.repos = ["o/r"]
+            mock_settings.sync_interval_seconds = 0
+            return status()
+
+    def test_reports_selected_provider_name(self):
+        """フォールバックが無ければ選ばれた provider 名をそのまま返す。"""
+        result = self._run_status("app", None)
+        assert result["token_provider"] == "app"
+        assert not any("falling back" in w for w in result["repos"]["o/r"]["warnings"])
+
+    def test_reports_anonymous_when_mcp_token_falls_back(self):
+        """mcp_token が観測済みフォールバック理由を持つとき、effective は anonymous になる。"""
+        result = self._run_status(
+            "mcp_token", "mcp-token binary unresolved or mint failed; falling back to anonymous"
+        )
+        assert result["token_provider"] == "anonymous"
+        assert any(
+            "falling back to anonymous" in w for w in result["repos"]["o/r"]["warnings"]
+        )
+
+    def test_no_downgrade_for_non_mcp_token_providers(self):
+        """mcp_token 以外は get_mcp_token_fallback_reason の値を無視する(そもそも対象外)。"""
+        result = self._run_status("static", None)
+        assert result["token_provider"] == "static"
+
+    def test_static_provider_no_warning(self):
+        """フォールバック理由が無いときは警告が付かない。"""
+        result = self._run_status("mcp_token", None)
+        assert result["token_provider"] == "mcp_token"
+        assert not any("falling back" in w for w in result["repos"]["o/r"]["warnings"])
