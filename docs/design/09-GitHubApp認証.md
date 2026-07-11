@@ -36,42 +36,46 @@ MCP サーバーは GitHub に触れない」という前提だったが、issue
    PAT 運用時も `GITHUB_TOKEN` は全サービスに渡す。
 6. **依存追加: `pyjwt[crypto]`**（RS256 署名に cryptography が必要）。
 
-## 実行環境ごとの認証方式（issue #188）
+## 実行環境ごとの認証方式
 
-`McpTokenProvider`（`GITHUB_TOKEN_COMMAND` 経由、あるいは env→PATH→cache→download
-で自動解決する mcp-token モデル。issue #170/#173）は **mcp-launcher の OS
-keystore にホストプロセスとして直接届く環境向け**であり、compose デプロイの
-`app`/`ingest` コンテナ内では前提が崩れる。keystore の D-Bus Secret Service は
-bus オーナー UID しか受け付けないため、コンテナ内では mcp-token バイナリの解決
-自体は成功するが mint（トークン取得）が失敗し、警告ログ1行のまま匿名へ静かに
-フォールバックする（`McpTokenProvider` は元々 anonymous フォールバックを持つ
-設計だが、compose 環境ではそれが常態化してしまう）。
+> **方式選択の規則そのものは [15-トークン供給経路](15-トークン供給経路.md) に集約した。**
+> 本節はその結論を、この設計書のスコープ（provider 実装）から見た要約に留める。
 
-選択規則（一般則）: **credential の消費者がホストプロセスなら keystore/mcp-token
-モデル、消費者がコンテナ内なら鍵/トークンを消費者側に運ぶ（ファイルマウント or
-注入）。** 決定変数はツールの選択ではなく「credential の消費者がどこで動くか」。
+決定変数は2つ: **トークンをどこで消費するか**と、**誰が更新責任を持つか**。
 
-| 実行環境 | 消費者 | 推奨方式 |
+| 実行環境 | 消費者 | 方式 |
 | --- | --- | --- |
-| ネイティブ実行（例: Windows ホストの venv で直接 `python -m shiori serve`） | ホストプロセス | mcp-token モデル（`GITHUB_TOKEN_COMMAND=mcp-token github`）。keystore に直接届く |
-| compose デプロイ（`app` / `ingest`） | コンテナ内プロセス | **GitHub App 秘密鍵ファイル方式**（`GITHUB_APP_ID` / `GITHUB_APP_PRIVATE_KEY_PATH` を `docker-compose.override.yml` の `secrets` で読み取り専用マウント。masuda-masuo/dev-infra#4 / #5 で実運用確定済み） |
-| compose デプロイ（`app` / `ingest`）の代替経路 | コンテナ内プロセス | **TokenCommand の token-file 橋渡し方式**（`scripts/refresh-token.{sh,bat}` がホストで短命トークンを `runtime/github-token` に発行し続け、`docker-compose.yml` が `./runtime` を `/run/shiori:ro` でマウント、`.env` で `GITHUB_TOKEN_COMMAND=cat /run/shiori/github-token` を**明示 opt-in** して読む。App 秘密鍵ファイル方式と並ぶ正規経路として `docker-compose.yml` に配線済み。issue #150/#188/#198） |
+| compose デプロイ（`app` / `ingest`） | コンテナ内プロセス | **GitHub App 秘密鍵ファイル方式**（`GITHUB_APP_ID` / `GITHUB_APP_PRIVATE_KEY_PATH` を `docker-compose.override.yml` の `secrets` で読み取り専用マウント）。秘密鍵がコンテナに入る代わり、消費者自身が mint / 再発行するのでホスト側に可動部が不要。dev-infra#4 / #5 の GCP VM で実運用中 |
+| compose デプロイ（`app` / `ingest`） | コンテナ内プロセス | **token-file 橋渡し方式**（ホストの `scripts/refresh-token.sh` が `mcp-token` で OS keystore から短命トークンを mint して `runtime/github-token` に書き続け、コンテナは `./runtime:/run/shiori:ro` 越しに `GITHUB_TOKEN_COMMAND=cat /run/shiori/github-token` で読む）。秘密鍵はコンテナにもディスクにも入らない代わり、更新タイマーが load-bearing。issue #150/#188/#198 |
+| ネイティブ実行（ホストの venv で直接 `python -m shiori serve`） | ホストプロセス | **TokenCommand で都度 mint**（`GITHUB_TOKEN_COMMAND=mcp-token github`）。keystore に直接届く |
 
-`docker-compose.yml` 本体は token-file 橋渡し方式の配線として `GITHUB_TOKEN_COMMAND` の
-パススルー（既定は空）と `./runtime:/run/shiori:ro` マウントを常時持つが、方式自体は
-`.env` で `GITHUB_TOKEN_COMMAND` を設定したときだけ有効になる**明示 opt-in**。
-無設定の環境（README / セットアップ.md の「公開リポジトリのみなら認証設定なしで OK」の
-標準手順）では従来どおり mcp-token → anonymous フォールバックで動き、この経路の追加に
-よる挙動変化はない。App 秘密鍵ファイル方式を使う場合は `docker-compose.override.yml` で
-`GITHUB_APP_*` を設定すれば `build_token_provider()` の優先順位
-（App > TokenCommand > PAT > 匿名）によりそちらが選ばれる — 両立可能で、排他ではない。
+どちらの compose 方式も**明示設定したときだけ**有効になる。無設定なら匿名で、
+「公開リポジトリのみなら認証設定なしで OK」という README / セットアップ.md の
+標準手順はそのまま成立する。App と TokenCommand を両方設定した場合は
+`build_token_provider()` の優先順位（App > TokenCommand > PAT > 匿名）で App が選ばれる
+— 両立可能で、排他ではない。
 
-この token-file 橋渡し方式は e52ceeb まで main に存在したが、13ecbba（issue #170）で
-McpTokenProvider 一本化のため一度削除され、以後 compose デプロイの認証が壊れていた
-（issue #198 の正体）。issue #198 で復元し、ホスト側変数名を `SHIORI_TOKEN_COMMAND` から
-`GITHUB_TOKEN_COMMAND` に統一した。旧 `.env` で `SHIORI_TOKEN_COMMAND=...` を使っていた
-環境は `GITHUB_TOKEN_COMMAND=...` にリネームすること（しないと未設定扱いになり匿名へ
-フォールバックする）。
+### 撤去した経路: コンテナ内 mint（旧 `McpTokenProvider`）
+
+`McpTokenProvider`（issue #170/#173 で導入。mcp-token バイナリを
+env→PATH→cache→download で自動解決し、プロセス内で mint する）は
+**コンテナ内では原理的に成立しない**。keystore の D-Bus Secret Service は bus オーナー
+UID しか受け付けないため、バイナリの解決自体は成功するが（ただのファイルなので）
+mint が失敗し、**警告ログ1行のまま匿名へ静かにフォールバックする**（issue #188）。
+実際にこれが本番障害を隠した。
+
+ネイティブ実行で同じことがしたければ `GITHUB_TOKEN_COMMAND=mcp-token github`
+（`TokenCommandProvider`）で足りる。**撤去して失うのは「静かに壊れる経路」だけ**なので、
+Linux 一本化と合わせて削除した。優先順位は
+**App > TokenCommand > PAT > 匿名** の4段になり、`anonymous` は「何も設定していない」
+という明示的な終端としてのみ残る。**設定した方式が動かない場合は静かに降格せず
+`RuntimeError` で失敗する**（`record_sync_attempt` 経由で `shiori_status` の `last_error`
+に載る）。原則: **明示設定 = fail loud、無設定 = 匿名**。
+
+なお token-file 橋渡し方式の compose 配線は e52ceeb まで main に存在したが、13ecbba
+（issue #170）で McpTokenProvider 一本化のため一度削除され、以後 compose デプロイの認証が
+壊れていた（issue #198 の正体）。issue #198 で復元し、ホスト側変数名を
+`SHIORI_TOKEN_COMMAND` から `GITHUB_TOKEN_COMMAND` に統一した。
 
 `GITHUB_TOKEN_COMMAND` を明示設定したのに `runtime/github-token` が存在しない/空の場合
 （token-file 運用を opt-in したのに refresh-token が動いていない等）:
@@ -80,20 +84,14 @@ McpTokenProvider 一本化のため一度削除され、以後 compose デプロ
 なければ `RuntimeError("token command failed and no cached token available")` を送出する。
 これは黙って匿名にフォールバックする経路ではなく、`sync_docs`/`sync_issues` 呼び出し時に
 例外として表面化し、`record_sync_attempt(success=False, error=...)` 経由で `shiori_status` の
-`last_error` に載る（issue #192 の可視化と整合）。原則: **明示設定 = fail loud
-（設定したのに動かない状態を隠さない）、無設定 = 従来挙動（匿名で動くものは動き続ける）**。
+`last_error` に載る（issue #192 の可視化と整合）。
 
-コンテナ内での keystore アクセスを正式サポートする案（bus マウント + オーナー
-UID での実行、あるいは mcp-token のファイル keystore フォールバック）も検討した
-が、UID 制約が deployment ごとに異なり汎用解にしにくいため見送った
-（「検討事項 / 未決」参照）。
-
-認証が構成の意図より弱い provider に静かに落ちていないかは `shiori_status` の
-`token_provider` フィールド（実際に選択された provider: `app` / `static` /
-`token_command` / `mcp_token` / `anonymous` / `error`）と、mcp_token がフォールバック中
-であることを示す `warnings` で確認できる。provider 構築自体が失敗する状態
-（例: App 設定の一部欠けによる `ValueError`）でも `shiori_status` は落ちず、
-`token_provider: "error"` + 例外メッセージ入りの warning を返す（issue #193）。
+実際に選択された provider は `shiori_status` の `token_provider` フィールド
+（`app` / `static` / `token_command` / `anonymous` / `error`）で確認できる。
+`anonymous` は常に「何も設定していない」を意味する（静かな降格経路は撤去済み）。
+provider 構築自体が失敗する状態（例: App 設定の一部欠けによる `ValueError`）でも
+`shiori_status` は落ちず、`token_provider: "error"` + 例外メッセージ入りの warning を返す
+（issue #193）。
 
 ## 設定（環境変数）
 
@@ -402,11 +400,15 @@ issue #116 で廃止された `runner` を除く最新の全サービス構成�
   必要になったら `SHIORI_REPOS` の repo ごとに installation を引く map を追加する。
 - MCP サーバー自体の認可（OAuth 2.1）。本書のスコープ外
   （localhost 超えの公開時に別途設計。`基本設計` 未決事項に追加）。
-- コンテナ内での mcp-token/keystore アクセスの正式サポート（issue #188 論点2）。
-  bus マウント + keystore オーナー UID での実行、あるいは mcp-token のファイル
-  keystore フォールバックが候補だが、UID 制約が deployment ごとに異なり汎用解に
-  しにくいため見送り。「実行環境ごとの認証方式」の表（App 秘密鍵ファイル方式）
-  で十分という結論（issue #188）。
+- **on-demand mint socket 方式**（[15-トークン供給経路](15-トークン供給経路.md)）。
+  現行2方式はどちらも「鍵をコンテナに置く」か「更新タイマーを持つ」かのどちらかを
+  強いられている。ホスト側に socket-activated なミント役を置き、コンテナが必要になった
+  瞬間に pull で引く方式なら、両方を同時に外せる。詳細設計/15 が本命の到達点で、
+  本書の provider 群はその移行先に `TokenSocketProvider` を1つ足すだけで済む。
+- コンテナ内から直接 keystore を叩く案（bus マウント + keystore オーナー UID での実行、
+  mcp-token のファイル keystore フォールバック）は**却下**。UID 制約が deployment ごとに
+  異なり汎用解にしにくく、そもそも「コンテナに keystore を見せる」こと自体が境界を
+  壊す。ミント役をホストに置けば同じ効果が境界を壊さずに得られる（詳細設計/15）。
 
 ## 基本設計.md への反映
 

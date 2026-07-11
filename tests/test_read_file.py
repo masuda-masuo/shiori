@@ -311,12 +311,12 @@ class TestStatusAutoSyncRunning:
 class TestStatusTokenProvider:
     """status() の token_provider フィールド(issue #188)。
 
-    build_token_provider() が実際に選んだ provider の .name を返すこと、
-    mcp_token が anonymous へフォールバック中はそれを反映して "anonymous" を
-    返し、対応する警告も出ることを確認する。
+    build_token_provider() が実際に選んだ provider の .name をそのまま返す。
+    「設定した provider が静かに anonymous へ降格する」経路(旧 McpTokenProvider)は
+    撤去済みなので、status が anonymous を返すのは「何も設定していない」ときだけ。
     """
 
-    def _run_status(self, provider_name, fallback_reason):
+    def _run_status(self, provider_name):
         mock_provider = MagicMock()
         mock_provider.name = provider_name
         with (
@@ -327,40 +327,31 @@ class TestStatusTokenProvider:
             patch("shiori.mcp_server.db.get_issue_item_count", return_value=0),
             patch("shiori.mcp_server.db.get_cursors", return_value={}),
             patch("shiori.mcp_server.build_token_provider", return_value=mock_provider),
-            patch(
-                "shiori.mcp_server.get_mcp_token_fallback_reason",
-                return_value=fallback_reason,
-            ),
         ):
             mock_settings.repos = ["o/r"]
             mock_settings.sync_interval_seconds = 0
             return status()
 
     def test_reports_selected_provider_name(self):
-        """フォールバックが無ければ選ばれた provider 名をそのまま返す。"""
-        result = self._run_status("app", None)
+        """選ばれた provider 名をそのまま返す。"""
+        result = self._run_status("app")
         assert result["token_provider"] == "app"
         assert not any("falling back" in w for w in result["repos"]["o/r"]["warnings"])
 
-    def test_reports_anonymous_when_mcp_token_falls_back(self):
-        """mcp_token が観測済みフォールバック理由を持つとき、effective は anonymous になる。"""
-        result = self._run_status(
-            "mcp_token", "mcp-token binary unresolved or mint failed; falling back to anonymous"
-        )
-        assert result["token_provider"] == "anonymous"
-        assert any(
-            "falling back to anonymous" in w for w in result["repos"]["o/r"]["warnings"]
-        )
+    def test_reports_token_command(self):
+        """token-file 橋渡し / ネイティブ mint はどちらも token_command として出る。"""
+        result = self._run_status("token_command")
+        assert result["token_provider"] == "token_command"
 
-    def test_no_downgrade_for_non_mcp_token_providers(self):
-        """mcp_token 以外は get_mcp_token_fallback_reason の値を無視する(そもそも対象外)。"""
-        result = self._run_status("static", None)
-        assert result["token_provider"] == "static"
+    def test_reports_anonymous_only_when_nothing_configured(self):
+        """anonymous は「何も設定していない」終端状態としてのみ現れる。降格経路は無い。"""
+        result = self._run_status("anonymous")
+        assert result["token_provider"] == "anonymous"
+        assert not any("falling back" in w for w in result["repos"]["o/r"]["warnings"])
 
     def test_static_provider_no_warning(self):
-        """フォールバック理由が無いときは警告が付かない。"""
-        result = self._run_status("mcp_token", None)
-        assert result["token_provider"] == "mcp_token"
+        result = self._run_status("static")
+        assert result["token_provider"] == "static"
         assert not any("falling back" in w for w in result["repos"]["o/r"]["warnings"])
 
 
@@ -429,7 +420,6 @@ class TestStatusTokenProviderError:
             patch("shiori.mcp_server.db.get_issue_item_count", return_value=0),
             patch("shiori.mcp_server.db.get_cursors", return_value={}),
             patch("shiori.mcp_server.build_token_provider", return_value=mock_provider),
-            patch("shiori.mcp_server.get_mcp_token_fallback_reason", return_value=None),
         ):
             mock_settings.repos = ["o/r"]
             mock_settings.sync_interval_seconds = 0
@@ -458,7 +448,6 @@ class TestStatusAutoSyncLastError:
             patch("shiori.mcp_server.db.get_issue_item_count", return_value=0),
             patch("shiori.mcp_server.db.get_cursors", return_value={}),
             patch("shiori.mcp_server.build_token_provider", return_value=MagicMock()),
-            patch("shiori.mcp_server.get_mcp_token_fallback_reason", return_value=None),
         ):
             mock_settings.repos = ["o/r"]
             mock_settings.sync_interval_seconds = 10

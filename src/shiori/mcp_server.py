@@ -18,7 +18,7 @@ from mcp.server.fastmcp import FastMCP
 from . import db, search
 from .config import Settings, load_settings
 from .embedding import Embedder
-from .github_auth import build_token_provider, get_mcp_token_fallback_reason
+from .github_auth import build_token_provider
 from .github_sync import (
     ChunkBuffer,
     _git,
@@ -385,8 +385,7 @@ def _do_sync(
 _auto_sync_thread: threading.Thread | None = None
 
 # Module-level: error message from the most recent failed auto-sync loop
-# iteration (issue #196), following the same pattern as
-# github_auth._mcp_token_last_fallback_reason (issue #188). None means the
+# iteration (issue #196). None means the
 # last iteration succeeded (or none has run yet). This is a last-resort
 # signal: it is set even when _do_sync() fails before ever reaching a live
 # DB connection (e.g. the database itself is unreachable), a case
@@ -1530,19 +1529,6 @@ def _build_warnings(
             f"last_error: {info.get('last_error')}"
         )
 
-    # Token provider downgrade: the configured provider (mcp_token) has been
-    # silently falling back to anonymous -- e.g. mint fails because the OS
-    # keystore is unreachable from inside a container (issue #188). A weaker
-    # auth than intended shows up as private-repo sync failures / tighter rate
-    # limits without an obvious cause, so surface it explicitly here.
-    token_provider_fallback_reason = info.get("token_provider_fallback_reason")
-    if token_provider_fallback_reason:
-        warnings.append(
-            "token_provider is configured as mcp_token but is currently falling "
-            f"back to anonymous: {token_provider_fallback_reason}. "
-            "Private repo sync / rate limits may be affected"
-        )
-
     # Token provider construction failure: build_token_provider() raised (e.g.
     # incomplete GitHub App config) instead of returning a provider (issue #193).
     # status() must never fail just because the auth config is broken -- that's
@@ -1679,33 +1665,27 @@ def status() -> dict[str, Any]:
     """Index freshness and health. Per-repo: last_synced_at, age_seconds, route, counts,
     items, cursor, warnings, last_attempt_at, last_error, consecutive_failures.
     Also reports auto_sync_running (actual thread liveness, not just config), and
-    token_provider: the effective auth provider actually selected by
-    build_token_provider() ("app" | "static" | "token_command" | "mcp_token" |
-    "anonymous" | "error"), not just what the config *intends* -- if mcp_token
-    has been silently falling back to anonymous (e.g. mint failing inside a
-    container; issue #188), this reports "anonymous" and a matching warning is
-    added. If build_token_provider() itself raises (e.g. incomplete GitHub App
-    config), this reports "error" with the exception message in a matching
-    warning instead of letting the whole tool call fail (issue #193) -- this
-    tool is exactly what an operator reaches for while diagnosing an auth
-    config problem, so it must never fail for that same reason. Also reports
-    auto_sync_last_error: the error message from the most recent failed
-    auto-sync loop iteration (None once the loop last succeeded), which
-    stays populated even for failures too early for _do_sync() to reach a
-    live DB connection to record through record_sync_attempt (issue #196)."""
+    token_provider: the auth provider actually selected by build_token_provider()
+    ("app" | "static" | "token_command" | "anonymous" | "error"), not just what
+    the config *intends*. "anonymous" here always means "nothing was configured"
+    -- no provider degrades into it silently any more (the mcp_token provider
+    that did was removed; issue #188). A configured provider that cannot produce
+    a token raises, and surfaces per-repo as last_error instead. If
+    build_token_provider() itself raises (e.g. incomplete GitHub App config),
+    this reports "error" with the exception message in a matching warning instead
+    of letting the whole tool call fail (issue #193) -- this tool is exactly what
+    an operator reaches for while diagnosing an auth config problem, so it must
+    never fail for that same reason. Also reports auto_sync_last_error: the error
+    message from the most recent failed auto-sync loop iteration (None once the
+    loop last succeeded), which stays populated even for failures too early for
+    _do_sync() to reach a live DB connection to record through
+    record_sync_attempt (issue #196)."""
     # Cheap: just selects a TokenProvider class based on Settings, no I/O of its
-    # own. The *fallback* state below comes from get_mcp_token_fallback_reason(),
-    # which is fed by real McpTokenProvider usage elsewhere in the process (sync,
-    # pr_diff, read_pr_file) -- status() itself never calls get_token() so it
-    # never triggers a mint attempt just by being polled.
+    # own -- status() never calls get_token(), so polling it never triggers a
+    # mint attempt.
     try:
         provider = build_token_provider(settings)
         token_provider = provider.name
-        token_provider_fallback_reason = (
-            get_mcp_token_fallback_reason() if token_provider == "mcp_token" else None
-        )
-        if token_provider_fallback_reason:
-            token_provider = "anonymous"
         token_provider_error = None
     except Exception as exc:
         # build_token_provider() intentionally raises ValueError when the
@@ -1716,7 +1696,6 @@ def status() -> dict[str, Any]:
         # a regression from #188/#192 which made status() call
         # build_token_provider() unconditionally with no error handling).
         token_provider = "error"
-        token_provider_fallback_reason = None
         token_provider_error = str(exc)
 
     with _conn() as conn:
@@ -1741,12 +1720,10 @@ def status() -> dict[str, Any]:
             info["code_chunks"] = chunk_counts.get("code", 0)
             info["items_in_db"] = items_in_db
             info["cursors"] = cursors
-            # Only used to let _build_warnings render the downgrade/error warning;
-            # not part of this function's per-repo return shape (popped below).
-            info["token_provider_fallback_reason"] = token_provider_fallback_reason
+            # Only used to let _build_warnings render the error warning; not part
+            # of this function's per-repo return shape (popped below).
             info["token_provider_error"] = token_provider_error
             warnings = _build_warnings(info, chunk_counts, items_in_db, cursors)
-            info.pop("token_provider_fallback_reason", None)
             info.pop("token_provider_error", None)
             info["warnings"] = warnings
             repos[repo] = info
@@ -1764,7 +1741,7 @@ def status() -> dict[str, Any]:
         # (issue #196) -- e.g. the database itself being unreachable. None
         # once the most recent iteration has succeeded.
         "auto_sync_last_error": _auto_sync_last_error,
-        # Effective provider actually selected/observed (issue #188).
+        # Provider actually selected by build_token_provider() (issue #188).
         "token_provider": token_provider,
     }
 
