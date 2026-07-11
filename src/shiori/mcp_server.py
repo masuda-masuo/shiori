@@ -18,7 +18,7 @@ from mcp.server.fastmcp import FastMCP
 from . import db, search
 from .config import Settings, load_settings
 from .embedding import Embedder
-from .github_auth import build_token_provider
+from .github_auth import build_token_provider, get_mcp_token_fallback_reason
 from .github_sync import (
     ChunkBuffer,
     _git,
@@ -1365,6 +1365,19 @@ def _build_warnings(
             f"last_error: {info.get('last_error')}"
         )
 
+    # Token provider downgrade: the configured provider (mcp_token) has been
+    # silently falling back to anonymous -- e.g. mint fails because the OS
+    # keystore is unreachable from inside a container (issue #188). A weaker
+    # auth than intended shows up as private-repo sync failures / tighter rate
+    # limits without an obvious cause, so surface it explicitly here.
+    token_provider_fallback_reason = info.get("token_provider_fallback_reason")
+    if token_provider_fallback_reason:
+        warnings.append(
+            "token_provider is configured as mcp_token but is currently falling "
+            f"back to anonymous: {token_provider_fallback_reason}. "
+            "Private repo sync / rate limits may be affected"
+        )
+
     # Structural gap: issue_items exists but chunks are extremely few
     # Include pr_review in comparison (prevent false positives on high-review repos. Issue #35)
     total_issue_chunks = chunk_counts.get("issue", 0) + chunk_counts.get("pr_review", 0)
@@ -1487,7 +1500,25 @@ def issue_links(number: int, repo: str | None = None) -> dict[str, Any]:
 def status() -> dict[str, Any]:
     """Index freshness and health. Per-repo: last_synced_at, age_seconds, route, counts,
     items, cursor, warnings, last_attempt_at, last_error, consecutive_failures.
-    Also reports auto_sync_running (actual thread liveness, not just config)."""
+    Also reports auto_sync_running (actual thread liveness, not just config), and
+    token_provider: the effective auth provider actually selected by
+    build_token_provider() ("app" | "static" | "token_command" | "mcp_token" |
+    "anonymous"), not just what the config *intends* -- if mcp_token has been
+    silently falling back to anonymous (e.g. mint failing inside a container;
+    issue #188), this reports "anonymous" and a matching warning is added."""
+    # Cheap: just selects a TokenProvider class based on Settings, no I/O of its
+    # own. The *fallback* state below comes from get_mcp_token_fallback_reason(),
+    # which is fed by real McpTokenProvider usage elsewhere in the process (sync,
+    # pr_diff, read_pr_file) -- status() itself never calls get_token() so it
+    # never triggers a mint attempt just by being polled.
+    provider = build_token_provider(settings)
+    token_provider = provider.name
+    token_provider_fallback_reason = (
+        get_mcp_token_fallback_reason() if token_provider == "mcp_token" else None
+    )
+    if token_provider_fallback_reason:
+        token_provider = "anonymous"
+
     with _conn() as conn:
         runs = db.get_sync_runs(conn)
         repos: dict[str, Any] = {}
@@ -1510,7 +1541,11 @@ def status() -> dict[str, Any]:
             info["code_chunks"] = chunk_counts.get("code", 0)
             info["items_in_db"] = items_in_db
             info["cursors"] = cursors
+            # Only used to let _build_warnings render the downgrade warning;
+            # not part of this function's per-repo return shape (popped below).
+            info["token_provider_fallback_reason"] = token_provider_fallback_reason
             warnings = _build_warnings(info, chunk_counts, items_in_db, cursors)
+            info.pop("token_provider_fallback_reason", None)
             info["warnings"] = warnings
             repos[repo] = info
     return {
@@ -1522,6 +1557,8 @@ def status() -> dict[str, Any]:
         # reported sync_interval_seconds unconditionally, implying sync was
         # running when it might not have been.
         "auto_sync_running": _auto_sync_thread is not None and _auto_sync_thread.is_alive(),
+        # Effective provider actually selected/observed (issue #188).
+        "token_provider": token_provider,
     }
 
 
