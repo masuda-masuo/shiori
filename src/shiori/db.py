@@ -793,3 +793,41 @@ def find_inbound_refs(
         }
         for r in rows
     ]
+
+
+def get_code_chunks(
+    conn: psycopg.Connection,
+    repo: str,
+    prog_lang: str | None = None,
+    path_prefix: str | None = None,
+) -> list[dict]:
+    """Get code chunks for api_reference report (issue #156)."""
+    query = """
+        SELECT path, heading_path, line, end_line, content, prog_lang
+        FROM chunks
+        WHERE repo = %s AND source_type = 'code'
+    """
+    params = [repo]
+    if prog_lang:
+        query += " AND prog_lang = %s"
+        params.append(prog_lang)
+    if path_prefix:
+        query += " AND path LIKE %s || '%'"
+        params.append(path_prefix)
+    query += " ORDER BY path, line"
+
+    with conn.cursor() as cur:
+        cur.execute(query, params)
+        rows = cur.fetchall()
+
+    return [
+        {
+            "path": r[0],
+            "heading_path": r[1],
+            "line": r[2],
+            "end_line": r[3],
+            "content": r[4],
+            "prog_lang": r[5],
+        }
+        for r in rows
+    ]

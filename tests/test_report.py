@@ -104,9 +104,9 @@ class TestReport:
 
             result = report(template="stats")
 
-        lines = [l.strip() for l in result["markdown"].split("\n")]
-        data_rows = [l for l in lines if l.startswith("|") and "Language" not in l and "---" not in l and "Total" not in l]
-        langs = [l.split("|")[1].strip() for l in data_rows]
+        lines = [line_str.strip() for line_str in result["markdown"].split("\n")]
+        data_rows = [line_str for line_str in lines if line_str.startswith("|") and "Language" not in line_str and "---" not in line_str and "Total" not in line_str]
+        langs = [line_str.split("|")[1].strip() for line_str in data_rows]
         assert langs == ["c", "Python", "Rust"]
 
     def test_repo_path_param(self):
@@ -452,3 +452,101 @@ class TestModuleTree:
 
         assert result["truncated"] is False
         assert "Truncated" not in result["markdown"]
+
+
+
+class TestApiReference:
+    """api_reference template (issue #156)."""
+
+    def test_basic_api_reference(self):
+        """api_reference groups by path and formats code blocks correctly."""
+        dummy_chunks = [
+            {
+                "path": "src/a.py",
+                "heading_path": "a.py",
+                "line": 10,
+                "end_line": 20,
+                "content": "[a.py > (function foo)]\ndef foo():\n    pass",
+                "prog_lang": "python",
+            },
+            {
+                "path": "src/a.py",
+                "heading_path": "a.py",
+                "line": 5,
+                "end_line": 8,
+                "content": "[a.py] (module)\ngap chunk",
+                "prog_lang": "python",
+            },
+            {
+                "path": "src/b.py",
+                "heading_path": "b.py",
+                "line": 1,
+                "end_line": 15,
+                "content": "[b.py > (class Bar)]\nclass Bar:\n    pass",
+                "prog_lang": "python",
+            },
+        ]
+
+        with (
+            patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
+            patch("shiori.mcp_server.os.path.isdir", return_value=True),
+            patch("shiori.mcp_server.os.path.realpath", side_effect=lambda p: p),
+            patch("shiori.mcp_server._conn"),
+            patch("shiori.mcp_server.db.get_code_chunks", return_value=dummy_chunks) as mock_get,
+        ):
+            result = report(template="api_reference", prog_lang="python", path="src/")
+
+        mock_get.assert_called_once_with(
+            mock_get.call_args[0][0],  # conn
+            repo="o/r",
+            prog_lang="python",
+            path_prefix="src/",
+        )
+
+        assert result["repo"] == "o/r"
+        assert result["template"] == "api_reference"
+        assert result["truncated"] is False
+
+        md = result["markdown"]
+        assert "## src/a.py" in md
+        assert "## src/b.py" in md
+        assert "[a.py] (module)" not in md
+
+        expected_a = "L10-L20\n```python\n[a.py > (function foo)]\ndef foo():\n    pass\n```"
+        expected_b = "L1-L15\n```python\n[b.py > (class Bar)]\nclass Bar:\n    pass\n```"
+        assert expected_a in md
+        assert expected_b in md
+
+    def test_max_chars_truncation(self):
+        """api_reference truncates and sets truncated=True when exceeding max_chars."""
+        dummy_chunks = [
+            {
+                "path": "src/a.py",
+                "heading_path": "a.py",
+                "line": 1,
+                "end_line": 5,
+                "content": "[a.py > foo]\nfoo",
+                "prog_lang": "python",
+            },
+            {
+                "path": "src/b.py",
+                "heading_path": "b.py",
+                "line": 1,
+                "end_line": 5,
+                "content": "[b.py > bar]\nbar",
+                "prog_lang": "python",
+            },
+        ]
+
+        with (
+            patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
+            patch("shiori.mcp_server.os.path.isdir", return_value=True),
+            patch("shiori.mcp_server.os.path.realpath", side_effect=lambda p: p),
+            patch("shiori.mcp_server._conn"),
+            patch("shiori.mcp_server.db.get_code_chunks", return_value=dummy_chunks),
+        ):
+            result = report(template="api_reference", max_chars=80)
+
+        assert result["truncated"] is True
+        assert "## src/a.py" in result["markdown"]
+        assert "## src/b.py" not in result["markdown"]
