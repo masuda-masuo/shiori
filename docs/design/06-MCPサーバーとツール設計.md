@@ -17,19 +17,23 @@
 - `shiori_read_pr_file(number, path, range?, repo?)`: PR head のファイル内容を git 薄皮ラッパーで透過的に取得する（issue #81）。`shiori_pr_changes` → `shiori_read_pr_file` の流れが ShioriMCP 内で完結する。
   > **v2 廃止:** MCP ツールとしての `shiori_ingest` は廃止されました。同期は CLI（`python -m shiori ingest`）または自動同期（`SHIORI_SYNC_INTERVAL_SECONDS`）を使用します。allowlist 制約（`SHIORI_REPOS`）と rebuild ガード（`SHIORI_ALLOW_REBUILD`）は CLI 経由でも適用されます。
 - `shiori_grep(pattern, repo?, path?, regex?, ignore_case?, max_results?)`: クローンを ripgrep で直接検索する（issue #146, #151）。Stage-2 検索（`shiori_search`/`shiori_keyword_search` で絞り込んだファイルをさらに行レベルで grep）。`regex=True` が既定（issue #152）。パターンに `[...]`（文字クラス）を含むリテラルを検索する際は `regex=False` を指定する。`repo="*"` で全リポジトリ横断検索が可能。各マッチに `repo` フィールドを含む。クローン不在のリポジトリは `skipped_repos` として応答に明示される。
-- `shiori_status()`: 索引の鮮度と健全性を照会する（issue #22, #31）。`chunks` の source_type 別内訳・`issue_items` 全件数・差分同期カーソル・警告（warnings）を返す。
+- `shiori_status()`: 索引の鮮度と健全性を照会する（issue #22, #31）。repo 毎に `chunks` の source_type 別内訳・`issue_items` 全件数・差分同期カーソル・警告（warnings）に加え、同期試行の記録 `last_attempt_at` / `last_error` / `consecutive_failures`（issue #187）を返す。トップレベルには `auto_sync_running`（auto sync スレッドの実生存。設定値のエコーではない）・`token_provider`（実効 provider。`詳細設計/09` 参照）・`auto_sync_last_error`（auto sync ループの直近エラー。成功でクリア。DB 不達など DB に記録できない失敗でも見える。issue #196）を含む。
 
 検索系には `source_type`（doc / issue / pr_review / code）, `language`, `state` 等のフィルタを持たせる。bot 投稿は原則索引から除外されるが、`SHIORI_INDEX_BOT_LOGINS` 環境変数（GitHub App 名 + `[bot]` 形式のログイン名をカンマ区切りで指定）で allowlist 指定が可能（issue #25）。
 
-### shiori_status の警告（issue #31, #35）
+### shiori_status の警告（issue #31, #35, #187）
 
 `warnings` は以下の異常を自動検出する。警告がない場合も `"warnings": []` を常に返す:
 
 | 条件 | 警告の意味 |
 |---|---|
-| `age_seconds > 86400` | 最終同期から長時間経過。索引が古い可能性 |
+| `age_seconds` が stale 閾値超過 | 最終同期から長時間経過。索引が古い可能性。閾値は auto sync 有効時 `max(sync_interval_seconds * 30, 300秒)`、無効時は固定 24 時間（issue #187） |
+| `consecutive_failures > 0` | 同期が連続失敗中。`last_error` を併記（issue #187） |
+| token provider の降格・構築失敗 | mcp_token が匿名へフォールバック中（issue #188）、または provider 構築自体が失敗（`token_provider: "error"`。issue #193） |
 | `chunks["issue"] + chunks["pr_review"] < items_in_db // 2` | issue_items に比べ検索可能チャンクが極端に少ない。bot 除外や索引欠落の可能性 |
 | sync_state に未登録カテゴリ | 一部カテゴリが未同期。差分同期が必要 |
+
+同期試行の記録（issue #187, #194, #196）: 成功/失敗を問わず `record_sync_attempt` が `last_attempt_at` を更新し、成功で `consecutive_failures` / `last_error` をリセット、失敗でカウントアップ＋エラー保存する。記録は MCP/auto-sync 経路（`_do_sync`。per-repo ループ手前の失敗も全対象 repo に記録）と CLI ingest 経路（`run_ingest`）の両方で行われる。
 
 ## 設計方針
 
