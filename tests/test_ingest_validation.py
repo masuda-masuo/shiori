@@ -575,3 +575,260 @@ class TestDoSyncMidStageFailureRecording:
                 _do_sync()
 
         mock_lock.release.assert_called_once()
+
+
+# ===================================================================
+# _do_sync: per-repo continue on failure, aggregate raise (issue #199)
+# ===================================================================
+
+
+class TestDoSyncPerRepoContinueOnFailure:
+    """diff sync (is_bulk=False) の per-repo ループは1リポジトリの失敗で
+
+    後続リポジトリの試行を止めない。全リポジトリ処理後、失敗が1件でも
+    あれば集約例外を raise する(issue #199)。bulk path (初回一括) は
+    従来どおり最初の失敗で即中断する(issue #199 論点)。
+    """
+
+    def _mock_conn_cm(self):
+        """`with _conn() as conn:` として振る舞うダミーの conn を用意する。"""
+        mock_conn = MagicMock()
+        mock_conn.__enter__.return_value = mock_conn
+        mock_conn.__exit__.return_value = False
+        mock_cursor = MagicMock()
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+        return mock_conn
+
+    def test_second_repo_still_syncs_after_first_fails(self):
+        """1つ目の repo が失敗しても2つ目は同期され、両方の attempt が記録され、
+
+        最後に集約例外が上がる。
+        """
+        mock_conn = self._mock_conn_cm()
+
+        def fake_sync_docs(settings, conn, embedder, repo, provider, buffer=None):
+            if repo == "owner/repo1":
+                raise RuntimeError("boom")
+            return 1
+
+        with (
+            patch("shiori.mcp_server.settings") as mock_settings,
+            patch("shiori.mcp_server._sync_lock") as mock_lock,
+            patch("shiori.mcp_server.build_token_provider", return_value=MagicMock()),
+            patch("shiori.mcp_server._get_embedder", return_value=MagicMock()),
+            patch("shiori.mcp_server._conn", return_value=mock_conn),
+            patch("shiori.mcp_server._is_bulk_path", return_value=False),
+            patch("shiori.mcp_server.db.migrate"),
+            patch("shiori.mcp_server.sync_docs", side_effect=fake_sync_docs),
+            patch("shiori.mcp_server.sync_issues", return_value=2),
+            patch("shiori.mcp_server.sync_code", return_value=3),
+            patch(
+                "shiori.mcp_server.db.record_sync_run",
+                return_value=MagicMock(isoformat=lambda: "2026-01-01T00:00:00+00:00"),
+            ),
+            patch("shiori.mcp_server.db.record_sync_attempt") as mock_record_attempt,
+        ):
+            mock_settings.repos = ["owner/repo1", "owner/repo2"]
+            mock_lock.acquire.return_value = True
+
+            with pytest.raises(RuntimeError, match="owner/repo1"):
+                _do_sync()
+
+        # Both repos got a recorded attempt: repo1 failed, repo2 succeeded --
+        # repo2 was not skipped just because repo1 failed first.
+        mock_record_attempt.assert_any_call(
+            mock_conn, "owner/repo1", success=False, error="boom"
+        )
+        mock_record_attempt.assert_any_call(mock_conn, "owner/repo2", success=True)
+        assert mock_record_attempt.call_count == 2
+        # Only the failing repo triggered a rollback; repo2's own commits
+        # (via record_sync_run / record_sync_attempt) are untouched.
+        mock_conn.rollback.assert_called_once()
+
+    def test_all_success_no_exception(self):
+        """全 repo 成功時は例外なく result が返る。"""
+        mock_conn = self._mock_conn_cm()
+
+        with (
+            patch("shiori.mcp_server.settings") as mock_settings,
+            patch("shiori.mcp_server._sync_lock") as mock_lock,
+            patch("shiori.mcp_server.build_token_provider", return_value=MagicMock()),
+            patch("shiori.mcp_server._get_embedder", return_value=MagicMock()),
+            patch("shiori.mcp_server._conn", return_value=mock_conn),
+            patch("shiori.mcp_server._is_bulk_path", return_value=False),
+            patch("shiori.mcp_server.db.migrate"),
+            patch("shiori.mcp_server.sync_docs", return_value=1),
+            patch("shiori.mcp_server.sync_issues", return_value=2),
+            patch("shiori.mcp_server.sync_code", return_value=3),
+            patch(
+                "shiori.mcp_server.db.record_sync_run",
+                return_value=MagicMock(isoformat=lambda: "2026-01-01T00:00:00+00:00"),
+            ),
+            patch("shiori.mcp_server.db.record_sync_attempt") as mock_record_attempt,
+        ):
+            mock_settings.repos = ["owner/repo1", "owner/repo2"]
+            mock_lock.acquire.return_value = True
+
+            result = _do_sync()
+
+        assert result["status"] == "ok"
+        assert set(result["repos"]) == {"owner/repo1", "owner/repo2"}
+        mock_record_attempt.assert_any_call(mock_conn, "owner/repo1", success=True)
+        mock_record_attempt.assert_any_call(mock_conn, "owner/repo2", success=True)
+        mock_conn.rollback.assert_not_called()
+
+    def test_bulk_path_still_aborts_immediately_on_first_failure(self):
+        """bulk path (初回一括) は #199 の対象外で、従来どおり即中断する。"""
+        mock_conn = self._mock_conn_cm()
+
+        def fake_sync_docs(settings, conn, embedder, repo, provider, buffer=None):
+            if repo == "owner/repo1":
+                raise RuntimeError("boom")
+            return 1
+
+        with (
+            patch("shiori.mcp_server.settings") as mock_settings,
+            patch("shiori.mcp_server._sync_lock") as mock_lock,
+            patch("shiori.mcp_server.build_token_provider", return_value=MagicMock()),
+            patch("shiori.mcp_server._get_embedder", return_value=MagicMock()),
+            patch("shiori.mcp_server._conn", return_value=mock_conn),
+            patch("shiori.mcp_server._is_bulk_path", return_value=True),
+            patch("shiori.mcp_server.db.migrate_light"),
+            patch("shiori.mcp_server.db.drop_heavy_indexes"),
+            patch("shiori.mcp_server.ChunkBuffer", return_value=MagicMock()),
+            patch("shiori.mcp_server.sync_docs", side_effect=fake_sync_docs),
+            patch("shiori.mcp_server.sync_issues", return_value=2),
+            patch("shiori.mcp_server.sync_code", return_value=3),
+            patch("shiori.mcp_server.db.record_sync_attempt") as mock_record_attempt,
+        ):
+            mock_settings.repos = ["owner/repo1", "owner/repo2"]
+            mock_lock.acquire.return_value = True
+
+            with pytest.raises(RuntimeError, match="boom"):
+                _do_sync(rebuild=True)
+
+        # Only the first (failing) repo was attempted; repo2 never ran.
+        mock_record_attempt.assert_called_once_with(
+            mock_conn, "owner/repo1", success=False, error="boom"
+        )
+
+
+# ===================================================================
+# run_ingest (ingest.py): per-repo continue on failure, aggregate raise
+# (issue #199 -- mirrors _do_sync in mcp_server.py)
+# ===================================================================
+
+
+class TestRunIngestPerRepoContinueOnFailure:
+    """diff sync (is_bulk=False) の per-repo ループが1リポジトリの失敗で
+
+    後続リポジトリを止めない、run_ingest 版(issue #199)。
+    """
+
+    def _mock_conn(self):
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_cursor.fetchone.return_value = (True,)
+        mock_cursor.fetchall.return_value = []
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+        return mock_conn
+
+    def test_second_repo_still_syncs_after_first_fails(self):
+        from shiori.ingest import run_ingest
+
+        mock_conn = self._mock_conn()
+        mock_settings = MagicMock()
+        mock_settings.repos = ["owner/repo1", "owner/repo2"]
+
+        def fake_sync_docs(settings, conn, embedder, repo, provider, buffer=None):
+            if repo == "owner/repo1":
+                raise RuntimeError("boom")
+            return 1
+
+        with (
+            patch("shiori.ingest.db.connect", return_value=mock_conn),
+            patch("shiori.ingest.db.migrate"),
+            patch("shiori.ingest.db.migrate_light"),
+            patch("shiori.ingest._is_bulk_path", return_value=False),
+            patch("shiori.ingest.build_token_provider", return_value=MagicMock()),
+            patch("shiori.ingest.Embedder", return_value=MagicMock()),
+            patch("shiori.ingest.sync_docs", side_effect=fake_sync_docs),
+            patch("shiori.ingest.sync_issues", return_value=2),
+            patch("shiori.ingest.sync_code", return_value=3),
+            patch(
+                "shiori.ingest.db.record_sync_run",
+                return_value=MagicMock(isoformat=lambda: "2026-01-01T00:00:00+00:00"),
+            ),
+            patch("shiori.ingest.db.record_sync_attempt") as mock_record_attempt,
+        ):
+            with pytest.raises(RuntimeError, match="owner/repo1"):
+                run_ingest(settings=mock_settings)
+
+        mock_record_attempt.assert_any_call(
+            mock_conn, "owner/repo1", success=False, error="boom"
+        )
+        mock_record_attempt.assert_any_call(mock_conn, "owner/repo2", success=True)
+        assert mock_record_attempt.call_count == 2
+        mock_conn.rollback.assert_called_once()
+
+    def test_all_success_no_exception(self):
+        from shiori.ingest import run_ingest
+
+        mock_conn = self._mock_conn()
+        mock_settings = MagicMock()
+        mock_settings.repos = ["owner/repo1", "owner/repo2"]
+
+        with (
+            patch("shiori.ingest.db.connect", return_value=mock_conn),
+            patch("shiori.ingest.db.migrate"),
+            patch("shiori.ingest.db.migrate_light"),
+            patch("shiori.ingest._is_bulk_path", return_value=False),
+            patch("shiori.ingest.build_token_provider", return_value=MagicMock()),
+            patch("shiori.ingest.Embedder", return_value=MagicMock()),
+            patch("shiori.ingest.sync_docs", return_value=1),
+            patch("shiori.ingest.sync_issues", return_value=2),
+            patch("shiori.ingest.sync_code", return_value=3),
+            patch(
+                "shiori.ingest.db.record_sync_run",
+                return_value=MagicMock(isoformat=lambda: "2026-01-01T00:00:00+00:00"),
+            ),
+            patch("shiori.ingest.db.record_sync_attempt") as mock_record_attempt,
+        ):
+            run_ingest(settings=mock_settings)  # must not raise
+
+        mock_record_attempt.assert_any_call(mock_conn, "owner/repo1", success=True)
+        mock_record_attempt.assert_any_call(mock_conn, "owner/repo2", success=True)
+        mock_conn.rollback.assert_not_called()
+
+    def test_bulk_path_still_aborts_immediately_on_first_failure(self):
+        from shiori.ingest import run_ingest
+
+        mock_conn = self._mock_conn()
+        mock_settings = MagicMock()
+        mock_settings.repos = ["owner/repo1", "owner/repo2"]
+
+        def fake_sync_docs(settings, conn, embedder, repo, provider, buffer=None):
+            if repo == "owner/repo1":
+                raise RuntimeError("boom")
+            return 1
+
+        with (
+            patch("shiori.ingest.db.connect", return_value=mock_conn),
+            patch("shiori.ingest.db.migrate"),
+            patch("shiori.ingest.db.migrate_light"),
+            patch("shiori.ingest._is_bulk_path", return_value=True),
+            patch("shiori.ingest.db.drop_heavy_indexes"),
+            patch("shiori.ingest.ChunkBuffer", return_value=MagicMock()),
+            patch("shiori.ingest.build_token_provider", return_value=MagicMock()),
+            patch("shiori.ingest.Embedder", return_value=MagicMock()),
+            patch("shiori.ingest.sync_docs", side_effect=fake_sync_docs),
+            patch("shiori.ingest.sync_issues", return_value=2),
+            patch("shiori.ingest.sync_code", return_value=3),
+            patch("shiori.ingest.db.record_sync_attempt") as mock_record_attempt,
+        ):
+            with pytest.raises(RuntimeError, match="boom"):
+                run_ingest(settings=mock_settings, rebuild=True)
+
+        mock_record_attempt.assert_called_once_with(
+            mock_conn, "owner/repo1", success=False, error="boom"
+        )
