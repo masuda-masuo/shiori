@@ -60,7 +60,9 @@ def forget_repo(conn: psycopg.Connection, repo: str) -> dict[str, int]:
     with conn.cursor() as cur:
         for table in REPO_SCOPED_TABLES:
             cur.execute("SELECT to_regclass(%s)", (table,))
-            if cur.fetchone()[0] is None:
+            row = cur.fetchone()
+            assert row is not None  # a scalar SELECT always yields one row
+            if row[0] is None:
                 deleted[table] = 0
                 continue
             cur.execute(

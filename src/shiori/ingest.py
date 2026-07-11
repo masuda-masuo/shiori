@@ -61,7 +61,9 @@ def run_forget(
     try:
         with conn.cursor() as cur:
             cur.execute("SELECT pg_try_advisory_lock(%s)", (SYNC_LOCK_KEY,))
-            if not cur.fetchone()[0]:
+            row = cur.fetchone()
+            assert row is not None  # a scalar SELECT always yields one row
+            if not row[0]:
                 raise SystemExit("sync is running in another process; try again later")
 
         result: dict[str, dict[str, int]] = {}
