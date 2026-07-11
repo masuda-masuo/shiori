@@ -255,40 +255,50 @@ def _do_sync(
                     buffer = ChunkBuffer(conn, embedder, batch_size=_BULK_BUFFER_SIZE)
 
                 for repo in targets:
-                    n_docs = sync_docs(
-                        settings, conn, embedder, repo, provider,
-                        buffer=buffer if is_bulk else None,
-                    )
-                    if is_bulk:
-                        buffer.flush()
-                        conn.commit()  # Commit metadata
-                    n_items = sync_issues(
-                        settings, conn, embedder, repo, provider,
-                        buffer=buffer if is_bulk else None,
-                    )
-                    if is_bulk:
-                        buffer.flush()
-                        conn.commit()  # Commit metadata
-                    n_code = sync_code(
-                        settings, conn, embedder, repo, provider,
-                        buffer=buffer if is_bulk else None,
-                    )
-                    if is_bulk:
-                        buffer.flush()
-                        conn.commit()  # Commit metadata
-                    finished_at = db.record_sync_run(
-                        conn, repo, route, n_docs, n_items, n_code
-                    )
-                    result["repos"][repo] = {
-                        "docs_updated": n_docs,
-                        "issues_indexed": n_items,
-                        "code_added": n_code,
-                        "synced_at": finished_at.isoformat(),
-                    }
-                    log.info(
-                        "synced %s: docs=%d issues=%d code=%d (route=%s)",
-                        repo, n_docs, n_items, n_code, route,
-                    )
+                    try:
+                        n_docs = sync_docs(
+                            settings, conn, embedder, repo, provider,
+                            buffer=buffer if is_bulk else None,
+                        )
+                        if is_bulk:
+                            buffer.flush()
+                            conn.commit()  # Commit metadata
+                        n_items = sync_issues(
+                            settings, conn, embedder, repo, provider,
+                            buffer=buffer if is_bulk else None,
+                        )
+                        if is_bulk:
+                            buffer.flush()
+                            conn.commit()  # Commit metadata
+                        n_code = sync_code(
+                            settings, conn, embedder, repo, provider,
+                            buffer=buffer if is_bulk else None,
+                        )
+                        if is_bulk:
+                            buffer.flush()
+                            conn.commit()  # Commit metadata
+                        finished_at = db.record_sync_run(
+                            conn, repo, route, n_docs, n_items, n_code
+                        )
+                        db.record_sync_attempt(conn, repo, success=True)
+                        result["repos"][repo] = {
+                            "docs_updated": n_docs,
+                            "issues_indexed": n_items,
+                            "code_added": n_code,
+                            "synced_at": finished_at.isoformat(),
+                        }
+                        log.info(
+                            "synced %s: docs=%d issues=%d code=%d (route=%s)",
+                            repo, n_docs, n_items, n_code, route,
+                        )
+                    except Exception as exc:
+                        # Record the failed attempt so shiori_status can report it
+                        # (issue #187), even though _do_sync still re-raises below
+                        # to preserve existing caller-facing error behavior (ingest()
+                        # surfaces the error; _auto_sync_loop logs it).
+                        conn.rollback()
+                        db.record_sync_attempt(conn, repo, success=False, error=str(exc))
+                        raise
 
                 # --- Bulk path: create heavy indexes in batch (issue #72) ---
                 if is_bulk:
@@ -300,6 +310,13 @@ def _do_sync(
         return result
     finally:
         _sync_lock.release()
+
+
+# Handle to the running auto-sync thread, set by run() (issue #187). Lets
+# shiori_status report whether the loop is actually alive instead of just
+# echoing the sync_interval_seconds config value, which stays the same even
+# if the thread was never started or has died.
+_auto_sync_thread: threading.Thread | None = None
 
 
 def _auto_sync_loop(interval: int) -> None:
@@ -1376,8 +1393,34 @@ def ingest(rebuild: bool = False, repo: str | None = None) -> dict[str, Any]:
     return _do_sync(repos=[repo] if repo else None, rebuild=rebuild, route="mcp")
 
 
-_STALE_SECONDS = 86400  # 24 hours
+_STALE_SECONDS = 86400  # 24 hours; used when auto sync is disabled (sync_interval_seconds <= 0)
+
+# When auto sync is enabled, the stale threshold scales with the configured
+# interval instead of the fixed 24h window above (issue #187): a fixed window
+# let a completely dead auto-sync loop look "healthy" for up to a day even
+# when it was supposed to run every 10 seconds. _STALE_INTERVAL_MULTIPLIER *
+# sync_interval_seconds, floored at _STALE_SECONDS_FLOOR to avoid flapping
+# warnings on very short intervals.
+_STALE_INTERVAL_MULTIPLIER = 30
+_STALE_SECONDS_FLOOR = 300  # 5 minutes
+
 _LARGE_FILE_THRESHOLD = 500  # Show range hint for files exceeding this line count
+
+
+def _stale_threshold_seconds() -> int:
+    """Derive the index staleness threshold from the auto-sync interval (issue #187).
+
+    Auto sync enabled (sync_interval_seconds > 0): threshold scales with the
+    interval so a dead loop is flagged promptly instead of hiding behind a
+    fixed 24h window. Auto sync disabled: keep the original fixed 24h window,
+    since there is no interval to derive a threshold from.
+    """
+    if settings.sync_interval_seconds > 0:
+        return max(
+            settings.sync_interval_seconds * _STALE_INTERVAL_MULTIPLIER,
+            _STALE_SECONDS_FLOOR,
+        )
+    return _STALE_SECONDS
 
 
 def _build_warnings(
@@ -1391,10 +1434,21 @@ def _build_warnings(
 
     # Freshness: long time since last sync
     age = info.get("age_seconds")
-    if age is not None and age > _STALE_SECONDS:
+    threshold = _stale_threshold_seconds()
+    if age is not None and age > threshold:
         hours = age // 3600
         warnings.append(
-            f"{hours} hours since last sync. Index may be stale"
+            f"{hours} hours since last sync (threshold {threshold}s). Index may be stale"
+        )
+
+    # Attempt tracking: consecutive failures mean the loop is running but
+    # dying every time, which the freshness check above may not catch yet
+    # (issue #187).
+    consecutive_failures = info.get("consecutive_failures") or 0
+    if consecutive_failures > 0:
+        warnings.append(
+            f"{consecutive_failures} consecutive sync failures. "
+            f"last_error: {info.get('last_error')}"
         )
 
     # Structural gap: issue_items exists but chunks are extremely few
@@ -1520,7 +1574,9 @@ def issue_links(number: int, repo: str | None = None) -> dict[str, Any]:
 
 @mcp.tool(name="shiori_status")
 def status() -> dict[str, Any]:
-    """Index freshness and health. Per-repo: last_synced_at, age_seconds, route, counts, items, cursor, warnings."""
+    """Index freshness and health. Per-repo: last_synced_at, age_seconds, route, counts,
+    items, cursor, warnings, last_attempt_at, last_error, consecutive_failures.
+    Also reports auto_sync_running (actual thread liveness, not just config)."""
     with _conn() as conn:
         runs = db.get_sync_runs(conn)
         repos: dict[str, Any] = {}
@@ -1532,6 +1588,9 @@ def status() -> dict[str, Any]:
                 "docs_updated": None,
                 "issues_indexed": None,
                 "code_added": None,
+                "last_attempt_at": None,
+                "last_error": None,
+                "consecutive_failures": 0,
             }
             chunk_counts = db.get_chunk_counts(conn, repo)
             items_in_db = db.get_issue_item_count(conn, repo)
@@ -1546,18 +1605,26 @@ def status() -> dict[str, Any]:
     return {
         "repos": repos,
         "sync_interval_seconds": settings.sync_interval_seconds,
+        # Actual thread liveness (issue #187), not the config value: a server
+        # that never started the loop (or whose loop died some other way that
+        # doesn't raise inside _auto_sync_loop's own try/except) previously
+        # reported sync_interval_seconds unconditionally, implying sync was
+        # running when it might not have been.
+        "auto_sync_running": _auto_sync_thread is not None and _auto_sync_thread.is_alive(),
     }
 
 
 def run(transport: str = "streamable-http") -> None:
+    global _auto_sync_thread
     with _conn() as conn:
         db.migrate(conn, settings)
     if settings.sync_interval_seconds > 0:
-        threading.Thread(
+        _auto_sync_thread = threading.Thread(
             target=_auto_sync_loop,
             args=(settings.sync_interval_seconds,),
             daemon=True,
-        ).start()
+        )
+        _auto_sync_thread.start()
         log.info("auto sync enabled: every %ds", settings.sync_interval_seconds)
     log.info("shiori MCP server starting (%s)", transport)
     mcp.run(transport=transport)

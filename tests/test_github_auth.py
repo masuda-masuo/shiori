@@ -66,6 +66,24 @@ def test_provider_static(clean_env):
     assert p.get_token() == "ghp_xxx"
 
 
+def test_provider_static_ghp_does_not_warn(clean_env, caplog):
+    """通常の PAT (ghp_) では警告を出さない。"""
+    clean_env.setenv("GITHUB_TOKEN", "ghp_xxx")
+    with caplog.at_level("WARNING"):
+        build_token_provider(Settings())
+    assert not any("ghs_" in r.message for r in caplog.records)
+
+
+def test_provider_static_ghs_token_warns(clean_env, caplog):
+    """GITHUB_TOKEN が ghs_ (1時間で失効するインストールトークン) の場合は起動時に警告する(issue #187)。"""
+    clean_env.setenv("GITHUB_TOKEN", "ghs_shortlived123")
+    with caplog.at_level("WARNING"):
+        p = build_token_provider(Settings())
+    assert isinstance(p, StaticTokenProvider)
+    assert any("ghs_" in r.message for r in caplog.records)
+    assert any("expires" in r.message for r in caplog.records)
+
+
 def test_provider_app(clean_env, rsa_pem):
     clean_env.setenv("GITHUB_APP_ID", "123")
     clean_env.setenv("GITHUB_APP_INSTALLATION_ID", "456")
