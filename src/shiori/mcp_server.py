@@ -196,6 +196,28 @@ def _is_bulk_path(conn, rebuild: bool) -> bool:
         return cur.fetchone()[0] == 0
 
 
+def _record_pre_loop_sync_failure(targets: list[str], error: str) -> None:
+    """Best-effort record of a sync failure that happened before any
+    repo-scoped work started -- token provider construction, embedder
+    creation (issue #196; #195 is the concrete case that exposed this: a
+    missing embedding dependency raises out of _get_embedder() before the
+    per-repo loop's own except ever runs, so sync_runs stays silent even
+    though the sync is, in effect, failing for every configured repo).
+
+    Opens its own short-lived connection since the caller may not have one
+    yet at this point in _do_sync(). Swallows its own errors -- if the DB
+    itself is unreachable, this is a no-op and the caller's original
+    exception still propagates unchanged (that case is instead covered by
+    the module-level _auto_sync_last_error state set by _auto_sync_loop).
+    """
+    try:
+        with _conn() as conn:
+            for repo in targets:
+                db.record_sync_attempt(conn, repo, success=False, error=error)
+    except Exception:
+        log.exception("failed to record pre-loop sync failure for %s", targets)
+
+
 def _do_sync(
     repos: list[str] | None = None,
     rebuild: bool = False,
@@ -219,24 +241,44 @@ def _do_sync(
         targets = repos or settings.repos
         if not targets:
             return {"status": "error", "reason": "SHIORI_REPOS not set"}
-        provider = build_token_provider(settings)
-        embedder = _get_embedder()
+        try:
+            provider = build_token_provider(settings)
+            embedder = _get_embedder()
+        except Exception as exc:
+            # Failures here (e.g. incomplete GitHub App config -- same root
+            # cause as #193; or a missing embedding dependency -- #195) happen
+            # before any repo-scoped work starts, so the per-repo except below
+            # never runs and sync_runs stays silent even though every target
+            # repo is, in effect, failing right now (issue #196).
+            _record_pre_loop_sync_failure(targets, str(exc))
+            raise
         result: dict[str, Any] = {"status": "ok", "repos": {}}
         with _conn() as conn:
-            # --- Bulk path detection (handles fresh DB. Issue #72) ---
-            is_bulk = _is_bulk_path(conn, rebuild)
+            try:
+                # --- Bulk path detection (handles fresh DB. Issue #72) ---
+                is_bulk = _is_bulk_path(conn, rebuild)
 
-            # --- Schema prep: migrate_light is idempotent, safe outside lock ---
-            if is_bulk:
-                log.info("bulk path detected (rebuild=%s), using light schema + deferred indexes", rebuild)
-                db.migrate_light(conn, settings)
-            else:
-                db.migrate(conn, settings)
+                # --- Schema prep: migrate_light is idempotent, safe outside lock ---
+                if is_bulk:
+                    log.info("bulk path detected (rebuild=%s), using light schema + deferred indexes", rebuild)
+                    db.migrate_light(conn, settings)
+                else:
+                    db.migrate(conn, settings)
 
-            # --- Cross-process mutex: advisory lock ---
-            with conn.cursor() as cur:
-                cur.execute("SELECT pg_try_advisory_lock(%s)", (SYNC_LOCK_KEY,))
-                acquired = cur.fetchone()[0]
+                # --- Cross-process mutex: advisory lock ---
+                with conn.cursor() as cur:
+                    cur.execute("SELECT pg_try_advisory_lock(%s)", (SYNC_LOCK_KEY,))
+                    acquired = cur.fetchone()[0]
+            except Exception as exc:
+                # Same rationale as the pre-loop try/except above: a failure in
+                # bulk-path detection, migration, or lock acquisition is not
+                # yet inside the per-repo loop's own except (issue #196). This
+                # one has a live conn, so record directly instead of opening a
+                # throwaway one.
+                conn.rollback()
+                for repo in targets:
+                    db.record_sync_attempt(conn, repo, success=False, error=str(exc))
+                raise
             if not acquired:
                 return {"status": "skipped", "reason": "sync already running in another process"}
             try:
@@ -318,14 +360,27 @@ def _do_sync(
 # if the thread was never started or has died.
 _auto_sync_thread: threading.Thread | None = None
 
+# Module-level: error message from the most recent failed auto-sync loop
+# iteration (issue #196), following the same pattern as
+# github_auth._mcp_token_last_fallback_reason (issue #188). None means the
+# last iteration succeeded (or none has run yet). This is a last-resort
+# signal: it is set even when _do_sync() fails before ever reaching a live
+# DB connection (e.g. the database itself is unreachable), a case
+# record_sync_attempt cannot cover no matter where it is called from, since
+# it always needs a connection to write through.
+_auto_sync_last_error: str | None = None
+
 
 def _auto_sync_loop(interval: int) -> None:
+    global _auto_sync_last_error
     while True:
         time.sleep(interval)
         try:
             log.info("auto sync: %s", _do_sync(route="auto"))
-        except Exception:
+            _auto_sync_last_error = None
+        except Exception as exc:
             log.exception("auto sync failed")
+            _auto_sync_last_error = str(exc)
 
 
 # ── _walk_code_files: collect code files ──
@@ -1609,7 +1664,11 @@ def status() -> dict[str, Any]:
     config), this reports "error" with the exception message in a matching
     warning instead of letting the whole tool call fail (issue #193) -- this
     tool is exactly what an operator reaches for while diagnosing an auth
-    config problem, so it must never fail for that same reason."""
+    config problem, so it must never fail for that same reason. Also reports
+    auto_sync_last_error: the error message from the most recent failed
+    auto-sync loop iteration (None once the loop last succeeded), which
+    stays populated even for failures too early for _do_sync() to reach a
+    live DB connection to record through record_sync_attempt (issue #196)."""
     # Cheap: just selects a TokenProvider class based on Settings, no I/O of its
     # own. The *fallback* state below comes from get_mcp_token_fallback_reason(),
     # which is fed by real McpTokenProvider usage elsewhere in the process (sync,
@@ -1676,6 +1735,11 @@ def status() -> dict[str, Any]:
         # reported sync_interval_seconds unconditionally, implying sync was
         # running when it might not have been.
         "auto_sync_running": _auto_sync_thread is not None and _auto_sync_thread.is_alive(),
+        # Last-resort signal for auto-sync failures that happen so early
+        # _do_sync() never reaches a live DB connection to record through
+        # (issue #196) -- e.g. the database itself being unreachable. None
+        # once the most recent iteration has succeeded.
+        "auto_sync_last_error": _auto_sync_last_error,
         # Effective provider actually selected/observed (issue #188).
         "token_provider": token_provider,
     }
