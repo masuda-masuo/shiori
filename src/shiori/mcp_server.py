@@ -1275,13 +1275,19 @@ def report(
     raise AssertionError("Unreachable template code path")
 
 
-def _report_api_reference(
+def _api_reference_data(
     target_repo: str,
     path_prefix: str | None = None,
     prog_lang: str | None = None,
-    max_chars: int = 50000,
 ) -> dict[str, Any]:
-    """Generate API reference report (issue #156)."""
+    """Fetch and structure API reference data from code chunks (issue #156).
+
+    Returns dict with "entries" (list of dicts with path/line/end_line/
+    content/prog_lang, grouped by path) and "columns" metadata.
+    Module gap chunks are filtered out.  The structured data can be
+    rendered to Markdown via _api_reference_to_markdown() or consumed
+    directly by dashboards.
+    """
     with _conn() as conn:
         chunks = db.get_code_chunks(
             conn,
@@ -1290,25 +1296,48 @@ def _report_api_reference(
             path_prefix=path_prefix,
         )
 
-    markdown_lines: list[str] = []
-    current_length = 0
-    truncated = False
-    current_path = None
-
+    entries: list[dict[str, Any]] = []
     for chunk in chunks:
         content = chunk["content"]
         first_line = content.split("\n")[0] if content else ""
         if first_line.startswith("[") and first_line.endswith("(module)"):
             continue
+        entries.append({
+            "path": chunk["path"],
+            "line": chunk["line"],
+            "end_line": chunk["end_line"],
+            "content": content,
+            "prog_lang": chunk.get("prog_lang") or "",
+        })
 
-        path = chunk["path"]
+    return {
+        "columns": ["path", "line", "end_line", "content", "prog_lang"],
+        "entries": entries,
+    }
+
+
+def _api_reference_to_markdown(
+    data: dict[str, Any],
+    max_chars: int = 50000,
+) -> dict[str, Any]:
+    """Render structured API reference data as Markdown.
+
+    Returns dict with "markdown" (str) and "truncated" (bool).
+    """
+    markdown_lines: list[str] = []
+    current_length = 0
+    truncated = False
+    current_path = None
+
+    for entry in data["entries"]:
+        path = entry["path"]
         path_header = ""
         if path != current_path:
             path_header = f"## {path}\n\n"
 
-        line_range = f"L{chunk['line']}-L{chunk['end_line']}"
-        lang = chunk.get("prog_lang") or ""
-        chunk_md = f"{line_range}\n```{lang}\n{content}\n```\n\n"
+        line_range = f"L{entry['line']}-L{entry['end_line']}"
+        lang = entry["prog_lang"]
+        chunk_md = f"{line_range}\n```{lang}\n{entry['content']}\n```\n\n"
 
         added_md = path_header + chunk_md
 
@@ -1326,8 +1355,27 @@ def _report_api_reference(
     }
 
 
-def _report_stats(target_path: str) -> str:
-    """Run tokei and format output as a Markdown table."""
+def _report_api_reference(
+    target_repo: str,
+    path_prefix: str | None = None,
+    prog_lang: str | None = None,
+    max_chars: int = 50000,
+) -> dict[str, Any]:
+    """Generate API reference report (issue #156)."""
+    data = _api_reference_data(
+        target_repo, path_prefix=path_prefix, prog_lang=prog_lang,
+    )
+    return _api_reference_to_markdown(data, max_chars=max_chars)
+
+
+def _stats_data(target_path: str) -> dict[str, Any]:
+    """Run tokei and return structured statistics data.
+
+    Returns dict with "rows" (list of dicts with language/files/code/comments/blanks),
+    "total" (dict with files/code/comments/blanks), and "columns" metadata.
+    The structured data can be consumed directly by dashboards or rendered
+    to Markdown via _stats_to_markdown().
+    """
     try:
         result = subprocess.run(
             ["tokei", "--output", "json", target_path],
@@ -1353,7 +1401,7 @@ def _report_stats(target_path: str) -> str:
         key=lambda k: k.lower(),
     )
 
-    rows: list[str] = []
+    rows: list[dict[str, Any]] = []
     total_files = 0
 
     for lang in sorted_langs:
@@ -1363,33 +1411,64 @@ def _report_stats(target_path: str) -> str:
         comments = info.get("comments", 0)
         blanks = info.get("blanks", 0)
         total_files += n_files
+        rows.append({
+            "language": lang,
+            "files": n_files,
+            "code": code,
+            "comments": comments,
+            "blanks": blanks,
+        })
 
-        rows.append(
-            f"| {lang} | {n_files} | {code} | {comments} | {blanks} |"
+    total_info = data.get("Total", {})
+    return {
+        "columns": ["language", "files", "code", "comments", "blanks"],
+        "rows": rows,
+        "total": {
+            "files": total_files,
+            "code": total_info.get("code", 0),
+            "comments": total_info.get("comments", 0),
+            "blanks": total_info.get("blanks", 0),
+        },
+    }
+
+
+def _stats_to_markdown(stats: dict[str, Any]) -> str:
+    """Render structured stats data as a Markdown table."""
+    md_rows: list[str] = []
+    for r in stats["rows"]:
+        md_rows.append(
+            f"| {r['language']} | {r['files']} | {r['code']} | {r['comments']} | {r['blanks']} |"
         )
 
-    total = data.get("Total", {})
+    t = stats["total"]
     header = "| Language | Files | Code | Comments | Blanks |"
     sep = "| --- | --- | --- | --- | --- |"
     total_row = (
-        f"| **Total** | **{total_files}** | "
-        f"**{total.get('code', 0)}** | **{total.get('comments', 0)}** | "
-        f"**{total.get('blanks', 0)}** |"
+        f"| **Total** | **{t['files']}** | "
+        f"**{t['code']}** | **{t['comments']}** | "
+        f"**{t['blanks']}** |"
     )
 
-    return "\n".join([header, sep] + rows + [total_row])
+    return "\n".join([header, sep] + md_rows + [total_row])
 
 
-def _report_symbol_index(
+def _report_stats(target_path: str) -> str:
+    """Run tokei and format output as a Markdown table."""
+    return _stats_to_markdown(_stats_data(target_path))
+
+
+def _symbol_index_data(
     target_path: str,
     base: str,
     kind: str | None = None,
     public_only: bool = False,
     max_results: int = 500,
 ) -> dict[str, Any]:
-    """Run universal-ctags and format output as a Markdown table.
+    """Run universal-ctags and return structured symbol data.
 
-    Returns dict with "markdown" (str) and "truncated" (bool).
+    Returns dict with "columns", "rows" (list of dicts with name/kind/
+    access/path/line kept separate for downstream linking), "truncated",
+    and "total".
     """
     symbols = _run_ctags(target_path, base)
 
@@ -1408,24 +1487,60 @@ def _report_symbol_index(
     truncated = total > max_results
     shown = symbols[:max_results]
 
-    rows: list[str] = []
+    rows: list[dict[str, Any]] = []
     for s in shown:
-        visibility = s["access"] if s["access"] else ""
-        rows.append(
-            f"| {s['name']} | {s['kind']} | {visibility} | {s['path']}:{s['line']} |"
-        )
-
-    header = "| symbol | kind | visibility | location |"
-    sep = "| --- | --- | --- | --- |"
-
-    parts: list[str] = [header, sep] + rows
-    if truncated:
-        parts.append("")
-        parts.append(f"*Truncated: showing {max_results} of {total} symbols.*")
+        rows.append({
+            "name": s["name"],
+            "kind": s["kind"],
+            "access": s["access"] if s["access"] else "",
+            "path": s["path"],
+            "line": s["line"],
+        })
 
     return {
-        "markdown": "\n".join(parts),
+        "columns": ["name", "kind", "access", "path", "line"],
+        "rows": rows,
         "truncated": truncated,
+        "total": total,
+    }
+
+
+def _symbol_index_to_markdown(data: dict[str, Any]) -> str:
+    """Render structured symbol index data as a Markdown table."""
+    parts: list[str] = [
+        "| symbol | kind | visibility | location |",
+        "| --- | --- | --- | --- |",
+    ]
+    for r in data["rows"]:
+        parts.append(
+            f"| {r['name']} | {r['kind']} | {r['access']} | {r['path']}:{r['line']} |"
+        )
+    if data["truncated"]:
+        shown = len(data["rows"])
+        parts.append("")
+        parts.append(f"*Truncated: showing {shown} of {data['total']} symbols.*")
+
+    return "\n".join(parts)
+
+
+def _report_symbol_index(
+    target_path: str,
+    base: str,
+    kind: str | None = None,
+    public_only: bool = False,
+    max_results: int = 500,
+) -> dict[str, Any]:
+    """Run universal-ctags and format output as a Markdown table.
+
+    Returns dict with "markdown" (str) and "truncated" (bool).
+    """
+    data = _symbol_index_data(
+        target_path, base, kind=kind, public_only=public_only,
+        max_results=max_results,
+    )
+    return {
+        "markdown": _symbol_index_to_markdown(data),
+        "truncated": data["truncated"],
     }
 
 
@@ -1436,14 +1551,17 @@ _TREE_FILE = "f"
 _TREE_SYM = "s"
 
 
-def _report_module_tree(
+def _module_tree_data(
     target_path: str,
     base: str,
     max_nodes: int = _MODULE_TREE_MAX_NODES,
 ) -> dict[str, Any]:
-    """Build a Mermaid mindmap of the repo structure from ctags data.
+    """Build a hierarchical tree of the repo structure from ctags data.
 
-    Returns dict with "markdown" and "truncated".
+    Returns dict with "tree" (list of nested dicts with name/children/t),
+    "root_name", "truncated", and "total_nodes".  The tree can be rendered
+    to Mermaid via _module_tree_to_markdown() or consumed directly by
+    dashboards for alternative visualisation.
     """
     symbols = _run_ctags(target_path, base)
 
@@ -1506,7 +1624,18 @@ def _report_module_tree(
         total_nodes = _count_nodes(tree)
 
     root_name = os.path.basename(target_path.rstrip("/")) or os.path.basename(base)
-    lines = ["```mermaid", "mindmap", f"  root(({root_name}))"]
+
+    return {
+        "tree": tree,
+        "root_name": root_name,
+        "truncated": truncated,
+        "total_nodes": total_nodes,
+    }
+
+
+def _module_tree_to_markdown(data: dict[str, Any]) -> str:
+    """Render hierarchical tree data as a Mermaid mindmap."""
+    lines = ["```mermaid", "mindmap", f"  root(({data['root_name']}))"]
 
     def _render(nodes: list[dict], indent: int = 2) -> list[str]:
         result: list[str] = []
@@ -1516,12 +1645,28 @@ def _report_module_tree(
                 result.extend(_render(n["children"], indent + 1))
         return result
 
-    lines.extend(_render(tree, indent=3))
-    if truncated:
-        lines.append(f"  *Truncated: showing {total_nodes} directory nodes (symbol level omitted)*")
+    lines.extend(_render(data["tree"], indent=3))
+    if data["truncated"]:
+        lines.append(f"  *Truncated: showing {data['total_nodes']} directory nodes (symbol level omitted)*")
     lines.append("```")
 
-    return {"markdown": '\n'.join(lines), "truncated": truncated}
+    return '\n'.join(lines)
+
+
+def _report_module_tree(
+    target_path: str,
+    base: str,
+    max_nodes: int = _MODULE_TREE_MAX_NODES,
+) -> dict[str, Any]:
+    """Build a Mermaid mindmap of the repo structure from ctags data.
+
+    Returns dict with "markdown" and "truncated".
+    """
+    data = _module_tree_data(target_path, base, max_nodes=max_nodes)
+    return {
+        "markdown": _module_tree_to_markdown(data),
+        "truncated": data["truncated"],
+    }
 
 
 def ingest(rebuild: bool = False, repo: str | None = None) -> dict[str, Any]:
