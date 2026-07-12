@@ -26,7 +26,7 @@ body {
     radial-gradient(circle at 85% 30%, rgba(59, 130, 246, 0.15), transparent 25%);
 }
 
-#app {
+#root {
   display: flex;
   min-height: 100vh;
 }
