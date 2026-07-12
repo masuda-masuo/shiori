@@ -1224,11 +1224,13 @@ def report(
         target_path = base
 
     if template == "stats":
-        markdown = _report_stats(target_path)
+        data = _stats_data(target_path)
+        markdown = _stats_to_markdown(data)
         return {
             "repo": target,
             "template": template,
             "markdown": markdown,
+            "data": data,
         }
     elif template == "module_tree":
         result = _report_module_tree(
@@ -1409,7 +1411,21 @@ def _stats_data(target_path: str) -> dict[str, Any]:
 
     for lang in sorted_langs:
         info = data[lang]
-        n_files = len(info.get("reports", []))
+        reports = info.get("reports", [])
+        # Simplify reports to only name and stats to keep payload small
+        simplified_reports = []
+        for r in reports:
+            # path is relative to target_path
+            rel_path = os.path.relpath(r["name"], target_path)
+            stats = r.get("stats", {})
+            simplified_reports.append({
+                "name": rel_path,
+                "code": stats.get("code", 0),
+                "comments": stats.get("comments", 0),
+                "blanks": stats.get("blanks", 0),
+            })
+        
+        n_files = len(reports)
         code = info.get("code", 0)
         comments = info.get("comments", 0)
         blanks = info.get("blanks", 0)
@@ -1420,6 +1436,7 @@ def _stats_data(target_path: str) -> dict[str, Any]:
             "code": code,
             "comments": comments,
             "blanks": blanks,
+            "reports": simplified_reports,
         })
 
     total_info = data.get("Total", {})

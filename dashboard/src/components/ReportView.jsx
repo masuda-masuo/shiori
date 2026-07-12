@@ -10,6 +10,87 @@ const templates = {
   module_tree: { title: "Module Tree", desc: "Directory structure and module dependencies." },
 };
 
+const StatsView = ({ data }) => {
+  const [expandedLang, setExpandedLang] = useState(null);
+
+  if (!data || !data.rows) return null;
+
+  return (
+    <div className="card">
+      <div className="table-container">
+        <table>
+          <thead>
+            <tr>
+              <th>Language</th>
+              <th>Files</th>
+              <th>Code</th>
+              <th>Comments</th>
+              <th>Blanks</th>
+            </tr>
+          </thead>
+          <tbody>
+            {data.rows.map((row) => (
+              <React.Fragment key={row.language}>
+                <tr 
+                  className="stats-row clickable"
+                  onClick={() => setExpandedLang(expandedLang === row.language ? null : row.language)}
+                  style={{ cursor: "pointer" }}
+                >
+                  <td style={{ display: "flex", alignItems: "center", gap: "0.5rem", fontWeight: "500", color: "var(--accent-color)" }}>
+                    <span style={{ fontSize: "0.75rem", display: "inline-block", width: "12px" }}>
+                      {expandedLang === row.language ? "▼" : "▶"}
+                    </span>
+                    {row.language}
+                  </td>
+                  <td>{row.files}</td>
+                  <td>{row.code}</td>
+                  <td>{row.comments}</td>
+                  <td>{row.blanks}</td>
+                </tr>
+                {expandedLang === row.language && row.reports && (
+                  <tr>
+                    <td colSpan={5} style={{ padding: "0.75rem 1.5rem", background: "rgba(0,0,0,0.15)" }}>
+                      <div className="stats-file-list" style={{ maxHeight: "300px", overflowY: "auto" }}>
+                        <table style={{ width: "100%", fontSize: "0.875rem" }}>
+                          <thead>
+                            <tr style={{ background: "transparent", borderBottom: "1px solid rgba(255,255,255,0.05)" }}>
+                              <th style={{ textAlign: "left", padding: "0.5rem" }}>File Name</th>
+                              <th style={{ textAlign: "right", padding: "0.5rem" }}>Code</th>
+                              <th style={{ textAlign: "right", padding: "0.5rem" }}>Comments</th>
+                              <th style={{ textAlign: "right", padding: "0.5rem" }}>Blanks</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {row.reports.map((file) => (
+                              <tr key={file.name} style={{ borderBottom: "1px solid rgba(255,255,255,0.02)" }}>
+                                <td style={{ textAlign: "left", padding: "0.5rem", fontFamily: "monospace", wordBreak: "break-all" }}>{file.name}</td>
+                                <td style={{ textAlign: "right", padding: "0.5rem" }}>{file.code}</td>
+                                <td style={{ textAlign: "right", padding: "0.5rem" }}>{file.comments}</td>
+                                <td style={{ textAlign: "right", padding: "0.5rem" }}>{file.blanks}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </td>
+                  </tr>
+                )}
+              </React.Fragment>
+            ))}
+            <tr style={{ fontWeight: "bold", borderTop: "2px solid var(--panel-border)" }}>
+              <td>Total</td>
+              <td>{data.total.files}</td>
+              <td>{data.total.code}</td>
+              <td>{data.total.comments}</td>
+              <td>{data.total.blanks}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+};
+
 const ReportView = ({ view, repo }) => {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -73,6 +154,10 @@ const ReportView = ({ view, repo }) => {
       const match = data.markdown.match(/```mermaid\n([\s\S]*?)```/);
       const graph = match ? match[1].trim() : data.markdown;
       return <MermaidViewer chart={graph} />;
+    }
+
+    if (view === "stats" && data.data) {
+      return <StatsView data={data.data} />;
     }
 
     // Default Markdown Rendering for everything else (Stats, Symbols, API)
