@@ -37,10 +37,12 @@ def _is_bulk_path(conn, rebuild: bool) -> bool:
         return True
     with conn.cursor() as cur:
         cur.execute("SELECT to_regclass('chunks')")
-        if cur.fetchone()[0] is None:
+        row = cur.fetchone()
+        if row is not None and row[0] is None:
             return True
         cur.execute("SELECT count(*) FROM chunks")
-        return cur.fetchone()[0] == 0
+        row = cur.fetchone()
+        return row is not None and row[0] == 0
 
 
 def run_forget(
@@ -139,7 +141,8 @@ def run_ingest(
     # Advisory lock is session-bound; acquire and release on the same connection.
     with conn.cursor() as cur:
         cur.execute("SELECT pg_try_advisory_lock(%s)", (SYNC_LOCK_KEY,))
-        acquired = cur.fetchone()[0]
+        row = cur.fetchone()
+        acquired = row[0] if row is not None else False
     if not acquired:
         log.info("skipped: sync already running in another process")
         conn.close()
@@ -158,6 +161,7 @@ def run_ingest(
 
         embedder = Embedder(settings.embedding_model, settings.embedding_dim)
 
+        buffer: ChunkBuffer | None = None
         if is_bulk:
             buffer = ChunkBuffer(conn, embedder, batch_size=_BULK_BUFFER_SIZE)
 
@@ -173,6 +177,7 @@ def run_ingest(
                     buffer=buffer if is_bulk else None,
                 )
                 if is_bulk:
+                    assert buffer is not None
                     n_flushed = buffer.flush()
                     conn.commit()  # Commit metadata (doc_files, set_cursor)
                     log.info("docs flushed: %d chunks", n_flushed)
@@ -186,6 +191,7 @@ def run_ingest(
                     buffer=buffer if is_bulk else None,
                 )
                 if is_bulk:
+                    assert buffer is not None
                     n_flushed = buffer.flush()
                     conn.commit()  # Commit metadata (issue_items, set_cursor)
                     log.info("issues flushed: %d chunks", n_flushed)
@@ -199,6 +205,7 @@ def run_ingest(
                     buffer=buffer if is_bulk else None,
                 )
                 if is_bulk:
+                    assert buffer is not None
                     n_flushed = buffer.flush()
                     conn.commit()  # Commit metadata (doc_files, set_cursor)
                     log.info("code flushed: %d chunks", n_flushed)
@@ -215,7 +222,8 @@ def run_ingest(
                 # does; mirrors _do_sync in mcp_server.py, the MCP-tool ingest
                 # path this CLI/compose path duplicates).
                 db.record_sync_attempt(conn, repo, success=True)
-                log.info("synced at %s (route=%s)", finished_at.isoformat(), route)
+                synced_ts = finished_at.isoformat() if finished_at is not None else "?"
+                log.info("synced at %s (route=%s)", synced_ts, route)
             except Exception as exc:
                 # Record the failed attempt so shiori_status can surface it
                 # (issue #194, same as the _do_sync path in mcp_server.py) --

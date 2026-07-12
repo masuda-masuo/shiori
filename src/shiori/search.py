@@ -110,7 +110,7 @@ def _vector_candidates(
             WHERE embedding IS NOT NULL{fsql}
             ORDER BY embedding <=> %s::vector
             LIMIT %s
-            """,
+            """,  # type: ignore
             [vec_literal(qvec), *fparams, vec_literal(qvec), limit],
         )
         return cur.fetchall()
@@ -139,7 +139,7 @@ def _keyword_candidates(
             WHERE (content &@~ %s OR symbols &@~ %s){fsql}
             ORDER BY score DESC
             LIMIT %s
-            """,
+            """,  # type: ignore
             [pgroonga_query, pgroonga_query, *fparams, limit],
         )
         return cur.fetchall()
