@@ -5,7 +5,13 @@ from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
 def register_dashboard(mcp):
-    dashboard_dist = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "dashboard", "dist")
+    from .config import load_settings
+    settings = load_settings()
+    dashboard_dist = os.path.join(os.path.dirname(__file__), "dashboard_dist")
+
+    @mcp.custom_route("/api/repos", methods=["GET"])
+    async def api_repos(request: Request):
+        return JSONResponse({"repos": settings.repos})
 
     @mcp.custom_route("/api/report", methods=["GET"])
     async def api_report(request: Request):
