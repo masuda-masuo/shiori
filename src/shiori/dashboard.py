@@ -13,6 +13,112 @@ def register_dashboard(mcp):
     async def api_repos(request: Request):
         return JSONResponse({"repos": settings.repos})
 
+    @mcp.custom_route("/api/search", methods=["GET"])
+    async def api_search(request: Request):
+        from .mcp_server import _get_embedder, _conn, _resolve_repo_filter, settings
+        from . import search
+        from starlette.concurrency import run_in_threadpool
+        
+        query = request.query_params.get("query")
+        if not query:
+            return JSONResponse({"detail": "query is required"}, status_code=400)
+            
+        search_type = request.query_params.get("type", "semantic")
+        source_type = request.query_params.get("source_type")
+        repo = request.query_params.get("repo")
+        path_prefix = request.query_params.get("path_prefix")
+        prog_lang = request.query_params.get("prog_lang")
+        kind = request.query_params.get("kind")
+        
+        limit_val = request.query_params.get("limit")
+        limit = int(limit_val) if limit_val else None
+
+        try:
+            resolved_repo = _resolve_repo_filter(repo) if repo else None
+        except ValueError as e:
+            return JSONResponse({"detail": str(e)}, status_code=400)
+
+        filters = {
+            "source_type": source_type if source_type else None,
+            "repo": resolved_repo,
+            "path_prefix": path_prefix if path_prefix else None,
+            "prog_lang": prog_lang if prog_lang else None,
+            "kind": kind if kind else None,
+        }
+
+        try:
+            if search_type == "keyword":
+                def run():
+                    with _conn() as conn:
+                        return search.keyword_search(
+                            settings, conn, query, filters=filters, top_k=limit
+                        )
+            else:
+                def run():
+                    with _conn() as conn:
+                        return search.semantic_search(
+                            settings, conn, _get_embedder(), query, filters=filters, top_k=limit
+                        )
+            
+            results = await run_in_threadpool(run)
+            return JSONResponse({"results": results})
+        except Exception as e:
+            return JSONResponse({"detail": str(e)}, status_code=500)
+
+    @mcp.custom_route("/api/read_file", methods=["GET"])
+    async def api_read_file(request: Request):
+        from .mcp_server import read_file
+        from starlette.concurrency import run_in_threadpool
+        
+        path = request.query_params.get("path")
+        repo = request.query_params.get("repo")
+        start_line_val = request.query_params.get("start_line")
+        end_line_val = request.query_params.get("end_line")
+        
+        if not path:
+            return JSONResponse({"detail": "path is required"}, status_code=400)
+            
+        start_line = int(start_line_val) if start_line_val else None
+        end_line = int(end_line_val) if end_line_val else None
+        
+        try:
+            result = await run_in_threadpool(
+                read_file,
+                path=path,
+                start_line=start_line,
+                end_line=end_line,
+                repo=repo,
+            )
+            return JSONResponse(result)
+        except Exception as e:
+            return JSONResponse({"detail": str(e)}, status_code=500)
+
+    @mcp.custom_route("/api/issue", methods=["GET"])
+    async def api_issue(request: Request):
+        from .mcp_server import read_issue
+        from starlette.concurrency import run_in_threadpool
+        
+        number_val = request.query_params.get("number")
+        repo = request.query_params.get("repo")
+        exclude_noise_bots_val = request.query_params.get("exclude_noise_bots")
+        exclude_noise_bots = exclude_noise_bots_val.lower() == "true" if exclude_noise_bots_val else False
+        
+        if not number_val:
+            return JSONResponse({"detail": "number is required"}, status_code=400)
+            
+        number = int(number_val)
+        
+        try:
+            result = await run_in_threadpool(
+                read_issue,
+                number=number,
+                repo=repo,
+                exclude_noise_bots=exclude_noise_bots,
+            )
+            return JSONResponse(result)
+        except Exception as e:
+            return JSONResponse({"detail": str(e)}, status_code=500)
+
     @mcp.custom_route("/api/report", methods=["GET"])
     async def api_report(request: Request):
         from .mcp_server import report
