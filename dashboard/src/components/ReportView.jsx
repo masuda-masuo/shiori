@@ -2,8 +2,10 @@ import React, { useState, useEffect } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import MermaidViewer from "./MermaidViewer";
+import SearchView from "./SearchView";
 
 const templates = {
+  search: { title: "Search Knowledge", desc: "Search across code, documents, issues, and PR comments." },
   stats: { title: "Repository Stats", desc: "Codebase metrics and language distribution." },
   symbol_index: { title: "Symbol Index", desc: "Browse functions, classes, and other symbols." },
   api_reference: { title: "API Reference", desc: "Extracted docstrings and signatures." },
@@ -219,7 +221,7 @@ const SymbolIndexView = ({ data, searchQuery }) => {
   );
 };
 
-const ReportView = ({ view, repo }) => {
+const ReportView = ({ view, repo, repos }) => {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -228,6 +230,13 @@ const ReportView = ({ view, repo }) => {
   const tpl = templates[view] || { title: view, desc: "" };
 
   useEffect(() => {
+    if (view === "search") {
+      setLoading(false);
+      setError(null);
+      setData(null);
+      setSearchQuery("");
+      return;
+    }
     setLoading(true);
     setError(null);
     setData(null);
@@ -261,6 +270,9 @@ const ReportView = ({ view, repo }) => {
   }, [view, repo]);
 
   const renderContent = () => {
+    if (view === "search") {
+      return <SearchView repo={repo} repos={repos} />;
+    }
     if (loading) {
       return (
         <div className="loading-container">

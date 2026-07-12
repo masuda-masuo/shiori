@@ -3,7 +3,7 @@ import Sidebar from "./components/Sidebar";
 import ReportView from "./components/ReportView";
 
 const App = () => {
-  const [view, setView] = useState("stats");
+  const [view, setView] = useState("search");
   const [repos, setRepos] = useState([]);
   const [currentRepo, setCurrentRepo] = useState("");
 
@@ -11,7 +11,7 @@ const App = () => {
     // Initial load: parse hash for view
     const handleHash = () => {
       const hash = window.location.hash.slice(1);
-      if (["stats", "symbol_index", "api_reference", "module_tree"].includes(hash)) {
+      if (["search", "stats", "symbol_index", "api_reference", "module_tree"].includes(hash)) {
         setView(hash);
       }
     };
@@ -43,7 +43,7 @@ const App = () => {
         onRepoChange={setCurrentRepo} 
       />
       <main className="main-content">
-        <ReportView view={view} repo={currentRepo} />
+        <ReportView view={view} repo={currentRepo} repos={repos} />
       </main>
     </>
   );
