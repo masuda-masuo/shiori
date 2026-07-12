@@ -61,7 +61,7 @@ const fetchReport = async (template) => {
 
 const renderLoading = () => {
   document.getElementById('content-area').innerHTML = `
-    <div style="padding: 2rem; text-align: center; color: var(--text-secondary);">
+    <div class="loading-container">
       <p>Loading data...</p>
     </div>
   `;
@@ -69,7 +69,7 @@ const renderLoading = () => {
 
 const renderError = (msg) => {
   document.getElementById('content-area').innerHTML = `
-    <div style="padding: 2rem; color: #f87171; background: rgba(239, 68, 68, 0.1); border-radius: 8px;">
+    <div class="error-container">
       <p>Error: ${msg}</p>
     </div>
   `;

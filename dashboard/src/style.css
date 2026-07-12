@@ -192,6 +192,20 @@ tbody tr:hover {
   background: rgba(255, 255, 255, 0.03);
 }
 
+/* States */
+.loading-container {
+  padding: 2rem;
+  text-align: center;
+  color: var(--text-secondary);
+}
+
+.error-container {
+  padding: 2rem;
+  color: #f87171;
+  background: rgba(239, 68, 68, 0.1);
+  border-radius: 8px;
+}
+
 /* Badges & Links */
 .badge {
   display: inline-block;
