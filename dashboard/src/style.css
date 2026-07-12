@@ -82,6 +82,13 @@ body {
   display: flex;
   align-items: center;
   gap: 0.75rem;
+  text-decoration: none;
+}
+
+.nav-item svg {
+  width: 20px;
+  height: 20px;
+  fill: currentColor;
 }
 
 .nav-item:hover {
@@ -150,6 +157,7 @@ body {
   font-weight: 700;
   background: var(--accent-gradient);
   -webkit-background-clip: text;
+  background-clip: text;
   -webkit-text-fill-color: transparent;
 }
 
@@ -184,7 +192,7 @@ tbody tr:hover {
   background: rgba(255, 255, 255, 0.03);
 }
 
-/* Badges */
+/* Badges & Links */
 .badge {
   display: inline-block;
   padding: 0.25rem 0.75rem;
@@ -199,3 +207,14 @@ tbody tr:hover {
 .badge.private { background: rgba(239, 68, 68, 0.15); color: #f87171; }
 .badge.class { background: rgba(59, 130, 246, 0.15); color: #60a5fa; }
 .badge.function { background: rgba(245, 158, 11, 0.15); color: #fbbf24; }
+
+.location-link {
+  color: var(--accent-color);
+  text-decoration: none;
+  transition: opacity 0.2s ease;
+}
+
+.location-link:hover {
+  opacity: 0.8;
+  text-decoration: underline;
+}
