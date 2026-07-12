@@ -66,6 +66,38 @@ body {
   font-weight: 600;
 }
 
+.repo-selector {
+  margin-bottom: 1.5rem;
+  padding: 0 0.25rem;
+}
+
+.repo-selector label {
+  display: block;
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  margin-bottom: 0.4rem;
+  font-weight: 500;
+}
+
+.repo-selector select {
+  width: 100%;
+  padding: 0.5rem 0.75rem;
+  border-radius: 6px;
+  border: 1px solid var(--panel-border);
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text-primary);
+  font-size: 0.85rem;
+  font-family: inherit;
+  cursor: pointer;
+  outline: none;
+  transition: border-color 0.2s;
+}
+
+.repo-selector select:hover,
+.repo-selector select:focus {
+  border-color: var(--accent-color);
+}
+
 .nav-menu {
   list-style: none;
   display: flex;

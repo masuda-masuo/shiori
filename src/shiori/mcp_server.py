@@ -1649,9 +1649,9 @@ def _module_tree_to_markdown(data: dict[str, Any]) -> str:
         return result
 
     lines.extend(_render(data["tree"], indent=3))
-    if data["truncated"]:
-        lines.append(f"  *Truncated: showing {data['total_nodes']} directory nodes (symbol level omitted)*")
     lines.append("```")
+    if data["truncated"]:
+        lines.append(f"*Truncated: showing {data['total_nodes']} directory nodes (symbol level omitted)*")
 
     return '\n'.join(lines)
 

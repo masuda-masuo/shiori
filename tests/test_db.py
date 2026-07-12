@@ -554,7 +554,7 @@ class TestGetCodeChunks:
 
         assert "SELECT path, heading_path, line, end_line, content, prog_lang" in sql
         assert "FROM chunks" in sql
-        assert "WHERE repo = %s AND source_type = 'code' AND content NOT LIKE '[%] (module)%'" in sql
+        assert "WHERE repo = %s AND source_type = 'code' AND content NOT LIKE '[%%] (module)%%'" in sql
         assert "AND prog_lang = %s" in sql
         assert "AND path LIKE %s || '%'" in sql
         assert "ORDER BY path, line" in sql
