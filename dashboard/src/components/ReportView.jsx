@@ -91,6 +91,134 @@ const StatsView = ({ data }) => {
   );
 };
 
+const SymbolIndexView = ({ data, searchQuery }) => {
+  const [expandedPaths, setExpandedPaths] = useState({});
+
+  if (!data || !data.rows) return null;
+
+  // Filter rows based on search query
+  const filteredRows = searchQuery
+    ? data.rows.filter(
+        (row) =>
+          row.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
+          row.path.toLowerCase().includes(searchQuery.toLowerCase()) ||
+          row.kind.toLowerCase().includes(searchQuery.toLowerCase())
+      )
+    : data.rows;
+
+  // Group by path
+  const groups = {};
+  filteredRows.forEach((row) => {
+    if (!groups[row.path]) {
+      groups[row.path] = [];
+    }
+    groups[row.path].push(row);
+  });
+
+  const paths = Object.keys(groups).sort();
+
+  const isExpanded = (path) => {
+    if (searchQuery) return true; // Auto-expand all when searching
+    return !!expandedPaths[path];
+  };
+
+  const togglePath = (path) => {
+    setExpandedPaths((prev) => ({
+      ...prev,
+      [path]: !prev[path],
+    }));
+  };
+
+  return (
+    <div className="symbol-index-container">
+      {paths.length === 0 ? (
+        <p style={{ textAlign: "center", padding: "2rem", color: "var(--text-secondary)" }}>
+          No symbols found matching the query.
+        </p>
+      ) : (
+        paths.map((path) => {
+          const rows = groups[path];
+          const expanded = isExpanded(path);
+          return (
+            <div 
+              key={path} 
+              className="card" 
+              style={{ marginBottom: "0.75rem", padding: "0.75rem 1.25rem" }}
+            >
+              <div 
+                className="symbol-file-header" 
+                onClick={() => togglePath(path)}
+                style={{ 
+                  display: "flex", 
+                  justifyContent: "space-between", 
+                  alignItems: "center", 
+                  cursor: "pointer" 
+                }}
+              >
+                <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
+                  <span style={{ fontSize: "0.75rem", width: "12px", display: "inline-block", color: "var(--accent-color)" }}>
+                    {expanded ? "▼" : "▶"}
+                  </span>
+                  <span style={{ fontFamily: "monospace", fontWeight: "600", fontSize: "0.95rem" }}>{path}</span>
+                </div>
+                <span className="badge" style={{ 
+                  background: "rgba(139, 92, 246, 0.15)", 
+                  color: "var(--accent-color)", 
+                  padding: "0.2rem 0.5rem", 
+                  borderRadius: "12px", 
+                  fontSize: "0.8rem",
+                  fontWeight: "500"
+                }}>
+                  {rows.length} {rows.length === 1 ? "symbol" : "symbols"}
+                </span>
+              </div>
+              
+              {expanded && (
+                <div className="table-container" style={{ marginTop: "0.75rem", borderTop: "1px solid rgba(255,255,255,0.05)", paddingTop: "0.75rem" }}>
+                  <table style={{ width: "100%", fontSize: "0.9rem" }}>
+                    <thead>
+                      <tr style={{ background: "transparent" }}>
+                        <th style={{ textAlign: "left", padding: "0.4rem 0.5rem" }}>Name</th>
+                        <th style={{ textAlign: "left", padding: "0.4rem 0.5rem" }}>Kind</th>
+                        <th style={{ textAlign: "left", padding: "0.4rem 0.5rem" }}>Access</th>
+                        <th style={{ textAlign: "right", padding: "0.4rem 0.5rem" }}>Line</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {rows.map((row, idx) => (
+                        <tr key={idx} style={{ borderBottom: "1px solid rgba(255,255,255,0.02)" }}>
+                          <td style={{ textAlign: "left", padding: "0.4rem 0.5rem", fontWeight: "500", fontFamily: "monospace" }}>{row.name}</td>
+                          <td style={{ textAlign: "left", padding: "0.4rem 0.5rem" }}>
+                            <span style={{ 
+                              background: "rgba(255,255,255,0.05)", 
+                              padding: "0.15rem 0.4rem", 
+                              borderRadius: "4px", 
+                              fontSize: "0.75rem",
+                              textTransform: "capitalize"
+                            }}>
+                              {row.kind}
+                            </span>
+                          </td>
+                          <td style={{ textAlign: "left", padding: "0.4rem 0.5rem", fontStyle: "italic", color: "var(--text-secondary)" }}>
+                            {row.access || "-"}
+                          </td>
+                          <td style={{ textAlign: "right", padding: "0.4rem 0.5rem", fontFamily: "monospace", color: "var(--text-secondary)" }}>
+                            {row.line}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          );
+        })
+      )}
+    </div>
+  );
+};
+
 const ReportView = ({ view, repo }) => {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -107,7 +235,9 @@ const ReportView = ({ view, repo }) => {
 
     const params = new URLSearchParams({ template: view });
     if (repo) params.set("repo", repo);
-    if (view === "symbol_index" || view === "module_tree") {
+    if (view === "symbol_index") {
+      params.set("max_results", "50000");
+    } else if (view === "module_tree") {
       params.set("max_results", "10000");
     }
 
@@ -158,6 +288,21 @@ const ReportView = ({ view, repo }) => {
 
     if (view === "stats" && data.data) {
       return <StatsView data={data.data} />;
+    }
+
+    if (view === "symbol_index" && data.data) {
+      return (
+        <div>
+          <input 
+            type="text" 
+            placeholder="Search symbols..." 
+            className="search-input"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+          />
+          <SymbolIndexView data={data.data} searchQuery={searchQuery} />
+        </div>
+      );
     }
 
     // Default Markdown Rendering for everything else (Stats, Symbols, API)
