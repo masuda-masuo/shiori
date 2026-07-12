@@ -113,6 +113,19 @@ class TestWalkCodeFiles:
             assert "node_modules/foo/index.js" not in result
             assert ".venv/lib/site.py" not in result
 
+    def test_exclude_dashboard_dist_suffix(self):
+        """完全一致しないビルド成果物ディレクトリ(dashboard_dist等)もスキップされる(issue #235)"""
+        with tempfile.TemporaryDirectory() as tmp:
+            _make_tree(tmp, [
+                "src/main.py",
+                "dashboard_dist/assets/index-abc123.js",
+                "web-dist/bundle.js",
+            ])
+            result = _walk_code_files(tmp, "")
+            assert "src/main.py" in result
+            assert "dashboard_dist/assets/index-abc123.js" not in result
+            assert "web-dist/bundle.js" not in result
+
     def test_exclude_extensions(self):
         """除外拡張子のファイルはスキップされる"""
         with tempfile.TemporaryDirectory() as tmp:

@@ -390,6 +390,29 @@ _EXCLUDE_DIRS = {
     ".cache",
 }
 
+# Directory name suffixes to skip in os.walk (build-output dirs that don't
+# match _EXCLUDE_DIRS exactly, e.g. "dashboard_dist"; issue #235)
+_EXCLUDE_DIR_SUFFIXES = ("_dist", "-dist")
+
+# Longest line (chars) a hand-written source file is expected to have.
+# Minified/bundled JS routinely puts an entire file on one line; filename-based
+# detection (".min.js") misses non-suffixed bundles like Vite's "index-*.js".
+_MINIFIED_LINE_THRESHOLD = 500
+
+
+def _looks_minified(content: bytes) -> bool:
+    """Heuristic: a single very long line strongly suggests a minified bundle."""
+    try:
+        sample = content[:8192].decode("utf-8", errors="ignore")
+    except Exception:
+        return False
+    return any(len(line) > _MINIFIED_LINE_THRESHOLD for line in sample.splitlines())
+
+
+def _is_excluded_dir(name: str) -> bool:
+    """Directory should be pruned from os.walk (issue #235)."""
+    return name in _EXCLUDE_DIRS or name.endswith(_EXCLUDE_DIR_SUFFIXES)
+
 # File extensions excluded from code indexing (binary/asset etc.)
 _EXCLUDE_EXTENSIONS = {
     ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".webp",
@@ -453,7 +476,7 @@ def sync_code(
     # Current code file set (with sha)
     current: dict[str, str] = {}
     for root, dirs, files in os.walk(repo_dir):
-        dirs[:] = [d for d in dirs if d not in _EXCLUDE_DIRS]
+        dirs[:] = [d for d in dirs if not _is_excluded_dir(d)]
         for f in files:
             abspath = os.path.join(root, f)
             rel = os.path.relpath(abspath, repo_dir)
@@ -462,7 +485,10 @@ def sync_code(
             if _is_excluded_by_glob(rel, settings):
                 continue
             with open(abspath, "rb") as fp:
-                current[rel] = hashlib.sha256(fp.read()).hexdigest()
+                content = fp.read()
+            if _looks_minified(content):
+                continue
+            current[rel] = hashlib.sha256(content).hexdigest()
 
     # Existing index (doc_files rows with kind='code')
     with conn.cursor() as cur:

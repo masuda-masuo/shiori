@@ -424,6 +424,15 @@ _EXCLUDE_DIRS = {
     ".cache",
 }
 
+# Directory name suffixes to skip in os.walk (build-output dirs that don't
+# match _EXCLUDE_DIRS exactly, e.g. "dashboard_dist"; issue #235)
+_EXCLUDE_DIR_SUFFIXES = ("_dist", "-dist")
+
+
+def _is_excluded_dir(name: str) -> bool:
+    """Directory should be pruned from os.walk (issue #235)."""
+    return name in _EXCLUDE_DIRS or name.endswith(_EXCLUDE_DIR_SUFFIXES)
+
 # File extensions excluded from code listing (case-insensitive)
 # Binary/asset/lock files that are not useful for LLM reading
 _EXCLUDE_EXTENSIONS = {
@@ -463,7 +472,7 @@ def _walk_code_files(base: str, prefix: str, extension: str | None = None) -> se
     if not os.path.isdir(base):
         return paths
     for dirpath, dirnames, filenames in os.walk(base):
-        dirnames[:] = [d for d in dirnames if d not in _EXCLUDE_DIRS]
+        dirnames[:] = [d for d in dirnames if not _is_excluded_dir(d)]
         rel_dir = os.path.relpath(dirpath, base)
         if rel_dir == ".":
             rel_dir = ""

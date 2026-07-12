@@ -21,6 +21,8 @@ from shiori.github_sync import (
     _git_delete_ref,
     _git_fetch_ref,
     _is_bot,
+    _is_excluded_dir,
+    _looks_minified,
     _propagate_issue_state,
     _should_index,
     _sync_pr_changes,
@@ -796,3 +798,43 @@ class TestSyncPrReviews:
             comment_id = call_args[0][1]["comment_id"]
             assert comment_id < 0, f"comment_id {comment_id} must be negative"
 
+
+# ===================================================================
+# _is_excluded_dir / _looks_minified (issue #235)
+# ===================================================================
+
+
+class TestIsExcludedDir:
+    """_is_excluded_dir: 完全一致ディレクトリ名 + ビルド成果物サフィックスの除外。"""
+
+    def test_exact_match(self):
+        assert _is_excluded_dir("node_modules") is True
+        assert _is_excluded_dir("dist") is True
+        assert _is_excluded_dir(".git") is True
+
+    def test_dist_suffix(self):
+        """dashboard_dist のような完全一致しないビルド成果物ディレクトリも除外。"""
+        assert _is_excluded_dir("dashboard_dist") is True
+        assert _is_excluded_dir("web-dist") is True
+
+    def test_unrelated_dir_kept(self):
+        assert _is_excluded_dir("src") is False
+        assert _is_excluded_dir("distutils_helpers") is False
+
+
+class TestLooksMinified:
+    """_looks_minified: 長い1行の有無によるバンドル検知ヒューリスティック。"""
+
+    def test_normal_source_not_flagged(self):
+        content = b"def foo():\n    return 1\n\n\ndef bar():\n    return 2\n"
+        assert _looks_minified(content) is False
+
+    def test_single_long_line_flagged(self):
+        content = ("var x=1;" * 200).encode("utf-8")
+        assert _looks_minified(content) is True
+
+    def test_empty_content_not_flagged(self):
+        assert _looks_minified(b"") is False
+
+    def test_binary_content_does_not_raise(self):
+        assert _looks_minified(b"\xff\xfe\x00\x01" * 100) is False
