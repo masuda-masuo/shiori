@@ -22,7 +22,7 @@ The core principle remains unchanged: tokens are resolved within the active job 
     *   *Anonymous*: Fallback when no keys are provided.
     *   If both `TokenCommand` and `GITHUB_TOKEN` are set, the command takes priority and logs an informational notice.
 3.  **On-Demand Token Refresh**: Tokens are cached in-memory by the provider and refreshed 5 minutes before expiration. This ensures tokens do not expire mid-run during slow initial ingestion jobs (which can take over an hour for CPU-heavy embeddings).
-4.  **Header Injection (`http.extraHeader`)**: We deprecate embedding tokens in repository remote URLs. In older implementations, plain-text tokens were written to `.git/config` (persisting on disk/named volumes), causing subsequent pulls to fail once the token expired. Instead, tokens are dynamically injected via Git's `http.extraHeader` config flag during execution.
+4.  **Dynamic Git URL Swapping**: To prevent storing plain-text tokens permanently in `.git/config` (which causes authorization failures once tokens expire), Shiori dynamically swaps the remote URL with an authenticated one (using `x-access-token`) immediately before running network operations (`clone`/`fetch`), and restores the unauthenticated URL in a `finally` block. This approach was chosen instead of `http.extraHeader` to ensure compatibility across older Git versions.
 5.  **Key Propagation in Compose**: The GitHub App private key is passed to all compose services (`app` and `ingest`) using secrets and environment configurations. `build_token_provider()` resolves the active provider on-demand. When using PATs, `GITHUB_TOKEN` is similarly passed to all services.
 6.  **Dependency Addition**: Added `pyjwt[crypto]` to support RS256 signature signing via cryptography.
 
@@ -220,22 +220,31 @@ def sync_docs(settings, conn, embedder, repo, provider: TokenProvider) -> int: .
 def sync_issues(settings, conn, embedder, repo, provider: TokenProvider) -> int: ...
 ```
 
-#### (a) Dynamic Git Authentication via `extraHeader`
-```python
-import base64
+#### (a) Dynamic Git Authentication via Temporary URL Swapping
+Because `http.extraHeader` fails to authenticate consistently on certain older Git versions, Shiori resolves Git authentication by temporarily modifying the origin remote URL to include the token, executing the network commands, and resetting it back to the unauthenticated URL in a `finally` block.
 
-def _auth_args(provider: TokenProvider) -> list[str]:
+```python
+def _authed_url(remote: str, provider: TokenProvider) -> str:
+    """Return remote URL with token embedded (x-access-token scheme)."""
     token = provider.get_token()
     if not token:
-        return []
-    b64 = base64.b64encode(f"x-access-token:{token}".encode()).decode()
-    return ["-c", f"http.extraHeader=Authorization: Basic {b64}"]
+        return remote
+    return remote.replace("https://", f"https://x-access-token:{token}@", 1)
 ```
 
-*   `_clone_url` is removed; the remote origin points to `https://github.com/{repo}.git` without credentials.
-*   For all network commands (`clone`/`fetch`), prepend auth headers: `_git(_auth_args(provider) + ["fetch", ...], cwd=...)`.
-*   Prior to executing network tasks, the server updates remote origins to purge plain-text credentials saved in legacy configurations:
-    `_git(["remote", "set-url", "origin", f"https://github.com/{repo}.git"], cwd=repo_dir)`
+*   **Temporary Set-Url Wrap**:
+    During execution, the origin remote is updated using `remote set-url`, the fetch or clone is performed, and the unauthenticated URL is restored:
+    ```python
+    remote = _git(["remote", "get-url", "origin"], cwd=repo_dir)
+    authed_remote = _authed_url(remote, provider)
+    _git(["remote", "set-url", "origin", authed_remote], cwd=repo_dir)
+    try:
+        _git(["fetch", "origin", "--depth=1"], cwd=repo_dir)
+    finally:
+        _git(["remote", "set-url", "origin", remote], cwd=repo_dir)
+    ```
+*   `_auth_args()` is kept for backwards compatibility but returns `[]` to bypass `http.extraHeader` injection.
+*   This temporary swapping ensures the plain-text token is never written permanently to `.git/config` on disk.
 
 #### (b) API Requests Integration (`httpx.Auth` Hook)
 ```python
