@@ -1283,7 +1283,7 @@ def _api_reference_data(
     """Fetch and structure API reference data from code chunks (issue #156).
 
     Returns dict with "entries" (list of dicts with path/line/end_line/
-    content/prog_lang, grouped by path) and "columns" metadata.
+    content/prog_lang) and "columns" metadata.
     Module gap chunks are filtered out.  The structured data can be
     rendered to Markdown via _api_reference_to_markdown() or consumed
     directly by dashboards.
