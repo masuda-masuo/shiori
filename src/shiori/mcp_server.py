@@ -1962,6 +1962,8 @@ def status() -> dict[str, Any]:
         "token_provider": token_provider,
     }
 
+from .dashboard import register_dashboard
+register_dashboard(mcp)
 
 def run(transport: Literal["stdio", "sse", "streamable-http"] = "streamable-http") -> None:
     global _auto_sync_thread
