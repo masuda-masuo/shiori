@@ -20,11 +20,35 @@ def register_dashboard(mcp):
         
         template = request.query_params.get("template")
         repo = request.query_params.get("repo")
+        path = request.query_params.get("path")
+        kind = request.query_params.get("kind")
+        
+        public_only_val = request.query_params.get("public_only")
+        public_only = public_only_val.lower() == "true" if public_only_val else True
+        
+        max_results_val = request.query_params.get("max_results")
+        max_results = int(max_results_val) if max_results_val else 500
+        
+        prog_lang = request.query_params.get("prog_lang")
+        
+        max_chars_val = request.query_params.get("max_chars")
+        max_chars = int(max_chars_val) if max_chars_val else 50000
+        
         if not template:
             return JSONResponse({"detail": "template is required"}, status_code=400)
             
         try:
-            result = await run_in_threadpool(report, template=template, repo=repo)
+            result = await run_in_threadpool(
+                report,
+                template=template,
+                repo=repo,
+                path=path,
+                kind=kind,
+                public_only=public_only,
+                max_results=max_results,
+                prog_lang=prog_lang,
+                max_chars=max_chars,
+            )
             return JSONResponse(result)
         except ValueError as e:
             return JSONResponse({"detail": str(e)}, status_code=400)
