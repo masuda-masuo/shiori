@@ -2,10 +2,12 @@ import React, { useEffect, useRef } from "react";
 import mermaid from "mermaid";
 import svgPanZoom from "svg-pan-zoom";
 
-mermaid.initialize({ startOnLoad: false, theme: "dark" });
-
 const MermaidViewer = ({ chart }) => {
   const containerRef = useRef(null);
+
+  useEffect(() => {
+    mermaid.initialize({ startOnLoad: false, theme: "dark" });
+  }, []);
 
   useEffect(() => {
     const renderChart = async () => {

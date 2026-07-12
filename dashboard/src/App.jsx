@@ -19,7 +19,7 @@ const App = () => {
     window.addEventListener("hashchange", handleHash);
 
     // Fetch config to get repos
-    fetch("/api/report?template=stats")
+    fetch("/api/repos")
       .then(res => res.json())
       .then(data => {
         // Mocking repo list extraction from somewhere, or just use one for now

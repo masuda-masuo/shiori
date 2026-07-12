@@ -94,7 +94,7 @@ const ReportView = ({ view, repo }) => {
                 if (searchQuery && view === "symbol_index") {
                   const text = extractText(children).toLowerCase();
                   if (!text.includes(searchQuery.toLowerCase())) {
-                    return null;
+                    return <tr {...props} style={{ display: 'none' }}>{children}</tr>;
                   }
                 }
                 return <tr {...props}>{children}</tr>;
