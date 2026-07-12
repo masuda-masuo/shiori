@@ -1,0 +1,56 @@
+# Detailed Design: MCP Server & Tool Design
+
+## 1. Purpose
+
+Expose retrieval and inspection functionality as Model Context Protocol (MCP) tools, enabling AI agents to search and inspect data using the *pointer-then-fetch* workflow. (For categories and detailed developer use cases, see [Product Definition & Use Cases](13_product_definition_and_use_cases.md)).
+
+---
+
+## 2. Tool Reference Index
+
+*   `shiori_search(query, filters?)`: Performs unified hybrid semantic + keyword search (RRF, k=60). Returns a list of matched chunk pointers and content snippets.
+*   `shiori_keyword_search(query, filters?)`: Morphologically tokenized exact-match search. Used to locate precise identifier matches.
+*   `shiori_list_tree(path?, source_type?, extension?)`: Lists indexed files. Filterable by `source_type` (`doc` or `code`) and file extension (e.g. `.py`, `.md`) (Issue #43).
+*   `shiori_read_file(path, range?)`: Reads local files from the shallow repository clone (supports line range slicing).
+*   `shiori_read_issue(number, repo?, exclude_noise_bots?)`: Retrieves full issue or PR thread timelines sequentially. Setting `exclude_noise_bots=true` filters out comments from non-allowlisted bots (Issue #44).
+*   `shiori_pr_changes(number, repo?, include_diff?)`: Retrieves a list of modified files in a PR. Returns metadata paths, status, lines, and URLs. Setting `include_diff=true` fetches changes along with diff payloads (Issue #54, #100).
+*   `shiori_pr_diff(number, path?, repo?)`: Computes and returns the unified Git diff of a PR without modifying the local active working tree (Issue #96).
+*   `shiori_pr_review_comments(number, repo?)`: Lists review comments with line numbers and file paths (Issue #96).
+*   `shiori_issue_links(number, repo?)`: Analyzes issue descriptions and comments to identify cross-references (such as closes, duplicate, refs, or mentions), returning target title and state (Issue #97).
+*   `shiori_read_pr_file(number, path, range?, repo?)`: Fetches the file content at the head commit of a PR by pulling a temporary ref (Issue #81).
+*   `shiori_grep(pattern, repo?, path?, regex?, ignore_case?, max_results?)`: Performs line-level ripgrep search inside cloned repositories. Designed as a Stage-2 search. Setting `repo="*"` executes cross-repository searches (Issue #146, #151).
+*   `shiori_status()`: Queries system health, sync state cursors, and database row allocations per repository (Issue #22, #31). Reports `auto_sync_running` thread health, token provider strategies, and warning logs (Issue #187, #196).
+
+> **v2.0 Deprecation**: The `shiori_ingest` MCP tool has been deprecated. Synchronization is managed via CLI (`python -m shiori ingest`) or background polling (`SHIORI_SYNC_INTERVAL_SECONDS`).
+
+---
+
+## 3. Status Warning Triggers (Issue #31, #35, #187)
+
+The `warnings` list in `shiori_status` automatically identifies the following system warnings:
+
+| Warning Condition | Meaning |
+|---|---|
+| `age_seconds` exceeds stale threshold | The index has not synced recently. The threshold is `max(sync_interval_seconds * 30, 300s)` when auto-sync is enabled, and 24 hours otherwise. |
+| `consecutive_failures > 0` | Sync attempts are failing. Logs the `last_error` exception. |
+| Token Provider initialization error | Token configurations are broken (reports `token_provider: "error"`, Issue #193). |
+| `chunks["issue"] + chunks["pr_review"] < items_in_db // 2` | Matched chunks are abnormally low compared to database items. Indicates indexing drops. |
+| Missing categories in sync state | Incremental ingestion is incomplete. |
+
+---
+
+## 4. Design Guidelines
+
+*   **Explicit Tool Descriptions**: Since AI model routing accuracy decreases as tool counts grow, each tool description clearly details its purpose. `shiori_search` is explicitly marked as the primary entry point.
+*   **Pointer Principle**: Tool results return pointers to avoid bloat. PR diff contents are read dynamically via `shiori_pr_changes` or `shiori_pr_diff` rather than indexed.
+*   **PR File Read Isolation**: `shiori_read_pr_file` pulls PR branches to an isolated temporary git reference (`refs/shiori/tmp-{uuid}`) and deletes the ref on completion. This prevents concurrent read requests from causing race conditions or modifying the cloned workspace.
+
+---
+
+## 5. Decisions
+
+*   `shiori_search` is the unified hybrid search tool, managing Reciprocal Rank Fusion (RRF) internally (Issue #40).
+*   `shiori_keyword_search` is kept for exact identifier matching.
+*   `shiori_read_pr_file` is created to fetch file contents at PR head without modifying the main branch (Issue #81).
+*   `shiori_grep` supports cross-repository searches via `repo="*"` (Issue #151).
+*   `shiori_grep` defaults `regex` to `True` to match developer habits. Fixed-string matching is supported by passing `regex=False` (Issue #152).

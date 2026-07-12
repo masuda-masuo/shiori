@@ -1,72 +1,79 @@
-# AGENTS.md — Shiori プロジェクトのエージェント指示
+# AGENTS.md — Agent Instructions for the Shiori Project
 
-## MCP ツールを使う前の基本ルール
+## Core Rule Before Using MCP Tools
 
-**未知の MCP ツールを使うときは、まず Shiori でそのツールのドキュメントを検索すること。**
-手探りで使わない。`shiori_search` でツール名＋"使い方" や "workflow" を検索し、
-README や design.md の正規パターンを確認してから操作する。
+**When using an unfamiliar MCP tool, you must search for the tool's documentation in Shiori first.**
+Do not guess how a tool works. Run `shiori_search` with the tool name plus keywords like "usage" or "workflow" to verify the standard pattern from the README or design documents before taking action.
+
+---
 
 ## Shiori (shiori MCP)
 
-プロジェクトナレッジ検索 MCP。定義・ユースケースは `docs/design/13-プロダクト定義とユースケース.md`。
+Shiori is a project knowledge search MCP server. Its definition and use cases are detailed in [docs/design/13_product_definition_and_use_cases.md](docs/design/13_product_definition_and_use_cases.md).
 
-検索（どこに書いてある？）:
+### Search (Where is it written?)
 
-- `shiori_search`: 意味検索の入口。まずこれで調べる
-- `shiori_keyword_search`: 関数名・API 名・エラーコード等の厳密一致
-- `shiori_grep`: クローンの行レベル grep（検索で絞った後の Stage-2、`repo="*"` で横断）
+*   `shiori_search`: The primary hybrid search entry point. Use this first.
+*   `shiori_keyword_search`: Exact match search for function names, API names, error codes, etc.
+*   `shiori_grep`: Run line-level grep on repository clones (Stage-2 search after narrowing down files; use `repo="*"` to grep across all repos).
 
-閲覧（何と書いてある？）:
+### Read (What is written?)
 
-- `shiori_read_issue`: issue/PR のスレッド全体を取得
-- `shiori_read_file`: クローンされた実ファイルを読む（範囲指定可）
-- `shiori_read_pr_file`: PR head のファイルを読む
-- `shiori_list_tree`: リポジトリ構造の閲覧（`source_type` / `extension` で絞り込み）
+*   `shiori_read_issue`: Retrieve the entire timeline thread of an issue or pull request.
+*   `shiori_read_file`: Read a local cloned file (supports line ranges).
+*   `shiori_read_pr_file`: Read a file at a specific PR's head commit.
+*   `shiori_list_tree`: Browse repository file structures (filterable by `source_type` or `extension`).
 
-関係・変更（何とつながっている？何が変わる？）:
+### Relationships & Changes (What is linked? What changes?)
 
-- `shiori_issue_links`: issue/PR の相互参照（closes / duplicate / refs / mention）
-- `shiori_pr_changes`: PR の変更ファイルマップ
-- `shiori_pr_diff`: PR の unified diff
-- `shiori_pr_review_comments`: PR のレビューコメント一覧
+*   `shiori_issue_links`: Returns inbound and outbound links between issues and PRs (such as closes, duplicate, refs, or mentions).
+*   `shiori_pr_changes`: Retrieve the map of modified files in a PR.
+*   `shiori_pr_diff`: Retrieve the unified diff for a PR.
+*   `shiori_pr_review_comments`: Retrieve review comments (with paths and line numbers) for a PR.
 
-運用:
+### Operations
 
-- `shiori_status`: 索引の鮮度確認（自動同期が有効なら通常不要）
+*   `shiori_status`: Check indexing status, freshness, and warnings (unnecessary if auto-sync is enabled).
 
-## sunaba
+---
 
-**正規パターン: `run_container_and_exec` でワンショット実行**
+## Sunaba (sunaba MCP)
 
-```
+**Standard Pattern: Execute via `run_container_and_exec` for single-shot operations**
+
+```python
 run_container_and_exec(
-    image="python@sha256:...",       # 省略可（デフォルトイメージ）
-    clone_repo="owner/repo",         # Shiori の既存クローンから cp -r（ネットワーク不要）
-    clone_dest="/app",               # クローン先（既定 /tmp/repo）
+    image="python@sha256:...",       # Optional (defaults to default image)
+    clone_repo="owner/repo",         # Copies a pre-cloned repo from Shiori (sub-second copy, no network needed)
+    clone_dest="/app",               # Clone destination (defaults to /tmp/repo)
     commands=[
         "cd /app && pip install -e '.[dev]'",
         "cd /app && pytest tests/ -v"
     ],
-    allow_network=True,              # pip install に必須
-    inject_vcs_token=True            # private リポジトリの認証に必要
+    allow_network=True,              # Required to run pip install
+    inject_vcs_token=True            # Required to authenticate private repositories
 )
 ```
 
-- `clone_repo` を指定すると Shiori の既存クローンを `cp -r` でコピー（ネットワークなし、1秒未満）。詳細は `docs/design/12`。
-- clone_repo がない場合: 明示的に `git clone https://...` + `allow_network=True` + `inject_vcs_token=True`
-- clone できないときは `GIT_TERMINAL_PROMPT=0` で確認
-- コンテナには `ripgrep` / `ast-grep` / `fd` が同梱済み（コード検索に使える）
-- `sandbox_initialize` + `sandbox_exec` はセッションが長い場合のみ
+*   Specifying `clone_repo` copies Shiori's local pre-cloned repository using `cp -r` (taking less than a second, bypassing the network). See `docs/design/12_clone_management_and_integration.md`.
+*   If `clone_repo` is omitted, run a standard `git clone` with `allow_network=True` and `inject_vcs_token=True`.
+*   If cloning hangs, set `GIT_TERMINAL_PROMPT=0` to check for interactive prompts.
+*   The default Docker image pre-installs `ripgrep`, `ast-grep`, and `fd` for code search.
+*   Use `sandbox_initialize` and `sandbox_exec` only for long-lived, multi-turn sessions.
+
+---
 
 ## GitHub MCP
 
-- PR 作成: `github_create_pull_request`
-- ファイル操作: `github_create_or_update_file`, `github_push_files`
-- イシュー操作: `github_issue_read`, `github_issue_write`
+*   Create PRs: `github_create_pull_request`
+*   Modify files: `github_create_or_update_file`, `github_push_files`
+*   Manage issues: `github_issue_read`, `github_issue_write`
 
-## プロジェクト固有
+---
 
-- テスト実行: `PYTHONPATH=src python3 -m pytest tests/ -v`
-- 本番環境では `psycopg` が必要 → Docker Compose で PostgreSQL を起動
-- リポジトリ: masuda-masuo/shiori, masuda-masuo/sunaba
-- 索引更新（CLI）: `python -m shiori ingest`（`shiori_ingest` MCP ツールは廃止）
+## Project-Specific Instructions
+
+*   Run tests: `PYTHONPATH=src python3 -m pytest tests/ -v`
+*   Production DB dependencies: Requires PostgreSQL running (starts via Docker Compose).
+*   Target Repositories: `masuda-masuo/shiori`, `masuda-masuo/sunaba`
+*   Update index via CLI: Run `python -m shiori ingest` (the `shiori_ingest` MCP tool is deprecated).
