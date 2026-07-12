@@ -1280,6 +1280,95 @@ def report(
     raise AssertionError("Unreachable template code path")
 
 
+import ast
+
+def _extract_python_api_from_file(file_path: str, base_path: str) -> list[dict]:
+    try:
+        with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+            content = f.read()
+        tree = ast.parse(content, filename=file_path)
+    except Exception:
+        return []
+
+    entries = []
+    rel_path = os.path.relpath(file_path, base_path)
+
+    class Visitor(ast.NodeVisitor):
+        def __init__(self):
+            self.current_class = None
+            self.docs = []
+
+        def visit_ClassDef(self, node):
+            doc = ast.get_docstring(node) or ""
+            sig = f"class {node.name}"
+            bases_names = []
+            for b in node.bases:
+                if isinstance(b, ast.Name):
+                    bases_names.append(b.id)
+                elif isinstance(b, ast.Attribute):
+                    bases_names.append(b.attr)
+            if bases_names:
+                sig += f"({', '.join(bases_names)})"
+            
+            self.docs.append({
+                "type": "class",
+                "name": node.name,
+                "signature": sig,
+                "docstring": doc,
+                "line": node.lineno,
+                "parent": self.current_class
+            })
+            
+            prev_class = self.current_class
+            self.current_class = node.name
+            self.generic_visit(node)
+            self.current_class = prev_class
+
+        def _visit_func(self, node, is_async=False):
+            doc = ast.get_docstring(node) or ""
+            args = []
+            for arg in node.args.args:
+                args.append(arg.arg)
+            prefix = "async def" if is_async else "def"
+            sig = f"{prefix} {node.name}({', '.join(args)})"
+            
+            self.docs.append({
+                "type": "method" if self.current_class else "function",
+                "name": node.name,
+                "signature": sig,
+                "docstring": doc,
+                "line": node.lineno,
+                "parent": self.current_class
+            })
+            self.generic_visit(node)
+
+        def visit_FunctionDef(self, node):
+            self._visit_func(node, is_async=False)
+
+        def visit_AsyncFunctionDef(self, node):
+            self._visit_func(node, is_async=True)
+
+    visitor = Visitor()
+    visitor.visit(tree)
+    
+    filtered = []
+    for doc in visitor.docs:
+        name = doc["name"]
+        if name.startswith("_") and not (name.startswith("__") and name.endswith("__")):
+            continue
+        filtered.append({
+            "path": rel_path,
+            "line": doc["line"],
+            "type": doc["type"],
+            "name": name,
+            "signature": doc["signature"],
+            "docstring": doc["docstring"],
+            "parent": doc["parent"]
+        })
+        
+    return filtered
+
+
 def _api_reference_data(
     target_repo: str,
     path_prefix: str | None = None,
@@ -1293,30 +1382,53 @@ def _api_reference_data(
     rendered to Markdown via _api_reference_to_markdown() or consumed
     directly by dashboards.
     """
-    with _conn() as conn:
-        chunks = db.get_code_chunks(
-            conn,
-            repo=target_repo,
-            prog_lang=prog_lang,
-            path_prefix=path_prefix,
-        )
-
+    from .config import load_settings
+    settings = load_settings()
+    base = os.path.realpath(settings.repo_dir(target_repo))
+    
+    search_dir = os.path.join(base, path_prefix) if path_prefix else base
+    py_files = []
+    if os.path.isdir(search_dir):
+        for root, _, files in os.walk(search_dir):
+            for file in files:
+                if file.endswith(".py"):
+                    py_files.append(os.path.join(root, file))
+    elif os.path.isfile(search_dir) and search_dir.endswith(".py"):
+        py_files.append(search_dir)
+        
     entries: list[dict[str, Any]] = []
-    for chunk in chunks:
-        content = chunk["content"]
-        first_line = content.split("\n")[0] if content else ""
-        if first_line.startswith("[") and first_line.endswith("(module)"):
-            continue
-        entries.append({
-            "path": chunk["path"],
-            "line": chunk["line"],
-            "end_line": chunk["end_line"],
-            "content": content,
-            "prog_lang": chunk.get("prog_lang") or "",
-        })
+    if py_files and (prog_lang is None or prog_lang.lower() == "python"):
+        for py_file in sorted(py_files):
+            entries.extend(_extract_python_api_from_file(py_file, base))
+            
+    if not entries:
+        with _conn() as conn:
+            chunks = db.get_code_chunks(
+                conn,
+                repo=target_repo,
+                prog_lang=prog_lang,
+                path_prefix=path_prefix,
+            )
+
+        for chunk in chunks:
+            content = chunk["content"]
+            first_line = content.split("\n")[0] if content else ""
+            if first_line.startswith("[") and first_line.endswith("(module)"):
+                continue
+            entries.append({
+                "path": chunk["path"],
+                "line": chunk["line"],
+                "end_line": chunk["end_line"],
+                "type": "raw_chunk",
+                "name": os.path.basename(chunk["path"]),
+                "signature": f"Chunk L{chunk['line']}-L{chunk['end_line']}",
+                "docstring": content,
+                "prog_lang": chunk.get("prog_lang") or "",
+                "parent": None,
+            })
 
     return {
-        "columns": ["path", "line", "end_line", "content", "prog_lang"],
+        "columns": ["path", "line", "type", "name", "signature", "docstring", "parent"],
         "entries": entries,
     }
 
@@ -1340,11 +1452,28 @@ def _api_reference_to_markdown(
         if path != current_path:
             path_header = f"## {path}\n\n"
 
-        line_range = f"L{entry['line']}-L{entry['end_line']}"
-        lang = entry["prog_lang"]
-        chunk_md = f"{line_range}\n```{lang}\n{entry['content']}\n```\n\n"
-
-        added_md = path_header + chunk_md
+        if entry["type"] == "raw_chunk":
+            line_range = f"L{entry['line']}-L{entry['end_line']}"
+            lang = entry["prog_lang"]
+            chunk_md = f"{line_range}\n```{lang}\n{entry['docstring']}\n```\n\n"
+            added_md = path_header + chunk_md
+        else:
+            docstring_fmt = ""
+            if entry["docstring"]:
+                # Indent docstring to look like blockquote
+                docstring_lines = entry["docstring"].strip().split("\n")
+                indented_doc = "\n".join(f"> {line}" for line in docstring_lines)
+                docstring_fmt = f"{indented_doc}\n\n"
+            
+            if entry["type"] == "class":
+                item_md = f"### class `{entry['signature']}`\n\n{docstring_fmt}"
+            else:
+                if entry["parent"]:
+                    item_md = f"  - **`{entry['signature']}`**\n\n{docstring_fmt}"
+                else:
+                    item_md = f"### `{entry['signature']}`\n\n{docstring_fmt}"
+            
+            added_md = path_header + item_md
 
         if current_length + len(added_md) > max_chars:
             truncated = True
