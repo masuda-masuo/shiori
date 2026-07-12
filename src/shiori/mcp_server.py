@@ -1261,6 +1261,7 @@ def report(
             "template": template,
             "markdown": markdown,
             "truncated": truncated,
+            "data": result.get("data"),
         }
 
     elif template == "api_reference":
@@ -1690,6 +1691,7 @@ def _report_symbol_index(
     return {
         "markdown": _symbol_index_to_markdown(data),
         "truncated": data["truncated"],
+        "data": data,
     }
 
 
