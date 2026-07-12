@@ -1,125 +1,123 @@
 # shiori 栞
 
-**プロジェクトナレッジ検索 MCP** — GitHub リポジトリに散在するプロジェクトナレッジ（ドキュメント・ソースコード・issue/PR の議論）を、AI エージェントが横断して検索し、関連付けてたどれるようにするローカルな MCP サーバー。ファイル全文をコンテキストに流し込むのではなく、関連箇所への「ポインタ」を返す。
+**Project Knowledge Search MCP** — A local MCP server that enables AI agents to search across and navigate between project knowledge scattered throughout GitHub repositories (documents, source code, issues, and PR threads). Instead of feeding entire files into the AI's context window, it returns "pointers" to relevant locations.
 
- 栞（shiori）＝ブックマーク。検索が該当箇所への栞を返し、エージェントは必要だと判断したときだけ全文を取りに行く — それがこのツールの核心。
+> *栞 (shiori)* = Bookmark. The core design principle is that the search tool returns a bookmark, and the AI agent retrieves the full text only when it decides it is necessary.
 
-shiori は RAG（検索拡張生成）ではない。回答の生成や自動的なコンテキスト注入は行わず、検索（Retrieval）とナレッジナビゲーションに徹する。判断と生成の主体はエージェント側にある。定義の詳細とユースケースは `docs/design/13-プロダクト定義とユースケース.md` を参照。
+Shiori is not a generator or context injector. It does not generate answers or automatically stuff contexts; it focuses purely on retrieval and knowledge navigation. The responsibility of reasoning and generation remains with the agent. For definitions and use cases, see [docs/design/13_product_definition_and_use_cases.md](docs/design/13_product_definition_and_use_cases.md).
 
-## なぜ作るか
+---
 
-プロジェクトについての一つの問いに答える知識は、性質の異なるソースに分散している。「何を・どうやって」は main 上のドキュメントとコードに、「なぜ」— 設計判断の経緯、却下案、既知バグと回避策 — は issue/PR のスレッドにしか残っていない。
+## Why Shiori?
 
-このうちコードとドキュメントは、クローンさえあれば grep で読める。しかし issue/PR の議論は GitHub 上にしかなく、GitHub 標準の検索は意味検索でもクロスリンガルでもないため、クローズ済みスレッドに埋もれた経緯へエージェントが到達する実用的な手段がない。
+Answering a question about a project requires information spread across different types of sources. "What" and "How" are defined in documents and code on the `main` branch. However, the "Why" — the history of design decisions, rejected alternatives, known bugs, and workarounds — lives only in issue and PR threads.
 
-shiori の核心は、この 3 種のナレッジを**単一の索引で横断検索でき、相互に関連付けてたどれる**ことにある。一回の検索でドキュメント・コード・議論が同じランキングに載り、ヒットした issue から解決 PR へ（`shiori_issue_links`）、PR から変更ファイルへ（`shiori_pr_changes`）、関連する設計書・実装へと、ソースの境界を越えて移動できる。クロスリンガル検索がこの横断性を言語の壁も越えて効かせる — 日本語で尋ねて英語のドキュメントや議論を引ける（逆も）。
+While code and documents can be read using `grep` once a repository is cloned, issue and PR discussions exist only on GitHub. Standard GitHub search is neither semantic nor cross-lingual, meaning AI agents have no practical way to discover context buried in closed threads.
 
-検索結果は全文ではなくポインタで返し、エージェントは必要な断片だけを取得する（pointer-then-fetch）。これは存在理由ではなく、横断検索の結果がコンテキストを汚さない（無関係な全文が有用な文脈を押し出さない）ための設計原則である。
+Shiori solves this by placing these three knowledge types (documents, code, and issues/PRs) in a **single index for cross-searching and linking**. A single query returns documents, code, and discussions in the same unified ranking. The AI can then cross boundaries by navigating from a hit issue to its resolving PR ([`shiori_issue_links`](#mcp-tools)), from the PR to modified files ([`shiori_pr_changes`](#mcp-tools)), and on to design specs and implementation. Cross-lingual search operates across languages, enabling queries in Japanese to find documents and issues in English (and vice versa).
 
-## 目的とスコープ
+Returning pointers (the *pointer-then-fetch* pattern) prevents search results from bloating the AI's context window.
 
-shiori の存在理由は、性質の異なるナレッジ — 確定情報（main 上のドキュメントとコード）と「なぜ」の記録（issue/PR の議論） — を**横断して検索し、関連付けてたどれる**ことにある。
+---
 
-利用頻度の主役は確定情報である。「いま正しい状態は何か」に答える検索・取得が最も多く使われる。ただし確定情報はクローンと grep でも読めるため、shiori でなければ到達できないのは issue/PR 側 — 過去（クローズ／マージ済み）・現在（進行中）・未来や未確定（提案・ドラフト・却下案）が混在する「なぜ」の記録 — の方である。横断検索はこの両者を一回の検索で同じランキングに載せ、issue → 解決 PR → 変更ファイル → 設計書とリンクでたどらせる。
+## Purpose and Scope
 
-issue / PR は確定情報ではない。現在の情報を精査したり更新したりする際に、PR の diff や変更後ファイルの全文が要ることはある。その場合に備え、shiori は**そこへ到達するためのポインタ**（座標・URL）だけを持つ。
+Shiori's purpose is to search and navigate between **factual specs** (documents and code on the main branch) and the **records of intent** (issue/PR discussions).
 
-全文コンテンツそのものは保持しない。全部を抱えると GitHub の再発明になるため、未確定コンテンツの全文取得は GitHub MCP 等に委譲する。shiori の価値は「確定情報を引く」ことと「未確定情報へ素早く到達させる」ことに絞る。また、起票前の重複チェックや、issue の詳細設計のための背景調査（UC-9 / UC-10）など、新規ナレッジ作成の「土台」としても shiori は機能するが、実際の issue 起票やコメント書き込みといった変更操作はすべて GitHub MCP に委譲する（shiori は読み取り専用に徹する）。
+Factual specs represent the most common queries ("what is the current state?"). However, since specs can be read using clones and grep, the primary value of Shiori is linking to issue/PR threads — records of "why" containing past (closed), present (active), and future/draft decisions.
 
-## 情報ソース
+Shiori does not host full files or diffs for ongoing PRs (which would duplicate GitHub). Instead, it returns **pointers** (file coordinates, line ranges, or URLs) to these files, delegating full-text retrieval of in-flight resources to servers like the GitHub MCP. Shiori serves as the read-only foundation for analysis and duplicate issue checking, while modifications (creating issues, posting comments) are delegated.
 
-| ソース | 内容 | 性質 | ストア | 答えるもの |
+---
+
+## Information Sources
+
+| Source | Content | Character | Store | Purpose |
 |---|---|---|---|---|
-| ドキュメント | main 上の Markdown | 確定・現在 | 索引（DB）＋ クローン | 何を・どうやって |
-| ソースコード | main 上の `.py` / `.ts` / `.go` 等 | 確定・現在 | 索引（DB, 任意）＋ クローン | 実装の現在状態 |
-| issue | 本文＋コメント | 過去〜未確定が混在 | 索引（DB） | なぜ（経緯・既知バグ・回避策） |
-| PR | 本文＋レビューコメント（`diff_hunk` 付き） | 過去〜未確定が混在 | 索引（DB） | なぜ（設計判断・レビュー） |
-| PR 変更 | 変更ファイル一覧＋増減＋`head_sha`＋URL | 未確定（in-flight）のポインタ | ポインタ（DB） | レビュー・更新の起点 |
+| **Documents** | Markdown on `main` | Factual & Current | Postgres + Disk Clone | What & How |
+| **Source Code** | `.py` / `.ts` / `.go` on `main` | Factual & Current | Postgres + Disk Clone | Current implementation status |
+| **Issues** | Description & Comments | Blended history | Postgres | Why (history, workarounds) |
+| **Pull Requests** | Description & Review Comments | Blended history | Postgres | Why (design decisions) |
+| **PR Changes** | File list + additions/deletions + head_sha | In-flight metadata | Postgres pointer | Start point for reviews |
 
-ストアは 2 系統に分かれる:
+Stores are divided into two categories:
+*   **Database (PostgreSQL)**: Serves search requests. Returns pointers and snippets.
+*   **Clones (Local Disk)**: Serves full-text reads via `shiori_read_file`. Represents shallow checkouts of the `main` branch.
 
-- **索引（Postgres）** — 検索が引く対象。返るのはポインタ＋スニペット。
-- **クローン（ディスク）** — `shiori_read_file` が全文を読む対象。main 固定の浅いチェックアウト。
+Bot comments (e.g. Dependabot) are excluded from the index to reduce noise. Specific bots posting on behalf of users can be allowlisted using the `SHIORI_INDEX_BOT_LOGINS` environment variable (comma-separated names, e.g. `app[bot]`).
 
-ドキュメントは「何を・どうやって」を、issue / PR は「なぜ」（決定の経緯、却下案、バグ、回避策 — docs に載らない暗黙知）を残す。全文の diff や PR head のファイルなど**未確定コンテンツの全文は保持せず**、shiori が返す座標（`repo` / PR 番号 / `head_sha` / `path` / URL）で GitHub MCP 側から取得する。
+---
 
-日本語・英語の両方に対応し、クロスリンガル検索（日本語で尋ねて英語ドキュメントを引く、その逆も）にも対応する。
+## How It Works
 
-dependabot 等の bot 投稿は検索ノイズを避けるため原則索引から除外される。GitHub App 経由でユーザーの代理として投稿する bot は `SHIORI_INDEX_BOT_LOGINS` 環境変数で allowlist 指定できる（issue #25）。設定値は GitHub App 名 + `[bot]` 形式のログイン名をカンマ区切りで指定する。
+1.  **Ingestion**: Downloads docs and issues/PRs, splits them into chunks (documents are chunked by headings, discussions by comments with title context), and attaches metadata. Supports differential sync.
+2.  **Indexing**: Stores vector embeddings, full-text tokens, and metadata in PostgreSQL.
+3.  **Search**: Runs hybrid search (vector similarity + full-text keyword search via Reciprocal Rank Fusion) combined with metadata filtering.
+4.  **Delivery**: Exposes search APIs as MCP tools for the AI agent.
 
-## 仕組み
+---
 
-1. **取り込み** — docs と issue/PR を取得し、チャンクに分割（docs は見出し単位、議論はコメント単位＋タイトル文脈）、メタデータを付与する。差分同期に対応。
-2. **索引** — 埋め込み＋全文＋メタデータを Postgres に格納する。
-3. **検索** — ハイブリッド検索（ベクトル類似度＋全文キーワード、RRF 融合）にメタデータのフィルタを併用する。
-4. **提供** — MCP ツールとして公開し、エージェントがまず検索し、後から取得する。
+## Architecture
 
-## アーキテクチャ
+*   **Store**: PostgreSQL with `pgvector` (embeddings) + `pgroonga` (Japanese-capable full-text search with tokenization). Vector, keyword, and metadata layers are handled in a single database, with hybrid RRF fusion written in SQL.
+*   **Embeddings**: Local cross-lingual model (defaults to `multilingual-e5-small`). Runs locally to protect data privacy.
+*   **Runtime**: Docker Compose separating the DB and MCP server. DB volumes and model caches are persisted.
 
-- **ストア:** PostgreSQL — `pgvector`（埋め込み）＋ `pgroonga`（日本語対応の全文検索。TokenMecab → TokenBigram フォールバック）＋ メタデータ列。ベクトル・全文・メタデータを単一 DB で扱い、ハイブリッドの融合（RRF）も SQL ＋薄いアプリ層で完結。
-- **埋め込み:** ローカルの多言語／クロスリンガルモデル（既定: `multilingual-e5-small`。プライベートに実行、データを外部に出さない）。
-- **実行環境:** Docker Compose で DB と MCP サーバーの 2 サービスを分離。DB データとモデルキャッシュは named volume に永続化。
+---
 
-## MCP ツール
+## MCP Tools
 
-12 ツールを「ユーザーの問い」で 4 層に分類している（詳細は `docs/design/13-プロダクト定義とユースケース.md`）。
+The 12 tools are classified into 4 layers based on user query intent:
 
-**① 検索 — どこに書いてある？**
+### 1. Retrieval (Where is it written?)
+*   `shiori_search`: Unified hybrid search (vector + keyword RRF). Strong at conceptual mapping, phrasing variations, and cross-lingual queries.
+*   `shiori_keyword_search`: Exact match and identifier search. Designed for function names, APIs, and error codes.
+*   `shiori_grep`: Line-level ripgrep on cloned repositories. Used as a Stage-2 search.
 
-- `shiori_search` — 統合入口。意味＋キーワードのハイブリッド検索（RRF 融合）。概念・言い換え・クロスリンガルに強い
-- `shiori_keyword_search` — 完全一致／識別子検索（日本語対応トークナイズ）。関数名・API 名・エラーコード向け
-- `shiori_grep` — クローンを ripgrep で行レベル検索。検索でファイルを絞った後の Stage-2。`repo="*"` で横断検索
+### 2. Inspection (What is written?)
+*   `shiori_read_file`: Reads files from the main-branch clone (supports line ranges).
+*   `shiori_read_issue`: Retrieves issues or PR timelines sequentially (supports batching).
+*   `shiori_read_pr_file`: Reads files at a specific PR's head commit.
+*   `shiori_list_tree`: Lists file paths for indexed documents and code.
 
-**② 閲覧 — 何と書いてある？**
+### 3. Relationships & Diff (How is it connected? What changes?)
+*   `shiori_issue_links`: Returns inbound and outbound links between issues and PRs.
+*   `shiori_pr_changes`: Returns metadata of files changed in a PR.
+*   `shiori_pr_diff`: Calculates and returns unified diffs for a PR (supports path scoping).
+*   `shiori_pr_review_comments`: Lists review comments with line numbers.
 
-- `shiori_read_file` — クローン（main 固定）の実ファイルを範囲指定で読む
-- `shiori_read_issue` — issue/PR スレッド全体を時系列で取得（`numbers` で一括取得可）
-- `shiori_read_pr_file` — PR head 時点のファイルを git 経由で透過取得
-- `shiori_list_tree` — リポジトリ構造の閲覧。`source_type`（`doc` / `code`）と `extension`（`.py` / `.md` 等）で絞り込み可能
+### 4. Operations (Is the index fresh?)
+*   `shiori_status`: Inspects index status, sync times, and warnings.
 
-**③ 関係・変更 — 何とつながっている？何が変わる？**
+---
 
-- `shiori_issue_links` — issue/PR の相互参照（closes / duplicate / refs / mention）を inbound/outbound で返す
-- `shiori_pr_changes` — PR の変更ファイルマップ（head_sha・path・status・増減・blob_url）
-- `shiori_pr_diff` — PR の unified diff を git で計算して返す（`path` で単一ファイルに絞れる）
-- `shiori_pr_review_comments` — PR のレビューコメント一覧（パス・行番号付き）
-
-**④ 運用 — 索引は新しいか？**
-
-- `shiori_status` — 索引の鮮度と健全性の確認（最終同期時刻・件数内訳・警告）
-
-検索系ツールは全文ではなくポインタ（パス／見出しパス／issue 番号＋スニペット＋GitHub URL）を返す。
-
-## クイックスタート
+## Quick Start
 
 ```bash
-cp .env.example .env   # SHIORI_REPOS / GITHUB_TOKEN を設定
+cp .env.example .env   # Configure SHIORI_REPOS and GITHUB_TOKEN
 docker compose up -d --build
 
-# 初回の索引作成（private リポジトリには事前に .env の認証設定が必要 — セットアップ.md 参照）
+# Initial ingestion (may take time to download the embedding model)
 docker compose run --rm ingest
 ```
 
-MCP クライアントからは `http://localhost:8765/mcp`（streamable HTTP）に接続する。詳細は `docs/guides/セットアップ.md`。
+The MCP server is exposed at `http://localhost:8765/mcp` (Streamable HTTP). See [docs/guides/setup.md](docs/guides/setup.md) for details.
 
-### 索引からリポジトリを外す
-
-`SHIORI_REPOS` から消しただけでは、そのリポジトリの行と clone は索引に残り続ける（検索に出てくる）。`forget` で落とす:
+### Removing Repositories from the Index
+Removing a repository from `SHIORI_REPOS` does not delete its existing rows or disk clones. Delete it explicitly using `forget`:
 
 ```bash
 docker compose run --rm app python -m shiori forget --repo owner/name
 ```
+This removes database entries, counts deleted rows, and deletes local disk clones.
 
-削除した行数をテーブルごとに表示し、ローカルの clone も消す（`--keep-clone` で残せる）。
-`SHIORI_REPOS` に載っている必要はない — リネーム後の旧リポジトリ名など、**すでに一覧から外したもの**を消すためのコマンドなので。
+---
 
-`ingest --rebuild` は全リポジトリの索引を捨てて作り直すため、1つ外すためだけに使うと巻き添えが大きい。
+## Documentation Map
 
-## ドキュメント構成
-
-- `docs/design/00-基本設計.md` — 全体像と設計方針・決定ログ
-- `docs/design/01〜12-*.md` — トピック別の詳細設計（各ファイルに v1 の決定を記録）
-- `docs/design/13-プロダクト定義とユースケース.md` — プロダクト定義・ツールカタログ（4 層モデル）・ユースケース集
-- `docs/design/14-マルチソース抽象化.md` — GitHub 以外のソースを載せるための抽象化
-- `docs/design/15-トークン供給経路.md` — 認証方式の選択規則（消費者の位置と更新責任）
-- `docs/guides/セットアップ.md` — セットアップ・運用手順
+*   [docs/design/00_basic_design.md](docs/design/00_basic_design.md) — Architectural overview, design policies, and decision logs.
+*   `docs/design/01_*.md` to `docs/design/12_*.md` — Topic-specific detailed design logs.
+*   [docs/design/13_product_definition_and_use_cases.md](docs/design/13_product_definition_and_use_cases.md) — Definitions, tool catalogs, and use cases.
+*   [docs/design/14_multi_source_abstraction.md](docs/design/14_multi_source_abstraction.md) — Abstract design for supporting non-GitHub sources.
+*   [docs/design/15_token_supply_path.md](docs/design/15_token_supply_path.md) — Credential caching and refresh rules.
+*   [docs/guides/setup.md](docs/guides/setup.md) — Onboarding and operational guides.

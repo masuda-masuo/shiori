@@ -1,5 +1,5 @@
-# 手順
+# Guides
 
-セットアップ・取り込み・運用などの手順をここに置く。
+Guides for setup, ingestion, and operations are placed here.
 
-（実装の進行に合わせて追記予定）
+(To be updated as implementation progresses)
