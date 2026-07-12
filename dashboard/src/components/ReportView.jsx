@@ -26,6 +26,9 @@ const ReportView = ({ view, repo }) => {
 
     const params = new URLSearchParams({ template: view });
     if (repo) params.set("repo", repo);
+    if (view === "symbol_index" || view === "module_tree") {
+      params.set("max_results", "10000");
+    }
 
     fetch(`/api/report?${params}`)
       .then(async (res) => {
