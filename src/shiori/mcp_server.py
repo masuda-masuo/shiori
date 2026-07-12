@@ -1786,7 +1786,8 @@ def _module_tree_data(
 
 def _module_tree_to_markdown(data: dict[str, Any]) -> str:
     """Render hierarchical tree data as a Mermaid mindmap."""
-    lines = ["```mermaid", "mindmap", f"  root[\"{data['root_name']}\"]"]
+    safe_root = data['root_name'].replace('"', '&quot;')
+    lines = ["```mermaid", "mindmap", f"  root[\"{safe_root}\"]"]
 
     node_counter = [0]
 
@@ -1795,13 +1796,13 @@ def _module_tree_to_markdown(data: dict[str, Any]) -> str:
         for n in nodes:
             node_counter[0] += 1
             nid = f"n{node_counter[0]}"
-            safe_name = n['name'].replace('"', '\\"')
+            safe_name = n['name'].replace('"', '&quot;')
             result.append(f"{'  ' * indent}{nid}[\"{safe_name}\"]")
             if n.get("children"):
                 result.extend(_render(n["children"], indent + 1))
         return result
 
-    lines.extend(_render(data["tree"], indent=3))
+    lines.extend(_render(data["tree"], indent=2))
     lines.append("```")
     if data["truncated"]:
         lines.append(f"*Truncated: showing {data['total_nodes']} directory nodes (symbol level omitted)*")

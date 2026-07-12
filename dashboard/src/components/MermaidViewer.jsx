@@ -6,7 +6,14 @@ const MermaidViewer = ({ chart }) => {
   const containerRef = useRef(null);
 
   useEffect(() => {
-    mermaid.initialize({ startOnLoad: false, theme: "dark" });
+    mermaid.initialize({ 
+      startOnLoad: false, 
+      theme: "dark",
+      parseError: (err) => {
+        // Suppress Mermaid's default behavior of appending error divs to document.body
+        console.warn("Suppressed Mermaid parse error:", err);
+      }
+    });
   }, []);
 
   useEffect(() => {
@@ -14,7 +21,11 @@ const MermaidViewer = ({ chart }) => {
       if (containerRef.current) {
         containerRef.current.innerHTML = "";
         try {
-          const { svg } = await mermaid.render("mermaid-svg-" + Date.now(), chart);
+          // Validate syntax first to avoid rendering glitches
+          await mermaid.parse(chart);
+
+          const uniqueId = "mermaid-svg-" + Math.random().toString(36).substring(2, 9);
+          const { svg } = await mermaid.render(uniqueId, chart);
           containerRef.current.innerHTML = svg;
           
           const svgElement = containerRef.current.querySelector("svg");
@@ -30,7 +41,7 @@ const MermaidViewer = ({ chart }) => {
           }
         } catch (err) {
           console.error("Mermaid error:", err);
-          containerRef.current.innerHTML = `<div class="error-container">Failed to render Mermaid chart.</div>`;
+          containerRef.current.innerHTML = `<div class="error-container" style="padding: 2rem; text-align: center; color: #ef4444;">Failed to render Mermaid chart. Check syntax or repo structure.</div>`;
         }
       }
     };
