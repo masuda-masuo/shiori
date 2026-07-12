@@ -31,9 +31,6 @@ def main() -> None:
         help="delete indexed rows but keep the local git clone",
     )
 
-    p_dashboard = sub.add_parser("dashboard", help="start dashboard backend API")
-    p_dashboard.add_argument("--port", type=int, default=8000, help="Port to listen on (default: 8000)")
-
     p_serve = sub.add_parser("serve", help="start MCP server")
     p_serve.add_argument(
         "--transport",
@@ -55,10 +52,6 @@ def main() -> None:
             print(f"{repo}: {sum(deleted.values())} rows deleted")
             for table, n in deleted.items():
                 print(f"  {table}: {n}")
-    elif args.command == "dashboard":
-        from .dashboard_api import run
-
-        run(port=args.port)
     elif args.command == "serve":
         from .mcp_server import run
 
