@@ -1638,12 +1638,17 @@ def _module_tree_data(
 
 def _module_tree_to_markdown(data: dict[str, Any]) -> str:
     """Render hierarchical tree data as a Mermaid mindmap."""
-    lines = ["```mermaid", "mindmap", f"  root(({data['root_name']}))"]
+    lines = ["```mermaid", "mindmap", f"  root((\"{data['root_name']}\"))"]
+
+    node_counter = [0]
 
     def _render(nodes: list[dict], indent: int = 2) -> list[str]:
         result: list[str] = []
         for n in nodes:
-            result.append(f"{'  ' * indent}{n['name']}")
+            node_counter[0] += 1
+            nid = f"n{node_counter[0]}"
+            safe_name = n['name'].replace('"', '\\"')
+            result.append(f"{'  ' * indent}{nid}[\"{safe_name}\"]")
             if n.get("children"):
                 result.extend(_render(n["children"], indent + 1))
         return result

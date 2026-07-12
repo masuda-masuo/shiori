@@ -13,6 +13,7 @@
     "vite": "^5.0.0"
   },
   "dependencies": {
+    "jsdom": "^29.1.1",
     "lucide-react": "^1.24.0",
     "mermaid": "^10.0.0",
     "react": "^19.2.7",
