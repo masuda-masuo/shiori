@@ -1638,7 +1638,7 @@ def _module_tree_data(
 
 def _module_tree_to_markdown(data: dict[str, Any]) -> str:
     """Render hierarchical tree data as a Mermaid mindmap."""
-    lines = ["```mermaid", "mindmap", f"  root((\"{data['root_name']}\"))"]
+    lines = ["```mermaid", "mindmap", f"  root[\"{data['root_name']}\"]"]
 
     node_counter = [0]
 
