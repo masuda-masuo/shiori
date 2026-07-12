@@ -207,7 +207,7 @@ def _run_alter_statements(conn: psycopg.Connection) -> None:
             ("prog_lang", "TEXT"),
             ("symbols", "TEXT"),
         ]:
-            cur.execute(f"ALTER TABLE chunks ADD COLUMN IF NOT EXISTS {col} {typ}")
+            cur.execute(f"ALTER TABLE chunks ADD COLUMN IF NOT EXISTS {col} {typ}")  # type: ignore[arg-type]
     conn.commit()
 
     # 3. Add doc_files.kind (existing rows stay 'doc')
@@ -254,7 +254,7 @@ def _run_alter_statements(conn: psycopg.Connection) -> None:
 def migrate_light(conn: psycopg.Connection, settings: Settings) -> None:
     """Create tables, constraints, and btree indexes only. Skip HNSW/pgroonga (issue #72)."""
     with conn.cursor() as cur:
-        cur.execute(SCHEMA_SQL.format(dim=settings.embedding_dim))
+        cur.execute(SCHEMA_SQL.format(dim=settings.embedding_dim))  # type: ignore[arg-type]
     conn.commit()
     _run_alter_statements(conn)
 
@@ -264,7 +264,7 @@ def _create_pgroonga_index(conn: psycopg.Connection, index_name: str, column: st
     try:
         with conn.cursor() as cur:
             cur.execute(
-                f"CREATE INDEX IF NOT EXISTS {index_name} "
+                f"CREATE INDEX IF NOT EXISTS {index_name} "  # type: ignore[arg-type]
                 f"ON chunks USING pgroonga ({column}) WITH (tokenizer = 'TokenMecab')"
             )
         conn.commit()
@@ -273,7 +273,7 @@ def _create_pgroonga_index(conn: psycopg.Connection, index_name: str, column: st
         conn.rollback()
         with conn.cursor() as cur:
             cur.execute(
-                f"CREATE INDEX IF NOT EXISTS {index_name} "
+                f"CREATE INDEX IF NOT EXISTS {index_name} "  # type: ignore[arg-type]
                 f"ON chunks USING pgroonga ({column})"
             )
         conn.commit()
@@ -287,7 +287,7 @@ def create_heavy_indexes(conn: psycopg.Connection) -> None:
         cur.execute(
             f"CREATE INDEX IF NOT EXISTS {_HNSW_INDEX} "
             "ON chunks USING hnsw (embedding vector_cosine_ops)"
-        )
+        )  # type: ignore[arg-type]
     conn.commit()
     log.info("HNSW index created: %s", _HNSW_INDEX)
 
@@ -299,7 +299,7 @@ def drop_heavy_indexes(conn: psycopg.Connection) -> None:
     """Drop HNSW and pgroonga indexes (issue #72). Temporarily dropped during bulk load for performance."""
     for idx in (_HNSW_INDEX, _PGROONGA_CONTENT_INDEX, _PGROONGA_SYMBOLS_INDEX):
         with conn.cursor() as cur:
-            cur.execute(f"DROP INDEX IF EXISTS {idx}")
+            cur.execute(f"DROP INDEX IF EXISTS {idx}")  # type: ignore[arg-type]
         conn.commit()
         log.info("dropped index: %s", idx)
 
@@ -370,7 +370,8 @@ def record_sync_run(
             """,
             (repo, route, docs_updated, issues_indexed, code_indexed),
         )
-        finished_at = cur.fetchone()[0]
+        row = cur.fetchone()
+        finished_at = row[0] if row is not None else None
     conn.commit()
     return finished_at
 

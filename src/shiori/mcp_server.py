@@ -11,7 +11,7 @@ import re
 import subprocess
 import threading
 import time
-from typing import Any
+from typing import Any, Literal
 
 from mcp.server.fastmcp import FastMCP
 
@@ -59,8 +59,8 @@ def _conn():
 def _infer_repo_from_cwd() -> str | None:
     """Infer repo from git remote of current working directory."""
     try:
-        result = subprocess.run(  # noqa: S607
-            ["git", "remote", "get-url", "origin"],
+        result = subprocess.run(  # noqa: S603, S607
+            ["git", "remote", "get-url", "origin"],  # noqa: S607
             capture_output=True, text=True, timeout=5,
         )
         if result.returncode != 0:
@@ -268,7 +268,8 @@ def _do_sync(
                 # --- Cross-process mutex: advisory lock ---
                 with conn.cursor() as cur:
                     cur.execute("SELECT pg_try_advisory_lock(%s)", (SYNC_LOCK_KEY,))
-                    acquired = cur.fetchone()[0]
+                    row = cur.fetchone()
+                    acquired = row[0] if row is not None else False
             except Exception as exc:
                 # Same rationale as the pre-loop try/except above: a failure in
                 # bulk-path detection, migration, or lock acquisition is not
@@ -290,6 +291,7 @@ def _do_sync(
                         conn.commit()
                     db.drop_heavy_indexes(conn)
 
+                buffer: ChunkBuffer | None = None
                 if is_bulk:
                     buffer = ChunkBuffer(conn, embedder, batch_size=_BULK_BUFFER_SIZE)
 
@@ -301,21 +303,22 @@ def _do_sync(
                             buffer=buffer if is_bulk else None,
                         )
                         if is_bulk:
-                            buffer.flush()
+                            assert buffer is not None
+                            buffer.flush()  # type: ignore[union-attr]
                             conn.commit()  # Commit metadata
                         n_items = sync_issues(
                             settings, conn, embedder, repo, provider,
                             buffer=buffer if is_bulk else None,
                         )
                         if is_bulk:
-                            buffer.flush()
+                            buffer.flush()  # type: ignore[union-attr]
                             conn.commit()  # Commit metadata
                         n_code = sync_code(
                             settings, conn, embedder, repo, provider,
                             buffer=buffer if is_bulk else None,
                         )
                         if is_bulk:
-                            buffer.flush()
+                            buffer.flush()  # type: ignore[union-attr]
                             conn.commit()  # Commit metadata
                         finished_at = db.record_sync_run(
                             conn, repo, route, n_docs, n_items, n_code
@@ -325,7 +328,7 @@ def _do_sync(
                             "docs_updated": n_docs,
                             "issues_indexed": n_items,
                             "code_added": n_code,
-                            "synced_at": finished_at.isoformat(),
+                            "synced_at": finished_at.isoformat() if finished_at is not None else None,
                         }
                         log.info(
                             "synced %s: docs=%d issues=%d code=%d (route=%s)",
@@ -1063,7 +1066,7 @@ def grep_search(
         cmd.append(resolved)
 
         try:
-            rg_result = subprocess.run(
+            rg_result = subprocess.run(  # noqa: S603
                 cmd,
                 capture_output=True,
                 text=True,
@@ -1127,8 +1130,8 @@ def _run_ctags(target_path: str, base: str) -> list[dict[str, Any]]:
     Paths in the result are relative to *base*.
     """
     try:
-        result = subprocess.run(
-            ["ctags", "-R", "--output-format=json", "--fields=+naZ", "-f", "-", target_path],
+        result = subprocess.run(  # noqa: S603
+            ["ctags", "-R", "--output-format=json", "--fields=+naZ", "-f", "-", target_path],  # noqa: S607
             capture_output=True,
             text=True,
             timeout=30,
@@ -1329,8 +1332,8 @@ def _report_api_reference(
 def _report_stats(target_path: str) -> str:
     """Run tokei and format output as a Markdown table."""
     try:
-        result = subprocess.run(
-            ["tokei", "--output", "json", target_path],
+        result = subprocess.run(  # noqa: S603
+            ["tokei", "--output", "json", target_path],  # noqa: S607
             capture_output=True,
             text=True,
             timeout=30,
@@ -1815,7 +1818,7 @@ def status() -> dict[str, Any]:
     }
 
 
-def run(transport: str = "streamable-http") -> None:
+def run(transport: Literal["stdio", "sse", "streamable-http"] = "streamable-http") -> None:
     global _auto_sync_thread
     with _conn() as conn:
         db.migrate(conn, settings)

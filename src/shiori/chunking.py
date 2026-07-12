@@ -36,12 +36,29 @@ def _ts_get_parser(lang: str):
     if lang in _TS_FAILED or not _TS_AVAILABLE:
         return None
     try:
-        parser = get_parser(lang)
+        parser = get_parser(lang)  # type: ignore[possibly-unbound]
         _TS_PARSER_CACHE[lang] = parser
         return parser
     except Exception:
         _TS_FAILED.add(lang)
         return None
+
+
+# Type-safe wrappers for tree-sitter (untyped stubs)
+def _ts_parse(parser, content: bytes):
+    return parser.parse(content)  # type: ignore[attr-defined]
+
+
+def _ts_language(parser):
+    return parser.language  # type: ignore[attr-defined]
+
+
+def _ts_start_point(node):
+    return node.start_point  # type: ignore[attr-defined]
+
+
+def _ts_end_point(node):
+    return node.end_point  # type: ignore[attr-defined]
 
 
 _EXT_TO_LANG: dict[str, str] = {
@@ -329,7 +346,7 @@ def split_code(file_path: str, content: str, max_chars: int = _CODE_MAX_CHARS) -
         return _split_code_fallback(content, file_path, max_chars)
 
     try:
-        tree = parser.parse(bytes(content, "utf-8"))
+        tree = _ts_parse(parser, bytes(content, "utf-8"))
     except Exception:
         return _split_code_fallback(content, file_path, max_chars)
 
@@ -342,7 +359,7 @@ def split_code(file_path: str, content: str, max_chars: int = _CODE_MAX_CHARS) -
 
     try:
         from tree_sitter import Query, QueryCursor
-        query = Query(parser.language, query_src)
+        query = Query(_ts_language(parser), query_src)  # type: ignore[arg-type]
     except Exception:
         return _split_code_fallback(content, file_path, max_chars)
 
@@ -359,7 +376,7 @@ def split_code(file_path: str, content: str, max_chars: int = _CODE_MAX_CHARS) -
     if not def_nodes_raw:
         return _split_code_fallback(content, file_path, max_chars)
 
-    def_nodes_raw.sort(key=lambda x: x[1].start_point[0])
+    def_nodes_raw.sort(key=lambda x: _ts_start_point(x[1])[0])
 
     chunks: list[Chunk] = []
     all_nodes = [n for _, n in def_nodes_raw]
@@ -369,7 +386,7 @@ def split_code(file_path: str, content: str, max_chars: int = _CODE_MAX_CHARS) -
     total_src_lines = len(source_lines)
     covered = [False] * total_src_lines
     for _, n in def_nodes_raw:
-        for ln in range(n.start_point[0], n.end_point[0] + 1):
+        for ln in range(_ts_start_point(n)[0], _ts_end_point(n)[0] + 1):
             if ln < total_src_lines:
                 covered[ln] = True
 
@@ -406,8 +423,8 @@ def split_code(file_path: str, content: str, max_chars: int = _CODE_MAX_CHARS) -
             ))
 
     for capture_name, ts_node in def_nodes_raw:
-        start_line = ts_node.start_point[0]
-        end_line = ts_node.end_point[0]
+        start_line = _ts_start_point(ts_node)[0]
+        end_line = _ts_end_point(ts_node)[0]
         name = _get_node_name(ts_node) or f"<{capture_name}>"
         docstring = _get_docstring_text(ts_node, prog_lang)
         signature = _get_signature_text(ts_node, source_lines)
@@ -416,8 +433,8 @@ def split_code(file_path: str, content: str, max_chars: int = _CODE_MAX_CHARS) -
         for p_node in all_nodes:
             if p_node == ts_node:
                 continue
-            p_start = p_node.start_point[0]
-            p_end = p_node.end_point[0]
+            p_start = _ts_start_point(p_node)[0]
+            p_end = _ts_end_point(p_node)[0]
             if p_start < start_line and p_end >= end_line:
                 p_capture = ""
                 for cn, pn in def_nodes_raw:

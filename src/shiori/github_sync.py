@@ -500,8 +500,8 @@ def sync_code(
         chunk_key = f"code:{repo}:{path}"
         delete_chunks_by_key(conn, chunk_key)
 
+        prog_lang = _detect_prog_lang(path)
         if chunks:
-            prog_lang = _detect_prog_lang(path)
             if buffer is not None:
                 for c in chunks:
                     # Permalink uses commit_sha (resilient to line drift. Should-fix #5)
@@ -585,11 +585,12 @@ def _api_pages(client: httpx.Client, url: str, params: dict) -> "list[dict]":
     """Paginate all pages via Link header."""
     items: list[dict] = []
     next_params: dict | None = params
-    while url:
-        resp = client.get(url, params=next_params)
+    next_url: str | None = url
+    while next_url:
+        resp = client.get(next_url, params=next_params)
         resp.raise_for_status()
         items.extend(resp.json())
-        url = resp.links.get("next", {}).get("url")
+        next_url = resp.links.get("next", {}).get("url")  # type: ignore[assignment]
         next_params = None   # None not {}; preserves next URL query params as-is
     return items
 
