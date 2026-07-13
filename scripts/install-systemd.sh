@@ -15,25 +15,24 @@ echo ""
 mkdir -p "$USER_UNIT_DIR"
 
 sed "s|@SHIORI_DIR@|$SHIORI_DIR|g" "$SCRIPT_DIR/shiori.service" > "$USER_UNIT_DIR/shiori.service"
-sed "s|@SHIORI_DIR@|$SHIORI_DIR|g" "$SCRIPT_DIR/shiori-refresh.service" > "$USER_UNIT_DIR/shiori-refresh.service"
-sed "s|@SHIORI_DIR@|$SHIORI_DIR|g" "$SCRIPT_DIR/shiori-refresh.timer" > "$USER_UNIT_DIR/shiori-refresh.timer"
+sed "s|@SHIORI_DIR@|$SHIORI_DIR|g" "$SCRIPT_DIR/shiori-mint.socket" > "$USER_UNIT_DIR/shiori-mint.socket"
+sed "s|@SHIORI_DIR@|$SHIORI_DIR|g" "$SCRIPT_DIR/shiori-mint@.service" > "$USER_UNIT_DIR/shiori-mint@.service"
 
 systemctl --user daemon-reload
 
-systemctl --user enable --now shiori.service shiori-refresh.timer
+systemctl --user enable --now shiori.service shiori-mint.socket
 
 echo ""
 echo "==> Done.  Useful commands:"
 echo "    systemctl --user status shiori"
+echo "    systemctl --user status shiori-mint.socket"
 echo "    systemctl --user stop shiori"
 echo "    journalctl --user -u shiori -f"
-echo "    systemctl --user list-timers shiori-refresh.timer"
-echo "    journalctl --user -u shiori-refresh -f"
+echo "    journalctl --user -u shiori-mint -f"
 echo ""
-echo "NOTE: shiori-refresh.timer keeps runtime/github-token fresh (GitHub App"
-echo "      installation tokens expire in 1h; TokenCommandProvider caches for"
-echo "      up to 50 min, so the token file must stay under 10 min old -- do"
-echo "      not disable or lengthen this timer)."
+echo "NOTE: TokenSocketProvider connects to runtime/mint.sock on demand."
+echo "      No periodic refresh timer is needed -- the socket is pull-based."
+echo "      See detailed design/15 for the full rationale."
 echo ""
 
 # Ensure user services survive logout (optional, requires root or polkit).

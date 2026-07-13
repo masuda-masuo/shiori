@@ -6,20 +6,19 @@
 # ingest は使い捨てのワンショット（profiles: ["ingest"]）。
 #
 # 認証（詳細設計/09・15）: build_token_provider() が
-# App > TokenCommand > PAT > 匿名 の優先順位で選択する。
+# App > TokenSocket > TokenCommand > PAT > 匿名 の優先順位で選択する。
 # app / ingest は**コンテナ内**でトークンを消費するので、keystore には届かない
 # （D-Bus session bus が bus オーナー UID しか受け付けない）。したがって
-# credential を消費者側に運ぶ2方式のどちらかを使う:
+# credential を消費者側に運ぶ方式を使う:
 #
 #   1. GitHub App 秘密鍵ファイル方式 — GITHUB_APP_ID /
 #      GITHUB_APP_PRIVATE_KEY_PATH を docker-compose.override.yml の secrets で
 #      読み取り専用マウント。コンテナ内プロセスが自分で mint / 再発行するので
 #      ホスト側に可動部が不要（非24h稼働の VM 向け。dev-infra#4 / #5）。
-#   2. token-file 橋渡し方式 — ホストの scripts/refresh-token.sh が mcp-token で
-#      OS keystore から短命トークンを mint し runtime/github-token に書き続け、
-#      コンテナは GITHUB_TOKEN_COMMAND=cat /run/shiori/github-token で読むだけ。
-#      **秘密鍵はコンテナにもディスクにも入らない**代わり、更新タイマーが
-#      load-bearing になる（常時稼働機向け。issue #150/#188/#198）。
+#   2. on-demand mint socket 方式 — systemd socket activation でホスト側の
+#      shiori-mint.socket が接続を待ち受け、接続ごとに mcp-token github を
+#      実行してトークンを返す（GITHUB_TOKEN_SOCKET）。pull 型なのでスリープ/
+#      復帰による窓が無い（詳細設計/15、issue #204）。
 #
 # どちらも .env / override で明示設定したときだけ有効になる。無設定なら匿名で、
 # 公開リポジトリのみの利用は認証設定なしで動く（README / セットアップ.md の約束）。
@@ -27,7 +26,6 @@
 #
 # 「コンテナ内から mcp-token で keystore を叩く」経路（旧 McpTokenProvider）は
 # 原理的に成立せず、失敗しても警告1行で匿名へ静かに落ちるため撤去した（#188）。
-# 選択規則と将来の on-demand mint socket 方式は詳細設計/15 を参照。
 #
 # 同期は serve のバックグラウンドポーリング（SHIORI_SYNC_INTERVAL_SECONDS）に一本化。
 services:
@@ -77,19 +75,15 @@ services:
       SHIORI_CODE_EXTENSIONS: ${SHIORI_CODE_EXTENSIONS:-}
       SHIORI_CODE_EXCLUDE_GLOBS: ${SHIORI_CODE_EXCLUDE_GLOBS:-}
       GITHUB_TOKEN: ${GITHUB_TOKEN:-}
-      # token-file 橋渡し方式(scripts/refresh-token.{sh,bat} が発行する
-      # runtime/github-token をホスト側で更新し続け、コンテナはそれを
-      # cat で読むだけ; issue #150/#188/#198)。**明示 opt-in**: .env で
-      # GITHUB_TOKEN_COMMAND=cat /run/shiori/github-token を設定した場合のみ
-      # 有効になる。既定(未設定)は空パススルーで、従来どおり
-      # mcp-token -> anonymous フォールバック(公開リポは無設定で同期可)。
-      # 既定値を cat に固定すると無設定環境で TokenCommandProvider が選ばれ、
-      # トークンファイル不在の RuntimeError で全 sync が落ちる退行になる。
+      # on-demand mint socket — GITHUB_TOKEN_SOCKET=/run/shiori/mint.sock
+      # を .env に書くと TokenSocketProvider が選択される。pull 型なので
+      # スリープ/復帰の窓が無い(issue #204)。App 鍵より低優先。未設定なら無効。
+      GITHUB_TOKEN_SOCKET: ${GITHUB_TOKEN_SOCKET:-}
       GITHUB_TOKEN_COMMAND: ${GITHUB_TOKEN_COMMAND:-}
     volumes:
       - models:/models   # 埋め込みモデルの重みキャッシュ
       - ./data:/data     # git クローン先 (ホスト可読 bind mount; 詳細設計/12)
-      - ./runtime:/run/shiori:ro  # 上記トークンファイルの読み取り専用マウント(issue #198)
+      - ./runtime/mint.sock:/run/shiori/mint.sock:rw  # on-demand mint socket (issue #204)
     ports:
       - "8765:8765"
     depends_on:
@@ -115,12 +109,12 @@ services:
       SHIORI_CODE_EXTENSIONS: ${SHIORI_CODE_EXTENSIONS:-}
       SHIORI_CODE_EXCLUDE_GLOBS: ${SHIORI_CODE_EXCLUDE_GLOBS:-}
       GITHUB_TOKEN: ${GITHUB_TOKEN:-}
-      # app サービスと同じ token-file 橋渡し方式(明示 opt-in; issue #198)。
+      GITHUB_TOKEN_SOCKET: ${GITHUB_TOKEN_SOCKET:-}
       GITHUB_TOKEN_COMMAND: ${GITHUB_TOKEN_COMMAND:-}
     volumes:
       - models:/models
       - ./data:/data
-      - ./runtime:/run/shiori:ro
+      - ./runtime/mint.sock:/run/shiori/mint.sock:rw
     depends_on:
       db:
         condition: service_healthy

@@ -1,0 +1,10 @@
+[Unit]
+Description=Mint a short-lived GitHub token (one connection)
+Requires=mcp-keyring.service
+After=mcp-keyring.service
+
+[Service]
+Type=oneshot
+ExecStart=@SHIORI_DIR@/scripts/mint-token.sh
+StandardInput=socket
+StandardOutput=socket
