@@ -525,3 +525,101 @@ class TestAutoSyncLoopLastError:
                 mcp_server._auto_sync_loop(10)
 
             assert mcp_server._auto_sync_last_error == "db unreachable"
+
+
+
+class TestStatusAutoSyncDegraded:
+    """status() の auto_sync_degraded フィールド（issue #234）。"""
+
+    def _run_status(self, mock_settings):
+        with (
+            patch("shiori.mcp_server._conn"),
+            patch("shiori.mcp_server.settings", mock_settings),
+            patch("shiori.mcp_server.db.get_sync_runs", return_value={}),
+            patch("shiori.mcp_server.db.get_chunk_counts", return_value={}),
+            patch("shiori.mcp_server.db.get_issue_item_count", return_value=0),
+            patch("shiori.mcp_server.db.get_cursors", return_value={}),
+        ):
+            mock_settings.repos = ["o/r"]
+            mock_settings.sync_interval_seconds = 10
+            return status()
+
+    def test_not_degraded_when_no_error(self):
+        """_auto_sync_last_error が None のとき degraded=False。"""
+        with patch("shiori.mcp_server._auto_sync_last_error", None), \
+             patch("shiori.mcp_server._auto_sync_thread", MagicMock(is_alive=lambda: True)):
+            result = self._run_status(MagicMock())
+        assert result["auto_sync_degraded"] is False
+
+    def test_degraded_when_last_error_set(self):
+        """_auto_sync_last_error が設定されていれば degraded=True。"""
+        with patch("shiori.mcp_server._auto_sync_last_error", "db unreachable"), \
+             patch("shiori.mcp_server._auto_sync_thread", MagicMock(is_alive=lambda: True)):
+            result = self._run_status(MagicMock())
+        assert result["auto_sync_degraded"] is True
+
+    def test_degraded_when_consecutive_failures_exceed_threshold(self):
+        """per-repo consecutive_failures が閾値(10s interval → 6)を超えていれば degraded=True。"""
+        mock_settings = MagicMock()
+        with (
+            patch("shiori.mcp_server._conn"),
+            patch("shiori.mcp_server.settings", mock_settings),
+            patch("shiori.mcp_server._auto_sync_last_error", None),
+            patch("shiori.mcp_server._auto_sync_thread", MagicMock(is_alive=lambda: True)),
+            patch(
+                "shiori.mcp_server.db.get_sync_runs",
+                return_value={
+                    "o/r": {
+                        "last_synced_at": None,
+                        "age_seconds": None,
+                        "route": None,
+                        "docs_updated": None,
+                        "issues_indexed": None,
+                        "code_added": None,
+                        "last_attempt_at": "2026-07-10T00:14:15+00:00",
+                        "last_error": "git fetch failed",
+                        "consecutive_failures": 7,
+                    }
+                },
+            ),
+            patch("shiori.mcp_server.db.get_chunk_counts", return_value={}),
+            patch("shiori.mcp_server.db.get_issue_item_count", return_value=0),
+            patch("shiori.mcp_server.db.get_cursors", return_value={}),
+        ):
+            mock_settings.repos = ["o/r"]
+            mock_settings.sync_interval_seconds = 10
+            result = status()
+        assert result["auto_sync_degraded"] is True
+
+    def test_not_degraded_when_consecutive_failures_below_threshold(self):
+        """per-repo consecutive_failures が閾値未満なら degraded=False。"""
+        mock_settings = MagicMock()
+        with (
+            patch("shiori.mcp_server._conn"),
+            patch("shiori.mcp_server.settings", mock_settings),
+            patch("shiori.mcp_server._auto_sync_last_error", None),
+            patch("shiori.mcp_server._auto_sync_thread", MagicMock(is_alive=lambda: True)),
+            patch(
+                "shiori.mcp_server.db.get_sync_runs",
+                return_value={
+                    "o/r": {
+                        "last_synced_at": None,
+                        "age_seconds": None,
+                        "route": None,
+                        "docs_updated": None,
+                        "issues_indexed": None,
+                        "code_added": None,
+                        "last_attempt_at": "2026-07-10T00:14:15+00:00",
+                        "last_error": "git fetch failed",
+                        "consecutive_failures": 2,
+                    }
+                },
+            ),
+            patch("shiori.mcp_server.db.get_chunk_counts", return_value={}),
+            patch("shiori.mcp_server.db.get_issue_item_count", return_value=0),
+            patch("shiori.mcp_server.db.get_cursors", return_value={}),
+        ):
+            mock_settings.repos = ["o/r"]
+            mock_settings.sync_interval_seconds = 10
+            result = status()
+        assert result["auto_sync_degraded"] is False
