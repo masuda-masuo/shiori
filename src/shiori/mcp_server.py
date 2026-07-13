@@ -16,6 +16,8 @@ from typing import Any, Literal
 from mcp.server.fastmcp import FastMCP
 
 from . import db, search
+import psycopg
+
 from .config import Settings, load_settings
 from .embedding import Embedder
 from .github_auth import build_token_provider
@@ -277,7 +279,10 @@ def _do_sync(
                 # yet inside the per-repo loop's own except (issue #196). This
                 # one has a live conn, so record directly instead of opening a
                 # throwaway one.
-                conn.rollback()
+                try:
+                    conn.rollback()
+                except psycopg.OperationalError:
+                    pass
                 for repo in targets:
                     db.record_sync_attempt(conn, repo, success=False, error=str(exc))
                 raise
@@ -343,8 +348,19 @@ def _do_sync(
                         # earlier repo in this same loop already landed via its
                         # own commit and is unaffected (issue #199 rollback-scope
                         # question).
-                        conn.rollback()
-                        db.record_sync_attempt(conn, repo, success=False, error=str(exc))
+                        # Guard rollback against a closed connection (issue #234):
+                        # if the connection was broken mid-operation, skip the
+                        # rollback and use a throwaway connection to record the
+                        # failure so remaining repos can still be synced.
+                        try:
+                            conn.rollback()
+                        except psycopg.OperationalError:
+                            pass
+                        try:
+                            db.record_sync_attempt(conn, repo, success=False, error=str(exc))
+                        except psycopg.OperationalError:
+                            with _conn() as tmp_conn:
+                                db.record_sync_attempt(tmp_conn, repo, success=False, error=str(exc))
                         if is_bulk:
                             # Bulk (initial full ingest) has no per-repo resume
                             # story, so a partial failure still aborts the whole
@@ -372,8 +388,11 @@ def _do_sync(
                     )
 
             finally:
-                with conn.cursor() as cur:
-                    cur.execute("SELECT pg_advisory_unlock(%s)", (SYNC_LOCK_KEY,))
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute("SELECT pg_advisory_unlock(%s)", (SYNC_LOCK_KEY,))
+                except psycopg.OperationalError:
+                    pass  # connection was closed, lock auto-released
         return result
     finally:
         _sync_lock.release()
@@ -2099,6 +2118,16 @@ def status() -> dict[str, Any]:
             info.pop("token_provider_error", None)
             info["warnings"] = warnings
             repos[repo] = info
+    # Compute degraded flag: auto-sync is running but failing consistently
+    # (issue #234). True when _auto_sync_last_error is set or any repo
+    # has consecutive_failures exceeding threshold.
+    _auto_sync_degraded = _auto_sync_last_error is not None
+    if not _auto_sync_degraded:
+        _fail_threshold = max(3, 60 // max(settings.sync_interval_seconds, 1))
+        for repo_info in repos.values():
+            if repo_info.get("consecutive_failures", 0) >= _fail_threshold:
+                _auto_sync_degraded = True
+                break
     return {
         "repos": repos,
         "sync_interval_seconds": settings.sync_interval_seconds,
@@ -2113,6 +2142,7 @@ def status() -> dict[str, Any]:
         # (issue #196) -- e.g. the database itself being unreachable. None
         # once the most recent iteration has succeeded.
         "auto_sync_last_error": _auto_sync_last_error,
+        "auto_sync_degraded": _auto_sync_degraded,
         # Provider actually selected by build_token_provider() (issue #188).
         "token_provider": token_provider,
     }

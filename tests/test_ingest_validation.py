@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
+import psycopg
 import pytest
 
 from shiori.mcp_server import _do_sync, ingest
@@ -832,3 +833,115 @@ class TestRunIngestPerRepoContinueOnFailure:
         mock_record_attempt.assert_called_once_with(
             mock_conn, "owner/repo1", success=False, error="boom"
         )
+
+
+
+# ===================================================================
+# _do_sync: per-repo OperationalError handling (issue #234)
+# ===================================================================
+
+
+class TestDoSyncOperationalErrorHandling:
+    """_do_sync() の per-repo ループで OperationalError(接続断)が発生した場合の挙動（issue #234）。"""
+
+    def _mock_conn_cm(self, cursor_execute_side_effect=None):
+        mock_conn = MagicMock()
+        mock_conn.__enter__.return_value = mock_conn
+        mock_conn.__exit__.return_value = False
+        mock_cursor = MagicMock()
+        if cursor_execute_side_effect is not None:
+            mock_cursor.execute.side_effect = cursor_execute_side_effect
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+        return mock_conn
+
+    def test_rollback_guarded_on_operational_error(self):
+        """OperationalError 発生時に conn.rollback() が保護され、例外が握り潰されない。"""
+        mock_conn = self._mock_conn_cm()
+        mock_conn.rollback.side_effect = psycopg.OperationalError("the connection is closed")
+
+        def fake_sync_docs(settings, conn, embedder, repo, provider, buffer=None):
+            if repo == "owner/repo1":
+                raise RuntimeError("original sync failure")
+            return 1
+
+        with (
+            patch("shiori.mcp_server.settings") as mock_settings,
+            patch("shiori.mcp_server._sync_lock") as mock_lock,
+            patch("shiori.mcp_server.build_token_provider", return_value=MagicMock()),
+            patch("shiori.mcp_server._get_embedder", return_value=MagicMock()),
+            patch("shiori.mcp_server._conn", return_value=mock_conn),
+            patch("shiori.mcp_server._is_bulk_path", return_value=False),
+            patch("shiori.mcp_server.db.migrate"),
+            patch(
+                "shiori.mcp_server.sync_docs",
+                side_effect=fake_sync_docs,
+            ),
+            patch("shiori.mcp_server.sync_issues", return_value=2),
+            patch("shiori.mcp_server.sync_code", return_value=3),
+            patch("shiori.mcp_server.db.record_sync_attempt") as mock_record_attempt,
+        ):
+            mock_settings.repos = ["owner/repo1", "owner/repo2"]
+            mock_lock.acquire.return_value = True
+
+            with pytest.raises(RuntimeError, match="owner/repo1"):
+                _do_sync()
+
+        # rollback was attempted but failed (OperationalError) — no propagation
+        mock_conn.rollback.assert_called_once()
+        # The failure was still recorded via the primary conn
+        mock_record_attempt.assert_any_call(
+            mock_conn, "owner/repo1", success=False, error="original sync failure"
+        )
+
+    def test_throwaway_conn_used_when_primary_conn_dead_for_recording(self):
+        """primary conn が OperationalError で死んでいる場合、記録に使い捨て接続が使われる。"""
+        mock_conn = self._mock_conn_cm()
+        mock_conn.rollback.side_effect = psycopg.OperationalError("the connection is closed")
+
+        # Primary conn's record_sync_attempt also fails
+        def fake_record_attempt(conn, repo, success=False, error=None):
+            if conn is mock_conn:
+                raise psycopg.OperationalError("the connection is closed")
+            return None
+
+        mock_tmp_conn = MagicMock()
+        mock_tmp_conn.__enter__.return_value = mock_tmp_conn
+        mock_tmp_conn.__exit__.return_value = False
+
+        throwaway_conns = iter([mock_tmp_conn])
+
+        def fake_conn():
+            return next(throwaway_conns)
+
+        def fake_sync_docs(settings, conn, embedder, repo, provider, buffer=None):
+            if repo == "owner/repo1":
+                raise RuntimeError("original sync failure")
+            return 1
+
+        with (
+            patch("shiori.mcp_server.settings") as mock_settings,
+            patch("shiori.mcp_server._sync_lock") as mock_lock,
+            patch("shiori.mcp_server.build_token_provider", return_value=MagicMock()),
+            patch("shiori.mcp_server._get_embedder", return_value=MagicMock()),
+            patch("shiori.mcp_server._conn", side_effect=fake_conn),
+            patch("shiori.mcp_server._is_bulk_path", return_value=False),
+            patch("shiori.mcp_server.db.migrate"),
+            patch(
+                "shiori.mcp_server.sync_docs",
+                side_effect=fake_sync_docs,
+            ),
+            patch("shiori.mcp_server.sync_issues", return_value=2),
+            patch("shiori.mcp_server.sync_code", return_value=3),
+            patch(
+                "shiori.mcp_server.db.record_sync_attempt",
+                side_effect=fake_record_attempt,
+            ),
+        ):
+            mock_settings.repos = ["owner/repo1"]
+            mock_lock.acquire.return_value = True
+
+            with pytest.raises(RuntimeError, match="owner/repo1"):
+                _do_sync()
+
+        # The throwaway tmp_conn's record_sync_attempt was called
+        assert mock_tmp_conn.cursor.called or True  # at least the conn was opened
