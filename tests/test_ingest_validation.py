@@ -908,10 +908,12 @@ class TestDoSyncOperationalErrorHandling:
         mock_tmp_conn.__enter__.return_value = mock_tmp_conn
         mock_tmp_conn.__exit__.return_value = False
 
-        throwaway_conns = iter([mock_tmp_conn])
+        # Order: primary conn, throwaway conn, reconnection conn
+        conns = [mock_conn, mock_tmp_conn, MagicMock()]
+        conn_iter = iter(conns)
 
         def fake_conn():
-            return next(throwaway_conns)
+            return next(conn_iter)
 
         def fake_sync_docs(settings, conn, embedder, repo, provider, buffer=None):
             if repo == "owner/repo1":
@@ -935,7 +937,7 @@ class TestDoSyncOperationalErrorHandling:
             patch(
                 "shiori.mcp_server.db.record_sync_attempt",
                 side_effect=fake_record_attempt,
-            ),
+            ) as mock_record_attempt,
         ):
             mock_settings.repos = ["owner/repo1"]
             mock_lock.acquire.return_value = True
@@ -944,5 +946,10 @@ class TestDoSyncOperationalErrorHandling:
                 _do_sync()
 
         # The throwaway connection was used for record_sync_attempt
-        mock_tmp_conn.cursor.assert_called()
-        mock_tmp_conn.commit.assert_called_once()
+        # (record_sync_attempt is mocked, so cursor/commit are not called on tmp_conn)
+        mock_conn.rollback.assert_called_once()
+        # Verify record_sync_attempt was called with the throwaway connection
+        calls = mock_record_attempt.call_args_list
+        assert any(call[0][0] is mock_tmp_conn for call in calls), (
+            "record_sync_attempt should have been called with mock_tmp_conn"
+        )

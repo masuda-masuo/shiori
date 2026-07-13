@@ -256,7 +256,8 @@ def _do_sync(
             _record_pre_loop_sync_failure(targets, str(exc))
             raise
         result: dict[str, Any] = {"status": "ok", "repos": {}}
-        with _conn() as conn:
+        conn = _conn()
+        try:
             try:
                 # --- Bulk path detection (handles fresh DB. Issue #72) ---
                 is_bulk = _is_bulk_path(conn, rebuild)
@@ -287,6 +288,7 @@ def _do_sync(
                     db.record_sync_attempt(conn, repo, success=False, error=str(exc))
                 raise
             if not acquired:
+                conn.close()
                 return {"status": "skipped", "reason": "sync already running in another process"}
             try:
                 # --- Bulk path: destructive operations inside the lock (issue #72) ---
@@ -352,13 +354,15 @@ def _do_sync(
                         # if the connection was broken mid-operation, skip the
                         # rollback and use a throwaway connection to record the
                         # failure so remaining repos can still be synced.
+                        need_reconnect = False
                         try:
                             conn.rollback()
                         except psycopg.OperationalError:
-                            pass
+                            need_reconnect = True
                         try:
                             db.record_sync_attempt(conn, repo, success=False, error=str(exc))
                         except psycopg.OperationalError:
+                            need_reconnect = True
                             with _conn() as tmp_conn:
                                 db.record_sync_attempt(tmp_conn, repo, success=False, error=str(exc))
                         if is_bulk:
@@ -375,6 +379,16 @@ def _do_sync(
                             "sync failed for %s (route=%s), continuing with "
                             "remaining repos", repo, route,
                         )
+                        if need_reconnect:
+                            try:
+                                conn.close()
+                            except Exception:
+                                pass
+                            conn = _conn()
+                            log.warning(
+                                "reconnected DB connection after OperationalError "
+                                "during sync of %s", repo,
+                            )
 
                 # --- Bulk path: create heavy indexes in batch (issue #72) ---
                 if is_bulk:
@@ -393,6 +407,8 @@ def _do_sync(
                         cur.execute("SELECT pg_advisory_unlock(%s)", (SYNC_LOCK_KEY,))
                 except psycopg.OperationalError:
                     pass  # connection was closed, lock auto-released
+        finally:
+            conn.close()
         return result
     finally:
         _sync_lock.release()
