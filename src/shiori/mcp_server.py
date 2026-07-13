@@ -24,6 +24,7 @@ from .github_sync import (
     _git,
     _git_delete_ref,
     _git_fetch_ref,
+    _is_excluded_dir,
     sync_code,
     sync_docs,
     sync_issues,
@@ -463,7 +464,7 @@ def _walk_code_files(base: str, prefix: str, extension: str | None = None) -> se
     if not os.path.isdir(base):
         return paths
     for dirpath, dirnames, filenames in os.walk(base):
-        dirnames[:] = [d for d in dirnames if d not in _EXCLUDE_DIRS]
+        dirnames[:] = [d for d in dirnames if not _is_excluded_dir(d)]
         rel_dir = os.path.relpath(dirpath, base)
         if rel_dir == ".":
             rel_dir = ""
