@@ -216,13 +216,21 @@ class TokenCommandProvider(TokenProvider):
 class TokenSocketProvider(TokenProvider):
     """Connects to a Unix socket (``GITHUB_TOKEN_SOCKET``) to obtain a token.
 
-    The socket is served by a host-side systemd socket-activated service
-    (``shiori-mint@.service``) which runs ``mcp-token github`` on each
-    connection and streams the token back (detailed design/15).
+    The socket is served by a host-side systemd socket-activated service that
+    shiori does not own -- it is installed and maintained by mcp-launcher
+    (mcp-launcher#42), which runs ``mcp-token github`` on each connection and
+    streams the token back (detailed design/15). Shiori is a pure consumer
+    of this contract: connection = request, no payload; read until EOF and
+    strip the result.
 
     Caches for 55 min, re-fetches 5 min before expiry, falls back to the
     cached token for up to HARD_EXPIRY on failure. Raises when the socket
     fails and no usable cached token is left.
+
+    Expiry bookkeeping uses the wall clock (``time.time()``), never a
+    monotonic clock: a monotonic clock does not advance while the host is
+    suspended, which would silently reintroduce the clock-drift bug this
+    provider exists to eliminate (see detailed design/15).
     """
 
     name: ClassVar[str] = "token_socket"

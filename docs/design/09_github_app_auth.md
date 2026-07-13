@@ -38,7 +38,7 @@ The selection depends on two variables: **where the token is consumed** and **wh
 | Environment | Consumer | Method |
 | --- | --- | --- |
 | Compose Deployment (`app` / `ingest`) | In-container process | **GitHub App Private Key**: Mounts `GITHUB_APP_ID` and `GITHUB_APP_PRIVATE_KEY_PATH` as read-only Docker secrets. The container process generates and refreshes its own tokens, removing host-side dependencies. Active in GCP VMs (dev-infra#4 / #5). |
-| Compose Deployment (`app` / `ingest`) | In-container process | **Mint Socket** (current): The host runs a systemd socket-activated service (`shiori-mint@.service`). On connection, it executes `mcp-token github` and streams the token back. The container mounts `./runtime/mint.sock:/run/shiori/mint.sock:rw` and uses `GITHUB_TOKEN_SOCKET=/run/shiori/mint.sock` to pull tokens on demand. Pull-based, no clock-drift windows. Active on WSL (Issue #204). |
+| Compose Deployment (`app` / `ingest`) | In-container process | **Mint Socket** (current): A host-side systemd socket-activated service **owned by mcp-launcher, not shiori** (see mcp-launcher#42; shiori carries no socket unit of its own) executes `mcp-token github` on connection and streams the token back. The container mounts the socket's parent **directory** (`${SHIORI_MINT_SOCKET_DIR:-${XDG_RUNTIME_DIR}/mcp-token}:/run/shiori:rw` -- a directory mount, never a file mount; see detailed design/15 for why) and uses `GITHUB_TOKEN_SOCKET=/run/shiori/mint.sock` to pull tokens on demand. Pull-based, no clock-drift windows. Active on WSL (Issue #204 / mcp-launcher#42). |
 | Native Run (host venv) | Host process | **TokenCommand Execution**: The process mints tokens directly by calling `GITHUB_TOKEN_COMMAND=mcp-token github`, fetching credentials directly from the host OS keyring. |
 
 Compose methods are opt-in. If unconfigured, the server falls back to anonymous mode, allowing setup guides for public-only repositories to function out-of-the-box. If App, TokenSocket, and TokenCommand are set, the App is selected based on provider precedence (App > TokenSocket > TokenCommand > PAT > Anonymous).
@@ -67,7 +67,7 @@ The active provider can be inspected via the `token_provider` field in `shiori_s
 | `GITHUB_APP_INSTALLATION_ID` | The App Installation ID (numeric string). |
 | `GITHUB_TOKEN` | Personal Access Token (fallback). |
 | `GITHUB_TOKEN_COMMAND` | In-process command to execute (e.g. `mcp-token github`). stdout must yield the token. |
-| `GITHUB_TOKEN_SOCKET` | Path to a Unix socket for on-demand token minting (e.g. `/run/shiori/mint.sock`). The socket is served by a host-side systemd socket-activated service (`shiori-mint@.service`) that runs `mcp-token github` on each connection. Preferred over `GITHUB_TOKEN_COMMAND`. |
+| `GITHUB_TOKEN_SOCKET` | Path to a Unix socket for on-demand token minting (e.g. `/run/shiori/mint.sock`, inside the container). The socket is served by a host-side systemd socket-activated service **owned by mcp-launcher** (mcp-launcher#42) that runs `mcp-token github` on each connection; shiori is a pure consumer and has no socket unit of its own. Preferred over `GITHUB_TOKEN_COMMAND`. |
 
 To initialize App credentials, both `GITHUB_APP_ID` and `GITHUB_APP_INSTALLATION_ID` must be defined, and the private key must be readable. Partially defined environments raise a `ValueError` during startup.
 

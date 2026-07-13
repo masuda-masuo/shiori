@@ -31,19 +31,19 @@ The `ingest` service runs a one-shot ingestion job. **Always pass `--build` when
 
 ## Authentication Configuration
 
-`build_token_provider()` resolves credentials in the order: **App > TokenCommand > PAT (static) > anonymous**. 
+`build_token_provider()` resolves credentials in the order: **App > TokenSocket > TokenCommand > PAT (static) > anonymous**.
 
 Choosing a method depends on **where the tokens are consumed** and **who is responsible for refreshing them**:
 
 1.  **GitHub App Private Key (Recommended for Remote VMs)**:
     Mount your `GITHUB_APP_ID` and `GITHUB_APP_PRIVATE_KEY_PATH` as read-only Docker secrets in a `docker-compose.override.yml`. Because the key resides in the container, **the container process refreshes tokens natively**. Useful for VMs that shut down automatically.
-2.  **Token File Sharing (Recommended for WSL2 / Desktop)**:
-    The host machine runs `mcp-token` to retrieve credentials from the OS keyring and write a short-lived token to `runtime/github-token` (run via `shiori-refresh.timer` every 5 minutes). The container mounts this folder (`./runtime:/run/shiori:ro`) and reads the token using `GITHUB_TOKEN_COMMAND=cat /run/shiori/github-token`. **No private keys are placed inside the container or on disk.**
-    *   *Note*: Suspends and sleep states on the host pause the timer, which can cause temporary `401 Unauthorized` sync errors upon waking up until the timer fires.
+2.  **Mint Socket (Recommended for WSL2 / Desktop)**:
+    A host-side systemd socket-activated service mints a short-lived token from the OS keyring on every connection and streams it back (pull-based; no periodic refresh timer). This service is **not part of shiori** -- it is installed separately via mcp-launcher's `scripts/install-mint-socket.sh` (issue #204 / mcp-launcher#42). Set `GITHUB_TOKEN_SOCKET=/run/shiori/mint.sock` in `.env`; the compose file mounts the socket's host directory (`${SHIORI_MINT_SOCKET_DIR:-${XDG_RUNTIME_DIR}/mcp-token}`) at `/run/shiori`. **No private keys are placed inside the container or on disk.**
+    *   *Note*: because it is pull-based (connect-on-demand, not a push timer), there is no clock-drift window across host sleep/resume -- see detailed design/15.
 
 If running the server process directly on the host (bypassing Docker), configure: `GITHUB_TOKEN_COMMAND=mcp-token github`.
 
-If token resolution fails, Shiori raises a `RuntimeError` and logs it in `shiori_status.last_error` rather than silently falling back to anonymous access. You can inspect the active provider (e.g. `app`, `static`, `token_command`) via the `token_provider` field in `shiori_status`.
+If token resolution fails, Shiori raises a `RuntimeError` and logs it in `shiori_status.last_error` rather than silently falling back to anonymous access. You can inspect the active provider (e.g. `app`, `token_socket`, `static`, `token_command`) via the `token_provider` field in `shiori_status`.
 
 ---
 
@@ -55,13 +55,16 @@ For permanent local usage, deploy Shiori as a systemd user unit. Run the install
 ./scripts/install-systemd.sh
 ```
 
-This script replaces the `@SHIORI_DIR@` placeholder in the unit templates under `scripts/` with your repository's absolute path and places them in `~/.config/systemd/user/`:
+This script replaces the `@SHIORI_DIR@` placeholder in the unit template under `scripts/` with your repository's absolute path and places it in `~/.config/systemd/user/`:
 
 | Unit File | Target Unit | Description |
 | --- | --- | --- |
-| `scripts/shiori.service` | `shiori.service` | Runs `refresh-token.sh` and starts the app container (`docker compose up -d app`). |
-| `scripts/shiori-refresh.service` | `shiori-refresh.service` | Executes `refresh-token.sh` once (triggered by the timer). |
-| `scripts/shiori-refresh.timer` | `shiori-refresh.timer` | Triggers the refresh service every 5 minutes to keep tokens fresh. |
+| `scripts/shiori.service` | `shiori.service` | Starts the app container (`docker compose up -d app`). |
+
+Shiori does **not** ship a mint-socket unit. If you use the Mint Socket
+authentication method above (`GITHUB_TOKEN_SOCKET`), install it separately
+via mcp-launcher's own `scripts/install-mint-socket.sh` (issue #204 /
+mcp-launcher#42) -- it is a shared host primitive, not specific to shiori.
 
 ### Pitfalls
 *   **No Auto-Build**: `shiori.service` does not rebuild Docker images automatically. After updating code, rebuild manually:
@@ -69,7 +72,7 @@ This script replaces the `@SHIORI_DIR@` placeholder in the unit templates under 
     docker compose build app
     systemctl --user restart shiori.service
     ```
-*   **Token Expiry**: App installation tokens expire after 60 minutes. If the `shiori-refresh.timer` is disabled or fails to run, repository synchronization will fail after roughly one hour.
+*   **Token Expiry**: App installation tokens expire after 60 minutes. If you use the Mint Socket method and its host-side unit (mcp-launcher) is disabled or not running, repository synchronization will fail once the cached token expires.
 
 ---
 

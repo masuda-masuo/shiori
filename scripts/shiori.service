@@ -1,7 +1,7 @@
 [Unit]
 Description=Shiori MCP Server (docker compose)
-After=network-online.target docker.service shiori-mint.socket
-Wants=network-online.target shiori-mint.socket
+After=network-online.target docker.service
+Wants=network-online.target
 
 [Service]
 Type=oneshot

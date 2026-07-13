@@ -15,10 +15,13 @@
 #      GITHUB_APP_PRIVATE_KEY_PATH を docker-compose.override.yml の secrets で
 #      読み取り専用マウント。コンテナ内プロセスが自分で mint / 再発行するので
 #      ホスト側に可動部が不要（非24h稼働の VM 向け。dev-infra#4 / #5）。
-#   2. on-demand mint socket 方式 — systemd socket activation でホスト側の
-#      shiori-mint.socket が接続を待ち受け、接続ごとに mcp-token github を
-#      実行してトークンを返す（GITHUB_TOKEN_SOCKET）。pull 型なのでスリープ/
-#      復帰による窓が無い（詳細設計/15、issue #204）。
+#   2. on-demand mint socket 方式 — ホスト側の systemd socket-activated
+#      サービス（mcp-launcher が所有・導入する。shiori 自身はこのユニットを
+#      持たない。issue #204 / mcp-launcher#42）が接続ごとにトークンを返す
+#      （GITHUB_TOKEN_SOCKET）。pull 型なのでスリープ/復帰による窓が無い
+#      （詳細設計/15）。**ソケットは必ずディレクトリ単位でマウントする**こと
+#      （ファイル単位マウントは inode 固定・root 所有ディレクトリ化という
+#      実害があり、いずれもコンテナ再作成まで復旧しない。詳細設計/15）。
 #
 # どちらも .env / override で明示設定したときだけ有効になる。無設定なら匿名で、
 # 公開リポジトリのみの利用は認証設定なしで動く（README / セットアップ.md の約束）。
@@ -83,7 +86,9 @@ services:
     volumes:
       - models:/models   # 埋め込みモデルの重みキャッシュ
       - ./data:/data     # git クローン先 (ホスト可読 bind mount; 詳細設計/12)
-      - ./runtime/mint.sock:/run/shiori/mint.sock:rw  # on-demand mint socket (issue #204)
+      # mint socket はディレクトリごとマウントする(ファイル単位はNG; 詳細設計/15)。
+      # SHIORI_MINT_SOCKET_DIR は dev-infra 等が override で差し替える想定。
+      - ${SHIORI_MINT_SOCKET_DIR:-${XDG_RUNTIME_DIR}/mcp-token}:/run/shiori:rw
     ports:
       - "8765:8765"
     depends_on:
@@ -114,7 +119,7 @@ services:
     volumes:
       - models:/models
       - ./data:/data
-      - ./runtime/mint.sock:/run/shiori/mint.sock:rw
+      - ${SHIORI_MINT_SOCKET_DIR:-${XDG_RUNTIME_DIR}/mcp-token}:/run/shiori:rw
     depends_on:
       db:
         condition: service_healthy
