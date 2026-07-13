@@ -24,6 +24,7 @@ from .github_sync import (
     _git,
     _git_delete_ref,
     _git_fetch_ref,
+    _is_excluded_dir,
     sync_code,
     sync_docs,
     sync_issues,
@@ -423,15 +424,6 @@ _EXCLUDE_DIRS = {
     "target",  # Rust
     ".cache",
 }
-
-# Directory name suffixes to skip in os.walk (build-output dirs that don't
-# match _EXCLUDE_DIRS exactly, e.g. "dashboard_dist"; issue #235)
-_EXCLUDE_DIR_SUFFIXES = ("_dist", "-dist")
-
-
-def _is_excluded_dir(name: str) -> bool:
-    """Directory should be pruned from os.walk (issue #235)."""
-    return name in _EXCLUDE_DIRS or name.endswith(_EXCLUDE_DIR_SUFFIXES)
 
 # File extensions excluded from code listing (case-insensitive)
 # Binary/asset/lock files that are not useful for LLM reading

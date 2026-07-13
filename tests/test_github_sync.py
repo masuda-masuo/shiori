@@ -838,3 +838,13 @@ class TestLooksMinified:
 
     def test_binary_content_does_not_raise(self):
         assert _looks_minified(b"\xff\xfe\x00\x01" * 100) is False
+
+    def test_exactly_500_chars_not_minified(self):
+        """500 chars exactly (threshold boundary, safe side)."""
+        content = (b"x" * 500)
+        assert _looks_minified(content) is False
+
+    def test_501_chars_flagged_minified(self):
+        """501 chars (threshold + 1, should be flagged)."""
+        content = (b"x" * 501)
+        assert _looks_minified(content) is True
