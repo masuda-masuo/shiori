@@ -15,9 +15,9 @@ from typing import Any, Literal
 
 from mcp.server.fastmcp import FastMCP
 
-from . import db, search
 import psycopg
 
+from . import db, search
 from .config import Settings, load_settings
 from .embedding import Embedder
 from .github_auth import build_token_provider

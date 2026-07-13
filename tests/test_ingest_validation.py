@@ -943,5 +943,6 @@ class TestDoSyncOperationalErrorHandling:
             with pytest.raises(RuntimeError, match="owner/repo1"):
                 _do_sync()
 
-        # The throwaway tmp_conn's record_sync_attempt was called
-        assert mock_tmp_conn.cursor.called or True  # at least the conn was opened
+        # The throwaway connection was used for record_sync_attempt
+        mock_tmp_conn.cursor.assert_called()
+        mock_tmp_conn.commit.assert_called_once()
