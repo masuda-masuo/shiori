@@ -40,13 +40,15 @@ Using a background host timer to pre-mint tokens and write them to a shared file
 | Strategy | Private Key Location | Refresh Control | Lifespan | Current Target |
 | --- | --- | --- | --- | --- |
 | **A. App Private Key** | **Container (PEM)** | Consumer (Pull) | ◯ No drift windows | GCP VM |
-| **B. Token-File Share** | Host Keyring | Host Timer (**Push**) | **✗ Drift windows** | WSL |
-| **C. In-Container Mint** | Keystore (Unreachable) | — | — | **Removed** (Legacy `McpTokenProvider`) |
-| **D. Native Host Run** | Host Keyring | Consumer (Pull) | ◯ No drift windows | Host venv / Sunaba |
+| **B. Mint Socket** | Host Keyring | Consumer (Pull) | ◯ No drift windows | WSL (current) |
+| **C. Token-File Share** (Retired) | Host Keyring | Host Timer (**Push**) | **✗ Drift windows** | **Removed** (Replaced by Mint Socket in #204) |
+| **D. In-Container Mint** | Keystore (Unreachable) | — | — | **Removed** (Legacy `McpTokenProvider`) |
+| **E. Native Host Run** | Host Keyring | Consumer (Pull) | ◯ No drift windows | Host venv / Sunaba |
 
-Strategies A and B both sacrifice a security parameter:
+Strategy A (App Private Key) sacrifices a security parameter:
 *   **Strategy A** is pull-based (no clock-drift windows), but **exposes the long-lived App private key (PEM) inside the container and on disk**. If leaked, the App is compromised indefinitely.
-*   **Strategy B** protects the private key on the host. However, it relies on **push-based timers (clock-drift windows)** and is a load-bearing operational dependency.
+
+Strategy B (Mint Socket) resolves this by keeping the private key on the host and using pull-based socket activation, eliminating both the clock-drift window and the disk exposure. It replaces the retired Token-File Share (former Strategy C), which relied on push-based timers with clock-drift windows and was a load-bearing operational dependency (removed in #204).
 
 ---
 
@@ -110,7 +112,7 @@ The provider precedence becomes **App > TokenSocket > TokenCommand > PAT > Anony
 | --- | --- | --- |
 | **Phase 0** | Align GCP VMs to use `use_github_app=true` (retains Strategy A). | Complete |
 | **Phase 1** | Remove legacy `McpTokenProvider` and clean scripts, consolidating configurations into Strategy A and B. | Current PR |
-| **Phase 2** | Implement `TokenSocketProvider` and socket units, validating under WSL. Retract Strategy B. | Shiori PR #204 |
+| **Phase 2** | Implement `TokenSocketProvider` and socket units, validating under WSL. Retract Strategy B (`refresh-token.sh`, `shiori-refresh.{service,timer}`). | **Complete** (Shiori PR #204) |
 | **Phase 3** | Deploy to GCP VMs and retract Strategy A (removing PEM files from VM disks). | Post Phase 2 |
 
 ---

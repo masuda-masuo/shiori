@@ -22,6 +22,7 @@ from shiori.github_auth import (
     AppTokenProvider,
     StaticTokenProvider,
     TokenCommandProvider,
+    TokenSocketProvider,
     build_token_provider,
 )
 
@@ -31,6 +32,7 @@ _ENV_KEYS = [
     "GITHUB_APP_INSTALLATION_ID",
     "GITHUB_APP_PRIVATE_KEY",
     "GITHUB_TOKEN_COMMAND",
+    "GITHUB_TOKEN_SOCKET",
     "GITHUB_APP_PRIVATE_KEY_PATH",
 ]
 
@@ -232,6 +234,113 @@ def test_token_command_provider_fallback(clean_env, monkeypatch):
 
 
 #
+# TokenSocketProvider tests (issue #204)
+#
+
+
+def _mock_socket(monkeypatch, data: bytes, fail: bool = False):
+    """Monkeypatch socket.socket to return a mock that connects and receives *data*."""
+    class MockSocket:
+        def __init__(self, family, sock_type):
+            self._timeout = None
+            self._data = data
+            self._fail = fail
+
+        def settimeout(self, timeout):
+            self._timeout = timeout
+
+        def connect(self, path):
+            if self._fail:
+                raise OSError(f"connection refused: {path}")
+
+        def recv(self, bufsize):
+            if self._fail:
+                raise OSError("read error")
+            chunk = self._data[:bufsize]
+            self._data = self._data[bufsize:]
+            return chunk
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(github_auth.socket, "socket", MockSocket)
+
+
+def test_provider_token_socket(clean_env):
+    clean_env.setenv("GITHUB_TOKEN_SOCKET", "/run/shiori/mint.sock")
+    p = build_token_provider(Settings())
+    assert isinstance(p, TokenSocketProvider)
+
+
+def test_provider_token_socket_preferred_over_command(clean_env):
+    clean_env.setenv("GITHUB_TOKEN_SOCKET", "/run/shiori/mint.sock")
+    clean_env.setenv("GITHUB_TOKEN_COMMAND", "echo ghs_from_command")
+    p = build_token_provider(Settings())
+    assert isinstance(p, TokenSocketProvider)
+
+
+def test_provider_socket_after_app(clean_env, rsa_pem):
+    clean_env.setenv("GITHUB_APP_ID", "123")
+    clean_env.setenv("GITHUB_APP_INSTALLATION_ID", "456")
+    clean_env.setenv("GITHUB_APP_PRIVATE_KEY", rsa_pem)
+    clean_env.setenv("GITHUB_TOKEN_SOCKET", "/run/shiori/mint.sock")
+    p = build_token_provider(Settings())
+    assert isinstance(p, AppTokenProvider)
+
+
+def test_token_socket_provider_fetch(clean_env, monkeypatch):
+    _mock_socket(monkeypatch, b"ghs_socket_token\n")
+    p = TokenSocketProvider("/run/shiori/mint.sock")
+    assert p.get_token() == "ghs_socket_token"
+
+
+def test_token_socket_provider_cache(clean_env, monkeypatch):
+    calls = {"n": 0}
+    recv_calls = {"n": 0}
+
+    class CountingSocket:
+        def __init__(self, family, sock_type):
+            self._timeout = None
+        def settimeout(self, timeout):
+            self._timeout = timeout
+        def connect(self, path):
+            calls["n"] += 1
+        def recv(self, bufsize):
+            recv_calls["n"] += 1
+            if recv_calls["n"] >= 2:
+                return b""
+            return b"ghs_cached"
+        def close(self):
+            pass
+
+    monkeypatch.setattr(github_auth.socket, "socket", CountingSocket)
+    p = TokenSocketProvider("/run/shiori/mint.sock")
+    assert p.get_token() == "ghs_cached"
+    assert calls["n"] == 1
+    # second call should use cache (not re-connect)
+    assert p.get_token() == "ghs_cached"
+    assert calls["n"] == 1
+
+
+def test_token_socket_provider_empty_response(clean_env, monkeypatch):
+    _mock_socket(monkeypatch, b"")
+    p = TokenSocketProvider("/run/shiori/mint.sock")
+    with pytest.raises(RuntimeError):
+        p.get_token()
+
+
+def test_token_socket_provider_fallback(clean_env, monkeypatch):
+    p = TokenSocketProvider("/run/shiori/mint.sock")
+    # prime cache
+    p._token = "ghs_old"
+    p._fetched_at = time.time()
+    # make socket connect fail
+    _mock_socket(monkeypatch, b"", fail=True)
+    # fallback to cached token
+    assert p.get_token() == "ghs_old"
+
+
+#
 # Provider name attribute (issue #188): shiori_status reports this via
 # build_token_provider(settings).name so it can surface the *actual* provider
 # selected, not just what the raw config implies.
@@ -242,6 +351,7 @@ def test_provider_names(clean_env, rsa_pem):
     assert AnonymousProvider().name == "anonymous"
     assert StaticTokenProvider("ghp_xxx").name == "static"
     assert TokenCommandProvider("echo x").name == "token_command"
+    assert TokenSocketProvider("/sock").name == "token_socket"
     assert AppTokenProvider("1", rsa_pem, "2").name == "app"
 
 

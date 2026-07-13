@@ -33,7 +33,6 @@ from __future__ import annotations
 
 import calendar
 import logging
-import os
 import shlex
 import socket
 import subprocess
