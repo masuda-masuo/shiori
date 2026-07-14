@@ -1,7 +1,7 @@
 """GitHub authentication (detailed design/09).
 Unifies PAT and GitHub App installation tokens under TokenProvider abstraction.
 Decisions:
-- App preferred, then TokenCommand, then GITHUB_TOKEN, then anonymous.
+- App preferred, then TokenSocket, then TokenCommand, then GITHUB_TOKEN, then anonymous.
 - Installation token expires in 1 hour; refreshes 5 min before expiry.
 - Private key only passed to ingest process (not MCP server; see detailed design/07, 09).
 
@@ -16,8 +16,9 @@ consumed* and *who is responsible for refreshing it* -- see detailed design/15
   keystore's D-Bus Secret Service only accepts the bus-owner UID, so it is not
   reachable from in there. The credential must be carried to the consumer --
   either the GitHub App private key (``GITHUB_APP_*``, AppTokenProvider, which
-  then refreshes itself), or a short-lived token minted host-side and handed over
-  as a file (``GITHUB_TOKEN_COMMAND=cat /run/shiori/github-token``).
+  then refreshes itself), or a mint socket (``GITHUB_TOKEN_SOCKET``,
+  TokenSocketProvider, which connects to a host-side systemd socket-activated
+  service that mints tokens on demand).
 
 There is deliberately **no provider that tries to mint from the OS keystore from
 inside a container**. The former ``McpTokenProvider`` did exactly that: it
@@ -33,6 +34,7 @@ from __future__ import annotations
 import calendar
 import logging
 import shlex
+import socket
 import subprocess
 import time
 from dataclasses import dataclass
@@ -211,9 +213,74 @@ class TokenCommandProvider(TokenProvider):
         raise RuntimeError("token command failed and no cached token available")
 
 
+class TokenSocketProvider(TokenProvider):
+    """Connects to a Unix socket (``GITHUB_TOKEN_SOCKET``) to obtain a token.
+
+    The socket is served by a host-side systemd socket-activated service that
+    shiori does not own -- it is installed and maintained by mcp-launcher
+    (mcp-launcher#42), which runs ``mcp-token github`` on each connection and
+    streams the token back (detailed design/15). Shiori is a pure consumer
+    of this contract: connection = request, no payload; read until EOF and
+    strip the result.
+
+    Caches for 55 min, re-fetches 5 min before expiry, falls back to the
+    cached token for up to HARD_EXPIRY on failure. Raises when the socket
+    fails and no usable cached token is left.
+
+    Expiry bookkeeping uses the wall clock (``time.time()``), never a
+    monotonic clock: a monotonic clock does not advance while the host is
+    suspended, which would silently reintroduce the clock-drift bug this
+    provider exists to eliminate (see detailed design/15).
+    """
+
+    name: ClassVar[str] = "token_socket"
+
+    CACHE_SECONDS = 3300      # 55 min
+    REFRESH_BEFORE = 300      # 5 min
+    HARD_EXPIRY = 3600        # 60 min — fallback window on fetch failure
+
+    def __init__(self, socket_path: str) -> None:
+        self._socket_path = socket_path
+        self._token: str | None = None
+        self._fetched_at: float = 0.0
+
+    def get_token(self) -> str | None:
+        if self._token is None or time.time() > self._fetched_at + self.CACHE_SECONDS - self.REFRESH_BEFORE:
+            self._refresh()
+        return self._token
+
+    def _refresh(self) -> None:
+        try:
+            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            sock.settimeout(15.0)
+            sock.connect(self._socket_path)
+            data = b""
+            while True:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                data += chunk
+            sock.close()
+            token = data.decode("utf-8").strip()
+            if token:
+                self._token = token
+                self._fetched_at = time.time()
+                return
+            log.warning("token socket returned empty response from %s", self._socket_path)
+        except OSError as exc:
+            log.warning("token socket connect/read failed: %s", exc)
+        # fallback
+        if self._token and time.time() < self._fetched_at + self.HARD_EXPIRY:
+            log.warning("token socket refresh failed; reusing cached token")
+            return
+        raise RuntimeError(
+            f"token socket {self._socket_path} failed and no cached token available"
+        )
+
+
 def build_token_provider(settings: "Settings") -> TokenProvider:  # type: ignore[name-defined]  # noqa: F821
     """Select appropriate TokenProvider from Settings.
-    Priority: App > TokenCommand > PAT > anonymous.
+    Priority: App > TokenSocket > TokenCommand > PAT > anonymous.
     """
     app_id = settings.github_app_id
     installation_id = settings.github_app_installation_id
@@ -226,9 +293,14 @@ def build_token_provider(settings: "Settings") -> TokenProvider:  # type: ignore
                 "GitHub App configuration is incomplete. Set GITHUB_APP_ID / "
                 "and GITHUB_APP_PRIVATE_KEY(_PATH) / GITHUB_APP_INSTALLATION_ID."
             )
-        if settings.github_token or settings.github_token_command:
-            log.info("Both GitHub App config and token command/PAT present. App takes priority.")
+        if settings.github_token or settings.github_token_command or settings.github_token_socket:
+            log.info("Both GitHub App config and token socket/command/PAT present. App takes priority.")
         return AppTokenProvider(app_id, pem, installation_id)
+
+    if settings.github_token_socket:
+        if settings.github_token_command or settings.github_token:
+            log.info("GITHUB_TOKEN_SOCKET takes priority over token command/PAT")
+        return TokenSocketProvider(settings.github_token_socket)
 
     if settings.github_token_command:
         if settings.github_token:

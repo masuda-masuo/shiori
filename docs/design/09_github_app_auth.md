@@ -14,13 +14,14 @@ The core principle remains unchanged: tokens are resolved within the active job 
 
 ## Decisions
 
-1.  **Unified `TokenProvider` Abstraction**: Authentication logic is consolidated under a shared `TokenProvider` interface. It provides three implementations: Static Token (PAT), GitHub App, and External Command (TokenCommand). Core sync logic (`github_sync`) only interacts with credentials via this provider.
-2.  **Provider Precedence**: Evaluates credentials in the order: **GitHub App > TokenCommand > Static PAT > Anonymous**.
+1.  **Unified `TokenProvider` Abstraction**: Authentication logic is consolidated under a shared `TokenProvider` interface. It provides implementations: Static Token (PAT), GitHub App, TokenCommand, and TokenSocket (mint socket). Core sync logic (`github_sync`) only interacts with credentials via this provider.
+2.  **Provider Precedence**: Evaluates credentials in the order: **GitHub App > TokenSocket > TokenCommand > Static PAT > Anonymous**.
     *   *App*: Used if GITHUB_APP settings are fully defined.
+    *   *TokenSocket*: Used if `GITHUB_TOKEN_SOCKET` is specified (e.g. `/run/shiori/mint.sock`), connecting to a host-side systemd socket-activated service that mints tokens on demand (detailed design/15). Preferred over TokenCommand.
     *   *TokenCommand*: Used if `GITHUB_TOKEN_COMMAND` is specified (e.g. `mcp-token github`), running the command to fetch tokens dynamically.
     *   *PAT*: Used if `GITHUB_TOKEN` is set.
     *   *Anonymous*: Fallback when no keys are provided.
-    *   If both `TokenCommand` and `GITHUB_TOKEN` are set, the command takes priority and logs an informational notice.
+    *   If both `TokenSocket` and `TokenCommand`/`GITHUB_TOKEN` are set, the socket takes priority and logs an informational notice.
 3.  **On-Demand Token Refresh**: Tokens are cached in-memory by the provider and refreshed 5 minutes before expiration. This ensures tokens do not expire mid-run during slow initial ingestion jobs (which can take over an hour for CPU-heavy embeddings).
 4.  **Dynamic Git URL Swapping**: To prevent storing plain-text tokens permanently in `.git/config` (which causes authorization failures once tokens expire), Shiori dynamically swaps the remote URL with an authenticated one (using `x-access-token`) immediately before running network operations (`clone`/`fetch`), and restores the unauthenticated URL in a `finally` block. This approach was chosen instead of `http.extraHeader` to ensure compatibility across older Git versions.
 5.  **Key Propagation in Compose**: The GitHub App private key is passed to all compose services (`app` and `ingest`) using secrets and environment configurations. `build_token_provider()` resolves the active provider on-demand. When using PATs, `GITHUB_TOKEN` is similarly passed to all services.
@@ -37,21 +38,22 @@ The selection depends on two variables: **where the token is consumed** and **wh
 | Environment | Consumer | Method |
 | --- | --- | --- |
 | Compose Deployment (`app` / `ingest`) | In-container process | **GitHub App Private Key**: Mounts `GITHUB_APP_ID` and `GITHUB_APP_PRIVATE_KEY_PATH` as read-only Docker secrets. The container process generates and refreshes its own tokens, removing host-side dependencies. Active in GCP VMs (dev-infra#4 / #5). |
-| Compose Deployment (`app` / `ingest`) | In-container process | **Token-File Sharing**: The host runs `scripts/refresh-token.sh` (triggered by `mcp-token` and systemd timers) to mint tokens and write them to `runtime/github-token`. The container mounts `./runtime:/run/shiori:ro` and reads it via `GITHUB_TOKEN_COMMAND=cat /run/shiori/github-token`. No keys are written to the container or disk, but the host-side timer is a load-bearing dependency (Issues #150 / #188 / #198). |
+| Compose Deployment (`app` / `ingest`) | In-container process | **Mint Socket** (current): A host-side systemd socket-activated service **owned by mcp-launcher, not shiori** (see mcp-launcher#42; shiori carries no socket unit of its own) executes `mcp-token github` on connection and streams the token back. The container mounts the socket's parent **directory** (`${SHIORI_MINT_SOCKET_DIR:-${XDG_RUNTIME_DIR}/mcp-token}:/run/shiori:rw` -- a directory mount, never a file mount; see detailed design/15 for why) and uses `GITHUB_TOKEN_SOCKET=/run/shiori/mint.sock` to pull tokens on demand. Pull-based, no clock-drift windows. Active on WSL (Issue #204 / mcp-launcher#42). |
 | Native Run (host venv) | Host process | **TokenCommand Execution**: The process mints tokens directly by calling `GITHUB_TOKEN_COMMAND=mcp-token github`, fetching credentials directly from the host OS keyring. |
 
-Compose methods are opt-in. If unconfigured, the server falls back to anonymous mode, allowing setup guides for public-only repositories to function out-of-the-box. If both App and TokenCommand are set, the App is selected based on provider precedence.
+Compose methods are opt-in. If unconfigured, the server falls back to anonymous mode, allowing setup guides for public-only repositories to function out-of-the-box. If App, TokenSocket, and TokenCommand are set, the App is selected based on provider precedence (App > TokenSocket > TokenCommand > PAT > Anonymous).
 
 ### Removed Path: In-Container Minting (Legacy `McpTokenProvider`)
 The `McpTokenProvider` (introduced in Issue #170 / #173, which dynamically resolved the `mcp-token` binary inside the container to mint tokens) is **conceptually invalid**. 
 Keyring integration via the D-Bus Secret Service restricts access strictly to the owner UID of the desktop session bus. While the container can resolve the binary file on disk, attempting to mint credentials fails and **silently falls back to anonymous access with a single warning line**, masking sync failures (Issue #188).
 
-To execute native host-level minting, configuring `GITHUB_TOKEN_COMMAND=mcp-token github` via the `TokenCommandProvider` is sufficient. The legacy provider has been removed. The active provider hierarchy is simplified to **App > TokenCommand > PAT > Anonymous**. If a configured provider fails to resolve a token, it raises a `RuntimeError` rather than silently downgrading to anonymous (the error is caught by `record_sync_attempt` and displayed in `shiori_status.last_error`).
+For in-container deployments, the recommended approach is now the **Mint Socket** (`TokenSocketProvider`, `GITHUB_TOKEN_SOCKET`), which uses systemd socket activation to pull tokens on demand without exposing the private key to the container. For host-side usage, `GITHUB_TOKEN_COMMAND=mcp-token github` via `TokenCommandProvider` is sufficient.
 
-If `GITHUB_TOKEN_COMMAND` is set but the target file `runtime/github-token` is missing or empty:
-`TokenCommandProvider._refresh()` catches the failure (non-zero exit code or empty stdout), logs a warning (`token command returned empty output`), and raises a `RuntimeError` if no cached token is available. This surfaces as a sync exception and is tracked under `shiori_status.last_error` (aligning with Issue #192).
+The legacy provider has been removed. The active provider hierarchy is **App > TokenSocket > TokenCommand > PAT > Anonymous**. If a configured provider fails to resolve a token, it raises a `RuntimeError` rather than silently downgrading to anonymous (the error is caught by `record_sync_attempt` and displayed in `shiori_status.last_error`).
 
-The active provider can be inspected via the `token_provider` field in `shiori_status` (`app`, `static`, `token_command`, `anonymous`, or `error`). If provider construction itself fails (e.g., partially defined App configs), the status endpoint remains accessible but reports `token_provider: "error"` and logs the exception in warning arrays (Issue #193).
+The `token_socket` provider connects to a Unix socket, receives the token, and caches it for 55 minutes (re-fetching 5 minutes before expiry). On socket failure, it falls back to a cached token for up to 60 minutes before raising `RuntimeError`.
+
+The active provider can be inspected via the `token_provider` field in `shiori_status` (`app`, `token_socket`, `token_command`, `static`, `anonymous`, or `error`). If provider construction itself fails (e.g., partially defined App configs), the status endpoint remains accessible but reports `token_provider: "error"` and logs the exception in warning arrays (Issue #193).
 
 ---
 
@@ -65,6 +67,7 @@ The active provider can be inspected via the `token_provider` field in `shiori_s
 | `GITHUB_APP_INSTALLATION_ID` | The App Installation ID (numeric string). |
 | `GITHUB_TOKEN` | Personal Access Token (fallback). |
 | `GITHUB_TOKEN_COMMAND` | In-process command to execute (e.g. `mcp-token github`). stdout must yield the token. |
+| `GITHUB_TOKEN_SOCKET` | Path to a Unix socket for on-demand token minting (e.g. `/run/shiori/mint.sock`, inside the container). The socket is served by a host-side systemd socket-activated service **owned by mcp-launcher** (mcp-launcher#42) that runs `mcp-token github` on each connection; shiori is a pure consumer and has no socket unit of its own. Preferred over `GITHUB_TOKEN_COMMAND`. |
 
 To initialize App credentials, both `GITHUB_APP_ID` and `GITHUB_APP_INSTALLATION_ID` must be defined, and the private key must be readable. Partially defined environments raise a `ValueError` during startup.
 

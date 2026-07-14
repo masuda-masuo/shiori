@@ -55,6 +55,12 @@ class Settings:
     github_token_command: str | None = field(
         default_factory=lambda: os.environ.get("GITHUB_TOKEN_COMMAND") or None
     )
+    # Unix socket path for on-demand token minting (e.g. "/run/shiori/mint.sock").
+    # The socket is served by a host-side systemd socket-activated service
+    # that runs mcp-token github on each connection. Preferred over TokenCommand.
+    github_token_socket: str | None = field(
+        default_factory=lambda: os.environ.get("GITHUB_TOKEN_SOCKET") or None
+    )
     # GitHub App authentication (short-lived token. See detailed design/09).
     # App preferred if all 3 present; fall back to github_token; then anonymous.
     github_app_id: str | None = field(
