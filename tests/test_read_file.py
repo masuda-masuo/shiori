@@ -334,8 +334,8 @@ class TestStatusTokenProvider:
 
     def test_reports_selected_provider_name(self):
         """選ばれた provider 名をそのまま返す。"""
-        result = self._run_status("app")
-        assert result["token_provider"] == "app"
+        result = self._run_status("token_socket")
+        assert result["token_provider"] == "token_socket"
         assert not any("falling back" in w for w in result["repos"]["o/r"]["warnings"])
 
     def test_reports_token_command(self):
@@ -379,26 +379,16 @@ class TestStatusTokenProviderError:
             mock_settings.sync_interval_seconds = 0
             return status()
 
-    def test_does_not_raise_on_incomplete_app_config(self):
+    def test_does_not_raise_on_build_provider_valueerror(self):
         """build_token_provider() raising ValueError does not propagate out of status()."""
-        result = self._run_status(
-            ValueError(
-                "GitHub App configuration is incomplete. Set GITHUB_APP_ID / "
-                "and GITHUB_APP_PRIVATE_KEY(_PATH) / GITHUB_APP_INSTALLATION_ID."
-            )
-        )
+        result = self._run_status(ValueError("token provider config invalid"))
         assert result["token_provider"] == "error"
 
     def test_warning_includes_exception_message(self):
         """The warning surfaced to the caller includes the original exception message."""
-        result = self._run_status(
-            ValueError(
-                "GitHub App configuration is incomplete. Set GITHUB_APP_ID / "
-                "and GITHUB_APP_PRIVATE_KEY(_PATH) / GITHUB_APP_INSTALLATION_ID."
-            )
-        )
+        result = self._run_status(ValueError("token provider config invalid"))
         warnings = result["repos"]["o/r"]["warnings"]
-        assert any("GitHub App configuration is incomplete" in w for w in warnings)
+        assert any("token provider config invalid" in w for w in warnings)
 
     def test_does_not_raise_on_arbitrary_exception(self):
         """Any exception from build_token_provider(), not just ValueError, is caught."""
@@ -411,7 +401,7 @@ class TestStatusTokenProviderError:
     def test_normal_path_unaffected_when_no_error(self):
         """When build_token_provider() succeeds normally, no error warning is added."""
         mock_provider = MagicMock()
-        mock_provider.name = "app"
+        mock_provider.name = "token_socket"
         with (
             patch("shiori.mcp_server._conn"),
             patch("shiori.mcp_server.settings") as mock_settings,
@@ -424,7 +414,7 @@ class TestStatusTokenProviderError:
             mock_settings.repos = ["o/r"]
             mock_settings.sync_interval_seconds = 0
             result = status()
-        assert result["token_provider"] == "app"
+        assert result["token_provider"] == "token_socket"
         assert not any(
             "token_provider could not be determined" in w
             for w in result["repos"]["o/r"]["warnings"]

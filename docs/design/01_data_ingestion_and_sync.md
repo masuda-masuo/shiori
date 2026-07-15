@@ -59,8 +59,8 @@ For incremental synchronization runs, the database retains all indexes (`migrate
 
 ## 7. Topology Recommendations (Public vs. Private)
 
-### Standard Configuration (GitHub App + In-Process Polling)
-*   Inject the GitHub App private key into the server.
+### Standard Configuration (Host-Minted Token + In-Process Polling)
+*   Supply a host-minted short-lived token via the mint socket (`GITHUB_TOKEN_SOCKET`); the GitHub App private key stays host-side in the keyring and is never injected into the server (Strategy A retired — #243).
 *   Enable automated background sync via `SHIORI_SYNC_INTERVAL_SECONDS` (recommended: 10 seconds).
 *   Concurrently running sync jobs are serialized using database-level advisory locks.
 

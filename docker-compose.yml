@@ -6,22 +6,23 @@
 # ingest は使い捨てのワンショット（profiles: ["ingest"]）。
 #
 # 認証（詳細設計/09・15）: build_token_provider() が
-# App > TokenSocket > TokenCommand > PAT > 匿名 の優先順位で選択する。
+# TokenSocket > TokenCommand > PAT > 匿名 の優先順位で選択する。
 # app / ingest は**コンテナ内**でトークンを消費するので、keystore には届かない
 # （D-Bus session bus が bus オーナー UID しか受け付けない）。したがって
-# credential を消費者側に運ぶ方式を使う:
+# **ホスト側で mint した短命トークンを消費者側に pull する**:
 #
-#   1. GitHub App 秘密鍵ファイル方式 — GITHUB_APP_ID /
-#      GITHUB_APP_PRIVATE_KEY_PATH を docker-compose.override.yml の secrets で
-#      読み取り専用マウント。コンテナ内プロセスが自分で mint / 再発行するので
-#      ホスト側に可動部が不要（非24h稼働の VM 向け。dev-infra#4 / #5）。
-#   2. on-demand mint socket 方式 — ホスト側の systemd socket-activated
-#      サービス（mcp-launcher が所有・導入する。shiori 自身はこのユニットを
-#      持たない。issue #204 / mcp-launcher#42）が接続ごとにトークンを返す
-#      （GITHUB_TOKEN_SOCKET）。pull 型なのでスリープ/復帰による窓が無い
-#      （詳細設計/15）。**ソケットは必ずディレクトリ単位でマウントする**こと
-#      （ファイル単位マウントは inode 固定・root 所有ディレクトリ化という
-#      実害があり、いずれもコンテナ再作成まで復旧しない。詳細設計/15）。
+#   on-demand mint socket 方式 — ホスト側の systemd socket-activated
+#   サービス（mcp-launcher が所有・導入する。shiori 自身はこのユニットを
+#   持たない。issue #204 / mcp-launcher#42）が接続ごとにトークンを返す
+#   （GITHUB_TOKEN_SOCKET）。pull 型なのでスリープ/復帰による窓が無く、
+#   **App 秘密鍵はコンテナにもディスクにも入らない**（詳細設計/15）。
+#   **ソケットは必ずディレクトリ単位でマウントする**こと
+#   （ファイル単位マウントは inode 固定・root 所有ディレクトリ化という
+#   実害があり、いずれもコンテナ再作成まで復旧しない。詳細設計/15）。
+#
+# 旧「GitHub App 秘密鍵ファイル方式」（GITHUB_APP_PRIVATE_KEY_PATH を secrets で
+# コンテナにマウントし、コンテナ内で自前 mint する方式A）は退役した（#243 / EPIC #237）。
+# 長命な App 秘密鍵をコンテナとディスクに晒すため。App 鍵はホストの keyring に留まる。
 #
 # どちらも .env / override で明示設定したときだけ有効になる。無設定なら匿名で、
 # 公開リポジトリのみの利用は認証設定なしで動く（README / セットアップ.md の約束）。

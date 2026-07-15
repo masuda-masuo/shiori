@@ -39,16 +39,15 @@ Using a background host timer to pre-mint tokens and write them to a shared file
 
 | Strategy | Private Key Location | Refresh Control | Lifespan | Current Target |
 | --- | --- | --- | --- | --- |
-| **A. App Private Key** | **Container (PEM)** | Consumer (Pull) | ◯ No drift windows | GCP VM |
-| **B. Mint Socket** | Host Keyring | Consumer (Pull) | ◯ No drift windows | WSL (current) |
-| **C. Token-File Share** (Retired) | Host Keyring | Host Timer (**Push**) | **✗ Drift windows** | **Removed** (Replaced by Mint Socket in #204) |
-| **D. In-Container Mint** | Keystore (Unreachable) | — | — | **Removed** (Legacy `McpTokenProvider`) |
+| **B. Mint Socket** | Host Keyring | Consumer (Pull) | ◯ No drift windows | **WSL + GCP VM (current)** |
 | **E. Native Host Run** | Host Keyring | Consumer (Pull) | ◯ No drift windows | Host venv / Sunaba |
+| **A. App Private Key** (Retired) | Container (PEM) | Consumer (Pull) | ◯ No drift windows | **Removed** (Retired by #243; superseded by Mint Socket) |
+| **C. Token-File Share** (Retired) | Host Keyring | Host Timer (**Push**) | **✗ Drift windows** | **Removed** (Replaced by Mint Socket in #204) |
+| **D. In-Container Mint** (Retired) | Keystore (Unreachable) | — | — | **Removed** (Legacy `McpTokenProvider`) |
 
-Strategy A (App Private Key) sacrifices a security parameter:
-*   **Strategy A** is pull-based (no clock-drift windows), but **exposes the long-lived App private key (PEM) inside the container and on disk**. If leaked, the App is compromised indefinitely.
+**Strategy B (Mint Socket) is the token supply for every deployment.** The private key stays in the host keyring; containers pull a short-lived token on demand via socket activation, so there is neither a clock-drift window nor any long-lived secret on disk.
 
-Strategy B (Mint Socket) resolves this by keeping the private key on the host and using pull-based socket activation, eliminating both the clock-drift window and the disk exposure. It replaces the retired Token-File Share (former Strategy C), which relied on push-based timers with clock-drift windows and was a load-bearing operational dependency (removed in #204).
+Strategy A (App Private Key in the container) was **retired (#243, under EPIC #237)**. It was pull-based and had no drift window, but it **carried the long-lived App private key (PEM) into the container and onto disk** — if leaked, the App is compromised indefinitely. Once the mint socket (B) proved out on both WSL and the GCP VM (2026-07-15), A had no remaining advantage and one strict disadvantage, so its provider (`AppTokenProvider`) and all `GITHUB_APP_*` container config were removed. The App private key now exists only in the host keyring, consumed by `mcp-token`. Strategy C (Token-File Share) was likewise removed in #204 (push-based timers with drift windows).
 
 **Ownership note**: Strategy B's host-side socket-activated minter is **owned by mcp-launcher, not shiori** (mcp-launcher#42). Shiori only implements the consumer side (`TokenSocketProvider`) and documents the contract it depends on; it carries no systemd unit for the minter itself. See "Architecture" below.
 
@@ -97,8 +96,8 @@ opens a connect-recv(until EOF)-close loop, caches the token for 55 minutes,
 and re-fetches 5 minutes before expiry -- the same cache/fallback shape as
 `TokenCommandProvider`.
 
-The provider precedence is **App > TokenSocket > TokenCommand > PAT >
-Anonymous**.
+The provider precedence is **TokenSocket > TokenCommand > PAT >
+Anonymous**. (The in-container App provider was retired — #243.)
 
 ### Invariant: Wall-Clock Expiry, Never Monotonic
 

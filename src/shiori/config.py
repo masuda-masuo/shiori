@@ -61,21 +61,6 @@ class Settings:
     github_token_socket: str | None = field(
         default_factory=lambda: os.environ.get("GITHUB_TOKEN_SOCKET") or None
     )
-    # GitHub App authentication (short-lived token. See detailed design/09).
-    # App preferred if all 3 present; fall back to github_token; then anonymous.
-    github_app_id: str | None = field(
-        default_factory=lambda: os.environ.get("GITHUB_APP_ID") or None
-    )
-    github_app_installation_id: str | None = field(
-        default_factory=lambda: os.environ.get("GITHUB_APP_INSTALLATION_ID") or None
-    )
-    # Private key: PATH first, then inline PEM. Read via github_app_private_key().
-    github_app_private_key_path: str | None = field(
-        default_factory=lambda: os.environ.get("GITHUB_APP_PRIVATE_KEY_PATH") or None
-    )
-    github_app_private_key_pem: str | None = field(
-        default_factory=lambda: os.environ.get("GITHUB_APP_PRIVATE_KEY") or None
-    )
     # Target repos. "owner/name" comma-separated, multiple allowed.
     repos: list[str] = field(default_factory=_repos_from_env)
     # Embedding model. Re-index (ingest --rebuild) required after change.
@@ -140,14 +125,6 @@ class Settings:
     def repo_dir(self, repo: str) -> str:
         owner, name = repo.split("/", 1)
         return os.path.join(self.data_dir, "repos", f"{owner}__{name}")
-
-    def github_app_private_key(self) -> str | None:
-        """Return the GitHub App private key PEM. PATH preferred, then inline text, else None."""
-        if self.github_app_private_key_path:
-            with open(self.github_app_private_key_path, encoding="utf-8") as fp:
-                return fp.read()
-        return self.github_app_private_key_pem
-
 
 def load_settings() -> Settings:
     return Settings()
