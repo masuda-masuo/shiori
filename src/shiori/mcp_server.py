@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import re
+import ast
 import subprocess
 import threading
 import time
@@ -19,6 +20,7 @@ import psycopg
 
 from . import db, search
 from .config import Settings, load_settings
+from .dashboard import register_dashboard
 from .embedding import Embedder
 from .github_auth import build_token_provider
 from .github_sync import (
@@ -1448,8 +1450,6 @@ def report(
     raise AssertionError("Unreachable template code path")
 
 
-import ast
-
 def _extract_python_api_from_file(file_path: str, base_path: str) -> list[dict]:
     try:
         with open(file_path, "r", encoding="utf-8", errors="replace") as f:
@@ -1458,7 +1458,6 @@ def _extract_python_api_from_file(file_path: str, base_path: str) -> list[dict]:
     except Exception:
         return []
 
-    entries = []
     rel_path = os.path.relpath(file_path, base_path)
 
     class Visitor(ast.NodeVisitor):
@@ -2275,7 +2274,6 @@ def status() -> dict[str, Any]:
         "token_provider": token_provider,
     }
 
-from .dashboard import register_dashboard
 register_dashboard(mcp)
 
 def run(transport: Literal["stdio", "sse", "streamable-http"] = "streamable-http") -> None:
