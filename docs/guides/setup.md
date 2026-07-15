@@ -31,19 +31,19 @@ The `ingest` service runs a one-shot ingestion job. **Always pass `--build` when
 
 ## Authentication Configuration
 
-`build_token_provider()` resolves credentials in the order: **App > TokenSocket > TokenCommand > PAT (static) > anonymous**.
+`build_token_provider()` resolves credentials in the order: **TokenSocket > TokenCommand > PAT (static) > anonymous**.
 
-Choosing a method depends on **where the tokens are consumed** and **who is responsible for refreshing them**:
+The token is always minted **host-side** by `mcp-token` (from the GitHub App key in the OS keyring); shiori only pulls the short-lived result. **The App private key never enters the container or disk.** Choosing a method depends on **where the token is consumed**:
 
-1.  **GitHub App Private Key (Recommended for Remote VMs)**:
-    Mount your `GITHUB_APP_ID` and `GITHUB_APP_PRIVATE_KEY_PATH` as read-only Docker secrets in a `docker-compose.override.yml`. Because the key resides in the container, **the container process refreshes tokens natively**. Useful for VMs that shut down automatically.
-2.  **Mint Socket (Recommended for WSL2 / Desktop)**:
+1.  **Mint Socket (containers: WSL2, Desktop, and remote VMs)**:
     A host-side systemd socket-activated service mints a short-lived token from the OS keyring on every connection and streams it back (pull-based; no periodic refresh timer). This service is **not part of shiori** -- it is installed separately via mcp-launcher's `scripts/install-mint-socket.sh` (issue #204 / mcp-launcher#42). Set `GITHUB_TOKEN_SOCKET=/run/shiori/mint.sock` in `.env`; the compose file mounts the socket's host directory (`${SHIORI_MINT_SOCKET_DIR:-${XDG_RUNTIME_DIR}/mcp-token}`) at `/run/shiori`. **No private keys are placed inside the container or on disk.**
     *   *Note*: because it is pull-based (connect-on-demand, not a push timer), there is no clock-drift window across host sleep/resume -- see detailed design/15.
+2.  **TokenCommand (server run directly on the host, no Docker)**:
+    Configure `GITHUB_TOKEN_COMMAND=mcp-token github`; the host process mints straight from the OS keyring.
 
-If running the server process directly on the host (bypassing Docker), configure: `GITHUB_TOKEN_COMMAND=mcp-token github`.
+> **Retired:** mounting the App private key as a Docker secret and letting the container mint its own tokens (Strategy A) was removed in #243. The GitHub App key stays host-side; use the mint socket for containers.
 
-If token resolution fails, Shiori raises a `RuntimeError` and logs it in `shiori_status.last_error` rather than silently falling back to anonymous access. You can inspect the active provider (e.g. `app`, `token_socket`, `static`, `token_command`) via the `token_provider` field in `shiori_status`.
+If token resolution fails, Shiori raises a `RuntimeError` and logs it in `shiori_status.last_error` rather than silently falling back to anonymous access. You can inspect the active provider (e.g. `token_socket`, `static`, `token_command`) via the `token_provider` field in `shiori_status`.
 
 ---
 

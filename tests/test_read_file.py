@@ -379,26 +379,16 @@ class TestStatusTokenProviderError:
             mock_settings.sync_interval_seconds = 0
             return status()
 
-    def test_does_not_raise_on_incomplete_app_config(self):
+    def test_does_not_raise_on_build_provider_valueerror(self):
         """build_token_provider() raising ValueError does not propagate out of status()."""
-        result = self._run_status(
-            ValueError(
-                "GitHub App configuration is incomplete. Set GITHUB_APP_ID / "
-                "and GITHUB_APP_PRIVATE_KEY(_PATH) / GITHUB_APP_INSTALLATION_ID."
-            )
-        )
+        result = self._run_status(ValueError("token provider config invalid"))
         assert result["token_provider"] == "error"
 
     def test_warning_includes_exception_message(self):
         """The warning surfaced to the caller includes the original exception message."""
-        result = self._run_status(
-            ValueError(
-                "GitHub App configuration is incomplete. Set GITHUB_APP_ID / "
-                "and GITHUB_APP_PRIVATE_KEY(_PATH) / GITHUB_APP_INSTALLATION_ID."
-            )
-        )
+        result = self._run_status(ValueError("token provider config invalid"))
         warnings = result["repos"]["o/r"]["warnings"]
-        assert any("GitHub App configuration is incomplete" in w for w in warnings)
+        assert any("token provider config invalid" in w for w in warnings)
 
     def test_does_not_raise_on_arbitrary_exception(self):
         """Any exception from build_token_provider(), not just ValueError, is caught."""

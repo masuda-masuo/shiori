@@ -39,4 +39,4 @@ Index states are updated through three channels:
 ### Concurrent Sync Guard
 Concurrent sync operations are serialized using database-level advisory locks (`pg_try_advisory_lock`). If a sync job is already active, subsequent triggers are skipped and report a `skipped` state without modifying database records.
 
-Authentication is configured via `build_token_provider()`. Under Docker Compose, tokens are supplied either via the GitHub App private key mount or the token-file sharing mechanism. (See [Setup Guide](../guides/setup.md) for details).
+Authentication is configured via `build_token_provider()`. Under Docker Compose, the container pulls a host-minted short-lived token from the mint socket (`GITHUB_TOKEN_SOCKET`); the GitHub App private key stays in the host keyring and is never mounted into the container (the in-container App-PEM mount, Strategy A, was retired in #243). (See [Setup Guide](../guides/setup.md) for details).

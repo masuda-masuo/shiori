@@ -1,9 +1,9 @@
 """GitHub authentication (detailed design/09).
-Unifies PAT and GitHub App installation tokens under TokenProvider abstraction.
+Unifies PAT and host-minted installation tokens under a TokenProvider abstraction.
 Decisions:
-- App preferred, then TokenSocket, then TokenCommand, then GITHUB_TOKEN, then anonymous.
-- Installation token expires in 1 hour; refreshes 5 min before expiry.
-- Private key only passed to ingest process (not MCP server; see detailed design/07, 09).
+- TokenSocket preferred, then TokenCommand, then GITHUB_TOKEN, then anonymous.
+- Short-lived tokens are minted host-side (mcp-token) and pulled on demand; the
+  App private key never enters this process or a container.
 
 Which provider a deployment should use is decided by *where the token is
 consumed* and *who is responsible for refreshing it* -- see detailed design/15
@@ -14,24 +14,22 @@ consumed* and *who is responsible for refreshing it* -- see detailed design/15
   disk.
 - Consumer is inside a container (the compose ``app`` / ``ingest`` services): the
   keystore's D-Bus Secret Service only accepts the bus-owner UID, so it is not
-  reachable from in there. The credential must be carried to the consumer --
-  either the GitHub App private key (``GITHUB_APP_*``, AppTokenProvider, which
-  then refreshes itself), or a mint socket (``GITHUB_TOKEN_SOCKET``,
-  TokenSocketProvider, which connects to a host-side systemd socket-activated
-  service that mints tokens on demand).
+  reachable from in there. The token is pulled from a host-side mint socket
+  (``GITHUB_TOKEN_SOCKET``, TokenSocketProvider) -- a systemd socket-activated
+  service that mints on each connection. The App private key stays host-side.
 
-There is deliberately **no provider that tries to mint from the OS keystore from
-inside a container**. The former ``McpTokenProvider`` did exactly that: it
-resolved the mcp-token binary (which is just a file, so that step succeeded),
-failed at the mint step, and fell back to anonymous behind a single warning log
-line -- a silent downgrade that hid a real outage (issue #188). Removing it loses
-nothing: ``GITHUB_TOKEN_COMMAND=mcp-token github`` does the same job on the host,
-where it actually works, and is explicit about it.
+There is deliberately **no in-container GitHub App provider and no provider that
+mints from the OS keystore inside a container**. The retired ``AppTokenProvider``
+carried the long-lived App PEM into the container to self-refresh (#243 under
+EPIC #237); the retired ``McpTokenProvider`` resolved the mcp-token binary (just
+a file, so that step succeeded), failed at the mint step, and fell back to
+anonymous behind a single warning line -- a silent downgrade that hid a real
+outage (issue #188). Both are replaced by pulling a host-minted token: the PEM
+never leaves the host, and a mint failure surfaces instead of degrading.
 """
 
 from __future__ import annotations
 
-import calendar
 import logging
 import shlex
 import socket
@@ -39,9 +37,6 @@ import subprocess
 import time
 from dataclasses import dataclass
 from typing import ClassVar
-
-import httpx
-import jwt
 
 log = logging.getLogger(__name__)
 
@@ -84,79 +79,6 @@ class StaticTokenProvider(TokenProvider):
 
     def get_token(self) -> str | None:
         return self.token
-
-
-class AppTokenProvider(TokenProvider):
-    """Issues and caches GitHub App installation access tokens.
-    get_token() re-issues if not obtained or within REFRESH_BEFORE seconds of expiry.
-    Ensures tokens survive long ingests (CPU embedding can exceed 1 hour).
-"""
-
-    name: ClassVar[str] = "app"
-
-    REFRESH_BEFORE = 300  # Re-issue 5 min before expiry
-
-    def __init__(self, app_id: str, private_key_pem: str, installation_id: str) -> None:
-        self._app_id = app_id
-        self._key = private_key_pem
-        self._installation_id = installation_id
-        self._token: str | None = None
-        self._expires_at: float = 0.0  # Epoch seconds (UTC)
-
-    def get_token(self) -> str | None:
-        if self._token is None or time.time() > self._expires_at - self.REFRESH_BEFORE:
-            self._refresh()
-        return self._token
-
-    def _app_jwt(self) -> str:
-        """Generate JWT (RS256) for App authentication.
-        iat set 60s in past. exp is 9 min (under 10-min limit)."""
-        now = int(time.time())
-        payload = {"iat": now - 60, "exp": now + 540, "iss": self._app_id}
-        return jwt.encode(payload, self._key, algorithm="RS256")
-
-    def _refresh(self) -> None:
-        url = f"{API}/app/installations/{self._installation_id}/access_tokens"
-        try:
-            resp = httpx.post(
-                url,
-                headers={
-                    "Authorization": f"Bearer {self._app_jwt()}",
-                    "Accept": "application/vnd.github+json",
-                    "X-GitHub-Api-Version": "2022-11-28",
-                },
-                timeout=30.0,
-            )
-        except httpx.HTTPError as exc:
-            # Network down etc. Continue if cached token still valid; abort if not.
-            if self._token and time.time() < self._expires_at:
-                log.warning("token refresh failed, reusing cached token: %s", exc)
-                return
-            raise RuntimeError(f"failed to obtain installation token: {exc}") from exc
-
-        if resp.status_code == 401:
-            raise RuntimeError(
-                "GitHub App JWT was rejected (401). Check GITHUB_APP_ID and private key pairing, "
-                "and server clock."
-            )
-        if resp.status_code == 404:
-            raise RuntimeError(
-                "Installation not found (404). Check GITHUB_APP_INSTALLATION_ID and "
-                "whether the App is installed on the target repository."
-            )
-        if resp.status_code == 403:
-            raise RuntimeError(
-                "Insufficient permissions (403). Check App permissions (Contents / Issues / Pull requests: Read) and "
-                "the installation target repository."
-            )
-        resp.raise_for_status()  # 201 is success
-
-        data = resp.json()
-        self._token = data["token"]
-        # expires_at is "2026-06-11T12:34:56Z" (UTC). Convert to epoch seconds.
-        parsed = time.strptime(data["expires_at"], "%Y-%m-%dT%H:%M:%SZ")
-        self._expires_at = float(calendar.timegm(parsed))
-        log.info("issued installation token (expires_at=%s)", data["expires_at"])
 
 
 class TokenCommandProvider(TokenProvider):
@@ -280,23 +202,13 @@ class TokenSocketProvider(TokenProvider):
 
 def build_token_provider(settings: "Settings") -> TokenProvider:  # type: ignore[name-defined]  # noqa: F821
     """Select appropriate TokenProvider from Settings.
-    Priority: App > TokenSocket > TokenCommand > PAT > anonymous.
+    Priority: TokenSocket > TokenCommand > PAT > anonymous.
+
+    There is deliberately no in-container GitHub App provider: the App private
+    key is minted host-side by mcp-token and pulled through the mint socket
+    (TokenSocketProvider) or a host command (TokenCommandProvider). Placing the
+    long-lived PEM inside the container was retired (#243 under EPIC #237).
     """
-    app_id = settings.github_app_id
-    installation_id = settings.github_app_installation_id
-    pem = settings.github_app_private_key()
-
-    app_vars = [app_id, installation_id, pem]
-    if any(app_vars):
-        if not all(app_vars):
-            raise ValueError(
-                "GitHub App configuration is incomplete. Set GITHUB_APP_ID / "
-                "and GITHUB_APP_PRIVATE_KEY(_PATH) / GITHUB_APP_INSTALLATION_ID."
-            )
-        if settings.github_token or settings.github_token_command or settings.github_token_socket:
-            log.info("Both GitHub App config and token socket/command/PAT present. App takes priority.")
-        return AppTokenProvider(app_id, pem, installation_id)
-
     if settings.github_token_socket:
         if settings.github_token_command or settings.github_token:
             log.info("GITHUB_TOKEN_SOCKET takes priority over token command/PAT")
@@ -313,8 +225,7 @@ def build_token_provider(settings: "Settings") -> TokenProvider:  # type: ignore
                 "GITHUB_TOKEN starts with 'ghs_' (a GitHub App installation "
                 "token, which expires in about 1 hour). It will be used as a "
                 "static token and will silently stop working once it expires. "
-                "Prefer GITHUB_APP_ID/GITHUB_APP_PRIVATE_KEY/"
-                "GITHUB_APP_INSTALLATION_ID or GITHUB_TOKEN_COMMAND for a "
+                "Prefer GITHUB_TOKEN_SOCKET or GITHUB_TOKEN_COMMAND for a "
                 "token that refreshes itself (issue #187)."
             )
         return StaticTokenProvider(settings.github_token)

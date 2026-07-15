@@ -44,7 +44,7 @@ The pipeline flow is: **Sync/Ingest → Chunk → Embed → Index → Search →
 
 ## 5. Architectural Decisions (Decision Log)
 
-*   **GitHub Authentication**: Decoupled using a `TokenProvider` interface. Priority sequence: **App > TokenCommand > PAT > anonymous**. Under Docker Compose deployments, we use either the GitHub App Private Key secret mount or the token-file sharing mechanism. (See [GitHub App Auth](09_github_app_auth.md) and [Token Supply Path](15_token_supply_path.md) for details).
+*   **GitHub Authentication**: Decoupled using a `TokenProvider` interface. Priority sequence: **TokenSocket > TokenCommand > PAT > anonymous**. Under Docker Compose deployments, the token is pulled from a host-side mint socket (`GITHUB_TOKEN_SOCKET`); the GitHub App private key stays in the host keyring and never enters the container. (The in-container App-PEM mount and the token-file sharing mechanism were retired — #243 / #204.) (See [GitHub App Auth](09_github_app_auth.md) and [Token Supply Path](15_token_supply_path.md) for details).
 *   **Unified Store (PostgreSQL)**: Consolidate embeddings (via `pgvector`) and full-text indexing (via `pgroonga`) under a single PostgreSQL instance to perform hybrid ranking (RRF) and metadata filtering (`WHERE` clause) in a single query.
 *   **No Re-ranking**: We omit local re-ranking models in v1.0. Hybrid queries are ranked using Reciprocal Rank Fusion (RRF, k=60). `shiori_search` is the unified entrance, and `shiori_keyword_search` is kept separate for exact matching.
 *   **One-Shot Ingestion**: Sync operations run as disposable ingestion jobs (`python -m shiori ingest`). Differential sync relies on content hashes for docs, and `updated_at` cursors for issues/PRs. Bot comments are filtered by default.
