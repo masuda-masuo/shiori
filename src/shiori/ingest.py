@@ -159,7 +159,7 @@ def run_ingest(
                 conn.commit()
             db.drop_heavy_indexes(conn)
 
-        embedder = Embedder(settings.embedding_model, settings.embedding_dim)
+        embedder = Embedder()
 
         buffer: ChunkBuffer | None = None
         if is_bulk:

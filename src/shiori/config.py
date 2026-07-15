@@ -38,6 +38,12 @@ def _allow_rebuild_from_env() -> bool:
     )
 
 
+# Default embedding model baked into the image (docker/app/Dockerfile).
+# To change, fork the image and rebuild. Runtime env var override removed (#255).
+DEFAULT_EMBEDDING_MODEL = "intfloat/multilingual-e5-small"
+EMBEDDING_DIM: int = 384
+
+
 @dataclass
 class Settings:
     # Postgres (pgvector + pgroonga)
@@ -63,15 +69,6 @@ class Settings:
     )
     # Target repos. "owner/name" comma-separated, multiple allowed.
     repos: list[str] = field(default_factory=_repos_from_env)
-    # Embedding model. Re-index (ingest --rebuild) required after change.
-    embedding_model: str = field(
-        default_factory=lambda: os.environ.get(
-            "EMBEDDING_MODEL", "intfloat/multilingual-e5-small"
-        )
-    )
-    embedding_dim: int = field(
-        default_factory=lambda: int(os.environ.get("EMBEDDING_DIM", "384"))
-    )
     # Clone destination and working data.
     data_dir: str = field(
         default_factory=lambda: os.environ.get("SHIORI_DATA_DIR", "/data")

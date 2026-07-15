@@ -279,7 +279,8 @@ def _run_alter_statements(conn: psycopg.Connection) -> None:
 def migrate_light(conn: psycopg.Connection, settings: Settings) -> None:
     """Create tables, constraints, and btree indexes only. Skip HNSW/pgroonga (issue #72)."""
     with conn.cursor() as cur:
-        cur.execute(SCHEMA_SQL.format(dim=settings.embedding_dim))  # type: ignore[arg-type]
+        from shiori.config import EMBEDDING_DIM as _EMBEDDING_DIM
+        cur.execute(SCHEMA_SQL.format(dim=_EMBEDDING_DIM))  # type: ignore[arg-type]
     conn.commit()
     _run_alter_statements(conn)
 
