@@ -5,8 +5,6 @@ from __future__ import annotations
 import threading
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from shiori import mcp_server
 from shiori.mcp_server import (
     _ensure_phase1,
@@ -25,7 +23,7 @@ class TestEnsurePhase1:
         with (
             patch("shiori.mcp_server.build_token_provider") as mock_build,
             patch("shiori.refresh.refresh_clone", return_value="abc123"),
-            patch("shiori.mcp_server._conn") as mock_conn,
+            patch("shiori.mcp_server._conn"),
             patch("shiori.mcp_server.db.upsert_clone_head"),
         ):
             mock_build.return_value = MagicMock()
@@ -37,7 +35,7 @@ class TestEnsurePhase1:
         with (
             patch("shiori.mcp_server.build_token_provider") as mock_build,
             patch("shiori.refresh.refresh_clone", return_value="abc123") as mock_refresh,
-            patch("shiori.mcp_server._conn") as mock_conn,
+            patch("shiori.mcp_server._conn"),
             patch("shiori.mcp_server.db.upsert_clone_head"),
             patch("shiori.mcp_server.settings") as mock_settings,
         ):
@@ -66,7 +64,7 @@ class TestEnsurePhase1:
             with (
                 patch("shiori.mcp_server.build_token_provider") as mock_build,
                 patch("shiori.refresh.refresh_clone", side_effect=fake_refresh),
-                patch("shiori.mcp_server._conn") as mock_conn,
+                patch("shiori.mcp_server._conn"),
                 patch("shiori.mcp_server.db.upsert_clone_head"),
                 patch("shiori.mcp_server.settings") as mock_settings,
             ):
@@ -95,7 +93,7 @@ class TestEnsurePhase1:
             with (
                 patch("shiori.mcp_server.build_token_provider") as mock_build,
                 patch("shiori.refresh.refresh_clone", return_value="abc123"),
-                patch("shiori.mcp_server._conn") as mock_conn,
+                patch("shiori.mcp_server._conn"),
                 patch("shiori.mcp_server.db.upsert_clone_head"),
                 patch("shiori.mcp_server.settings") as mock_settings,
             ):
@@ -115,7 +113,7 @@ class TestEnsurePhase1:
             patch("shiori.mcp_server.build_token_provider") as mock_build,
             patch("shiori.refresh.refresh_clone",
                   side_effect=RuntimeError("git fetch failed")),
-            patch("shiori.mcp_server._conn") as mock_conn,
+            patch("shiori.mcp_server._conn"),
             patch("shiori.mcp_server.settings") as mock_settings,
         ):
             mock_build.return_value = MagicMock()

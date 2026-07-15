@@ -4,9 +4,6 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, mock_open, patch
 
-import pytest
-
-from shiori import mcp_server
 from shiori.mcp_server import (
     _LARGE_FILE_THRESHOLD,
     read_file,
