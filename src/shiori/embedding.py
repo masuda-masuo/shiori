@@ -3,13 +3,13 @@
 Single provider architecture: Settings.embedding_provider controls everything.
 Provider config: model and dimensions.
 Dimension detection: auto or override; dimension mismatch raises RuntimeError.
-Multiprocessing: uses ProcessPoolExecutor for CPU embedding.
 
 API: embed(texts: list[str]) -> np.ndarray (batch), embed_one(text: str) -> np.ndarray, embed_many(texts: list[str]) -> list[np.ndarray]."""
 
 from __future__ import annotations
 
 import logging
+import os
 
 log = logging.getLogger(__name__)
 
@@ -19,7 +19,7 @@ class Embedder:
         # Heavy imports lazy-loaded (speeds up CLI help etc.)
         from sentence_transformers import SentenceTransformer  # type: ignore[import-untyped]
 
-        log.info("loading embedding model: %s", model_name)
+        log.info("loading embedding model: %s (pid=%d)", model_name, os.getpid())
         self.model_name = model_name
         self.model = SentenceTransformer(model_name)
         self.dim = self.model.get_sentence_embedding_dimension()
