@@ -163,3 +163,17 @@ floats.
 
 *   **Sunaba (GCP VM)**: Currently runs `mcp-token` via sudoers (`GITHUB_TOKEN_COMMAND="sudo -n -u mcpsecrets ... mcp-token"`). Transitioning to socket activation removes sudoer dependencies.
 *   **dev-infra**: Updates deployment configurations to configure systemd socket templates rather than writing PEM keys to `.env` files.
+
+
+---
+
+## Impact on Shiori Sync (#236)
+
+The on-demand token supply (#204, #243) was a prerequisite for the pull-type sync model (#236). Previously, Shiori had a background auto-sync loop that ran every N seconds. When the host suspended (WSL) or shut down (GCP VM), the auto-sync loop would die silently and require self-repair on resume — which was unreliable (#234).
+
+In the pull-type model (#236):
+- Tokens are pulled on-demand from the mint socket whenever a search/clone-refresh operation runs.
+- There is no background loop; every sync happens inline (Phase 1: clone refresh) or in the background (Phase 2: re-indexing) when a tool call triggers it.
+- The "token expired after resume" window that previously required the auto-sync loop's silent retry is no longer an issue: the first tool call after resume pulls a fresh token from the mint socket inline, then refreshes the clone.
+
+This is why #204 was marked as a hard dependency for #236: without on-demand token minting, the first search after resume would fail with a 401 instead of pulling a fresh token.

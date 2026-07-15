@@ -87,8 +87,9 @@ class Settings:
     snippet_chars: int = field(
         default_factory=lambda: int(os.environ.get("SHIORI_SNIPPET_CHARS", "400"))
     )
-    # Background auto-sync interval in serve process (seconds). 0 disables (default).
-    # Diff sync finishes in seconds, so this value caps index staleness.
+    # Pull-type sync debounce interval (seconds). Max seconds between Phase 1
+    # (clone refresh) pulls for the same repo. 0 disables (always pull).
+    # Formerly the background auto-sync interval; repurposed in #236.
     sync_interval_seconds: int = field(
         default_factory=lambda: int(
             os.environ.get("SHIORI_SYNC_INTERVAL_SECONDS", "0")

@@ -332,6 +332,10 @@ def _do_sync(
                             conn, repo, route, n_docs, n_items, n_code
                         )
                         db.record_sync_attempt(conn, repo, success=True)
+                        # Record indexed HEAD for pull-type freshness tracking (#236)
+                        indexed_head = db.get_cursor(conn, repo, "docs")
+                        if indexed_head:
+                            db.upsert_indexed_head(conn, repo, indexed_head)
                         result["repos"][repo] = {
                             "docs_updated": n_docs,
                             "issues_indexed": n_items,
@@ -365,6 +369,12 @@ def _do_sync(
                             need_reconnect = True
                             with _conn() as tmp_conn:
                                 db.record_sync_attempt(tmp_conn, repo, success=False, error=str(exc))
+                        # Record sync error for pull-type freshness tracking (#236)
+                        try:
+                            db.record_repo_sync_error(conn, repo, str(exc))
+                        except psycopg.OperationalError:
+                            with _conn() as tmp_conn:
+                                db.record_repo_sync_error(tmp_conn, repo, str(exc))
                         if is_bulk:
                             # Bulk (initial full ingest) has no per-repo resume
                             # story, so a partial failure still aborts the whole
@@ -414,32 +424,74 @@ def _do_sync(
         _sync_lock.release()
 
 
-# Handle to the running auto-sync thread, set by run() (issue #187). Lets
-# shiori_status report whether the loop is actually alive instead of just
-# echoing the sync_interval_seconds config value, which stays the same even
-# if the thread was never started or has died.
-_auto_sync_thread: threading.Thread | None = None
+# Per-repo Phase 1 debounce: last fetch timestamp for each repo.
+# Used to enforce SHIORI_SYNC_INTERVAL_SECONDS as "max Ns between pulls"
+# instead of "push every Ns" (#236).
+_phase1_last_fetch: dict[str, float] = {}
+_phase1_lock = threading.Lock()
 
-# Module-level: error message from the most recent failed auto-sync loop
-# iteration (issue #196). None means the
-# last iteration succeeded (or none has run yet). This is a last-resort
-# signal: it is set even when _do_sync() fails before ever reaching a live
-# DB connection (e.g. the database itself is unreachable), a case
-# record_sync_attempt cannot cover no matter where it is called from, since
-# it always needs a connection to write through.
-_auto_sync_last_error: str | None = None
+# Per-repo Phase 2 in-flight set: tracks repos currently being synced.
+# Duplicate requests for the same repo are no-ops (single-flight, #236).
+_phase2_in_flight: set[str] = set()
+_phase2_lock = threading.Lock()
+
+# Phase 2 background thread handle
+_phase2_thread: threading.Thread | None = None
 
 
-def _auto_sync_loop(interval: int) -> None:
-    global _auto_sync_last_error
-    while True:
-        time.sleep(interval)
+def _ensure_phase1(repo: str) -> str | None:
+    """Ensure clone is fresh for *repo*. Returns HEAD SHA or None on failure.
+
+    Inline (blocking) call for Phase 1. Debounced: skips if repo was fetched
+    within SHIORI_SYNC_INTERVAL_SECONDS. Updates _phase1_last_fetch on success.
+    """
+    now = time.monotonic()
+    with _phase1_lock:
+        last = _phase1_last_fetch.get(repo, 0.0)
+        if last > 0 and (now - last) < settings.sync_interval_seconds:
+            return None  # debounced: skip
+
+    try:
+        provider = build_token_provider(settings)
+        from .refresh import refresh_clone
+        head = refresh_clone(repo, provider, settings)
+        with _phase1_lock:
+            _phase1_last_fetch[repo] = now
         try:
-            log.info("auto sync: %s", _do_sync(route="auto"))
-            _auto_sync_last_error = None
-        except Exception as exc:
-            log.exception("auto sync failed")
-            _auto_sync_last_error = str(exc)
+            with _conn() as conn:
+                db.upsert_clone_head(conn, repo, head)
+        except Exception:
+            log.exception("upsert_clone_head failed for %s", repo)
+        return head
+    except Exception:
+        log.exception("Phase 1 clone refresh failed for %s", repo)
+        return None
+
+
+def _trigger_phase2(repo: str) -> None:
+    """Trigger Phase 2 (re-index) for *repo* in the background.
+
+    Single-flight: if Phase 2 is already running for this repo, this is a no-op.
+    """
+    global _phase2_thread
+    with _phase2_lock:
+        if repo in _phase2_in_flight:
+            return
+        _phase2_in_flight.add(repo)
+
+    def _run():
+        global _phase2_thread
+        try:
+            _do_sync(repos=[repo], route="pull")
+        except Exception:
+            log.exception("Phase 2 sync failed for %s", repo)
+        finally:
+            with _phase2_lock:
+                _phase2_in_flight.discard(repo)
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    _phase2_thread = t
 
 
 # ── _walk_code_files: collect code files ──
@@ -550,12 +602,12 @@ mcp = FastMCP(
         "   - shiori_read_issue: issue/PR threads (indexed only)\n"
         "   - shiori_list_tree (source_type='doc'): indexed doc_files table\n"
         "   - shiori_pr_changes: PR change file maps (indexed metadata)\n"
-        "   - Freshness depends on auto-sync / CLI ingest\n"
+        "   - Freshness depends on pull-type sync (#236)\n"
         "2. Clone (disk, pinned to main branch)\n"
         "   - shiori_read_file: read real files directly (no index needed, works if clone exists)\n"
         "   - shiori_read_pr_file: get PR head files via git (non-destructive to working tree)\n"
         "   - shiori_list_tree (source_type='code'): physically existing code files via os.walk\n"
-        "   - Clone is maintained by sync_docs via clone --depth=1 + reset --hard origin/HEAD\n"
+        "   - Clone is refreshed on-demand (Phase 1: git fetch + reset --hard; #236)\n"
         "   - shiori_read_pr_file fetches PR head via git fetch starting from the clone\n"
         "3. Clone grep (ripgrep)\n"
         "   - shiori_grep: line-level search in clone files via ripgrep\n"
@@ -587,6 +639,11 @@ def semantic_search(
     repo: "owner/name" filter, or a short name if it uniquely matches one
           configured (indexed) repo (e.g. "shiori" -> "owner/shiori").
           Omit to search across all indexed repos."""
+    resolved_repo = _resolve_repo_filter(repo)
+    # Phase 1 inline: refresh clone before search (#236)
+    _ensure_phase1(resolved_repo) if resolved_repo else None
+    # Phase 2 background: trigger re-index if stale
+    _trigger_phase2(resolved_repo) if resolved_repo else None
     with _conn() as conn:
         return search.semantic_search(
             settings, conn, _get_embedder(), query,
@@ -621,6 +678,11 @@ def keyword_search(
     repo: "owner/name" filter, or a short name if it uniquely matches one
           configured (indexed) repo (e.g. "shiori" -> "owner/shiori").
           Omit to search across all indexed repos."""
+    resolved_repo = _resolve_repo_filter(repo)
+    # Phase 1 inline: refresh clone before search (#236)
+    _ensure_phase1(resolved_repo) if resolved_repo else None
+    # Phase 2 background: trigger re-index if stale
+    _trigger_phase2(resolved_repo) if resolved_repo else None
     with _conn() as conn:
         return search.keyword_search(
             settings, conn, query,
@@ -712,6 +774,7 @@ def read_file(
           configured (indexed) repo (e.g. "shiori" -> "owner/shiori").
           Omit for the default configured repo."""
     target = _resolve_repo(repo)
+    _ensure_phase1(target)
     base = os.path.realpath(settings.repo_dir(target))
     full = os.path.realpath(os.path.join(base, path))
     if not full.startswith(base + os.sep):
@@ -1073,6 +1136,10 @@ def grep_search(
     max_results: maximum matches to return (default 200)
     """
     targets = _resolve_repos(repo)
+
+    # Phase 1: refresh clones inline before searching (#236)
+    for target in targets:
+        _ensure_phase1(target)
 
     all_matches: list[dict[str, Any]] = []
     total = 0
@@ -1864,9 +1931,8 @@ def _report_module_tree(
 
 def ingest(rebuild: bool = False, repo: str | None = None) -> dict[str, Any]:
     """Sync docs/issues/code from GitHub and update index (diff sync, typically seconds).
-    Check index freshness with shiori_status first — auto-sync keeps the index
-    fresh, so ingest is normally unnecessary. Call this only when shiori_status
-    reports the index is stale.
+    Check index freshness with shiori_status first -- pull-type sync (#236) refreshes
+    the clone on-demand and triggers Phase 2 (re-index) in the background when stale.
     rebuild=True: discard and full rebuild (requires SHIORI_ALLOW_REBUILD=true; issue #63).
     Also treated as rebuild when chunks table is empty."""
     if rebuild and not settings.allow_rebuild:
@@ -1878,27 +1944,19 @@ def ingest(rebuild: bool = False, repo: str | None = None) -> dict[str, Any]:
     return _do_sync(repos=[repo] if repo else None, rebuild=rebuild, route="mcp")
 
 
-_STALE_SECONDS = 86400  # 24 hours; used when auto sync is disabled (sync_interval_seconds <= 0)
-
-# When auto sync is enabled, the stale threshold scales with the configured
-# interval instead of the fixed 24h window above (issue #187): a fixed window
-# let a completely dead auto-sync loop look "healthy" for up to a day even
-# when it was supposed to run every 10 seconds. _STALE_INTERVAL_MULTIPLIER *
-# sync_interval_seconds, floored at _STALE_SECONDS_FLOOR to avoid flapping
-# warnings on very short intervals.
+_STALE_SECONDS = 86400  # 24 hours; used when sync_interval_seconds <= 0 (debounce disabled)
 _STALE_INTERVAL_MULTIPLIER = 30
 _STALE_SECONDS_FLOOR = 300  # 5 minutes
 
-_LARGE_FILE_THRESHOLD = 500  # Show range hint for files exceeding this line count
+_LARGE_FILE_THRESHOLD = 500
 
 
 def _stale_threshold_seconds() -> int:
-    """Derive the index staleness threshold from the auto-sync interval (issue #187).
+    """Derive the index staleness threshold from the debounce interval (#236).
 
-    Auto sync enabled (sync_interval_seconds > 0): threshold scales with the
-    interval so a dead loop is flagged promptly instead of hiding behind a
-    fixed 24h window. Auto sync disabled: keep the original fixed 24h window,
-    since there is no interval to derive a threshold from.
+    sync_interval_seconds > 0: threshold scales with the debounce interval (formerly
+    auto-sync interval; now means "max N seconds between pulls").
+    sync_interval_seconds <= 0: use the fixed 24h window.
     """
     if settings.sync_interval_seconds > 0:
         return max(
@@ -1917,6 +1975,14 @@ def _build_warnings(
     """Detect index anomalies and return warning list (issue #31)."""
     warnings: list[str] = []
 
+    # Pull-type freshness: clone_head != indexed_head means Phase 2 is behind (#236)
+    if info.get("index_stale"):
+        warnings.append(
+            f"index is stale: on-disk clone is ahead of indexed content "
+            f"(clone_head={info.get('clone_head', '?')[:7]}, "
+            f"indexed_head={info.get('indexed_head', '?')[:7]})"
+        )
+
     # Freshness: long time since last sync
     age = info.get("age_seconds")
     threshold = _stale_threshold_seconds()
@@ -1926,8 +1992,8 @@ def _build_warnings(
             f"{hours} hours since last sync (threshold {threshold}s). Index may be stale"
         )
 
-    # Attempt tracking: consecutive failures mean the loop is running but
-    # dying every time, which the freshness check above may not catch yet
+    # Attempt tracking: consecutive failures mean sync has been failing
+    # consistently, which the freshness check above may not catch yet
     # (issue #187).
     consecutive_failures = info.get("consecutive_failures") or 0
     if consecutive_failures > 0:
@@ -2069,24 +2135,15 @@ def issue_links(number: int, repo: str | None = None) -> dict[str, Any]:
 
 @mcp.tool(name="shiori_status")
 def status() -> dict[str, Any]:
-    """Index freshness and health. Per-repo: last_synced_at, age_seconds, route, counts,
-    items, cursor, warnings, last_attempt_at, last_error, consecutive_failures.
-    Also reports auto_sync_running (actual thread liveness, not just config), and
-    token_provider: the auth provider actually selected by build_token_provider()
-    ("app" | "static" | "token_command" | "anonymous" | "error"), not just what
-    the config *intends*. "anonymous" here always means "nothing was configured"
-    -- no provider degrades into it silently any more (the mcp_token provider
-    that did was removed; issue #188). A configured provider that cannot produce
-    a token raises, and surfaces per-repo as last_error instead. If
-    build_token_provider() itself raises (e.g. incomplete GitHub App config),
-    this reports "error" with the exception message in a matching warning instead
-    of letting the whole tool call fail (issue #193) -- this tool is exactly what
-    an operator reaches for while diagnosing an auth config problem, so it must
-    never fail for that same reason. Also reports auto_sync_last_error: the error
-    message from the most recent failed auto-sync loop iteration (None once the
-    loop last succeeded), which stays populated even for failures too early for
-    _do_sync() to reach a live DB connection to record through
-    record_sync_attempt (issue #196)."""
+    """Index freshness and health. Per-repo: clone_head, indexed_head, index_stale,
+    last_synced_at, age_seconds, route, counts, items, cursor, warnings,
+    last_attempt_at, last_error, consecutive_failures, last_sync_error.
+    Also reports token_provider: the auth provider actually selected by
+    build_token_provider() ("app" | "static" | "token_command" | "anonymous"
+    | "error"), not just what the config *intends*.
+    Pull-type sync (#236): no more auto-sync loop. Freshness is measured by
+    clone_head vs indexed_head comparison. index_stale=True means the on-disk
+    clone (Phase 1) is ahead of the indexed content (Phase 2)."""
     # Cheap: just selects a TokenProvider class based on Settings, no I/O of its
     # own -- status() never calls get_token(), so polling it never triggers a
     # mint attempt.
@@ -2095,18 +2152,12 @@ def status() -> dict[str, Any]:
         token_provider = provider.name
         token_provider_error = None
     except Exception as exc:
-        # build_token_provider() intentionally raises ValueError when the
-        # GitHub App env vars are only partially configured (github_auth.py) --
-        # useful for the sync path (fail fast), but status() is the tool an
-        # operator reaches for *while* diagnosing an auth problem, so it must
-        # never fail itself just because the auth config is broken (issue #193,
-        # a regression from #188/#192 which made status() call
-        # build_token_provider() unconditionally with no error handling).
         token_provider = "error"
         token_provider_error = str(exc)
 
     with _conn() as conn:
         runs = db.get_sync_runs(conn)
+        index_state = db.get_all_repo_index_state(conn)
         repos: dict[str, Any] = {}
         for repo in settings.repos:
             info = runs.get(repo) or {
@@ -2120,6 +2171,15 @@ def status() -> dict[str, Any]:
                 "last_error": None,
                 "consecutive_failures": 0,
             }
+            state = index_state.get(repo, {})
+            info["clone_head"] = state.get("clone_head")
+            info["indexed_head"] = state.get("indexed_head")
+            info["last_sync_error"] = state.get("last_sync_error")
+            info["index_stale"] = bool(
+                state.get("clone_head")
+                and state.get("indexed_head")
+                and state["clone_head"] != state["indexed_head"]
+            )
             chunk_counts = db.get_chunk_counts(conn, repo)
             items_in_db = db.get_issue_item_count(conn, repo)
             cursors = db.get_cursors(conn, repo)
@@ -2127,39 +2187,14 @@ def status() -> dict[str, Any]:
             info["code_chunks"] = chunk_counts.get("code", 0)
             info["items_in_db"] = items_in_db
             info["cursors"] = cursors
-            # Only used to let _build_warnings render the error warning; not part
-            # of this function's per-repo return shape (popped below).
             info["token_provider_error"] = token_provider_error
             warnings = _build_warnings(info, chunk_counts, items_in_db, cursors)
             info.pop("token_provider_error", None)
             info["warnings"] = warnings
             repos[repo] = info
-    # Compute degraded flag: auto-sync is running but failing consistently
-    # (issue #234). True when _auto_sync_last_error is set or any repo
-    # has consecutive_failures exceeding threshold.
-    _auto_sync_degraded = _auto_sync_last_error is not None
-    if not _auto_sync_degraded:
-        _fail_threshold = max(3, 60 // max(settings.sync_interval_seconds, 1))
-        for repo_info in repos.values():
-            if repo_info.get("consecutive_failures", 0) >= _fail_threshold:
-                _auto_sync_degraded = True
-                break
     return {
         "repos": repos,
         "sync_interval_seconds": settings.sync_interval_seconds,
-        # Actual thread liveness (issue #187), not the config value: a server
-        # that never started the loop (or whose loop died some other way that
-        # doesn't raise inside _auto_sync_loop's own try/except) previously
-        # reported sync_interval_seconds unconditionally, implying sync was
-        # running when it might not have been.
-        "auto_sync_running": _auto_sync_thread is not None and _auto_sync_thread.is_alive(),
-        # Last-resort signal for auto-sync failures that happen so early
-        # _do_sync() never reaches a live DB connection to record through
-        # (issue #196) -- e.g. the database itself being unreachable. None
-        # once the most recent iteration has succeeded.
-        "auto_sync_last_error": _auto_sync_last_error,
-        "auto_sync_degraded": _auto_sync_degraded,
-        # Provider actually selected by build_token_provider() (issue #188).
         "token_provider": token_provider,
     }
 
@@ -2167,16 +2202,7 @@ from .dashboard import register_dashboard
 register_dashboard(mcp)
 
 def run(transport: Literal["stdio", "sse", "streamable-http"] = "streamable-http") -> None:
-    global _auto_sync_thread
     with _conn() as conn:
         db.migrate(conn, settings)
-    if settings.sync_interval_seconds > 0:
-        _auto_sync_thread = threading.Thread(
-            target=_auto_sync_loop,
-            args=(settings.sync_interval_seconds,),
-            daemon=True,
-        )
-        _auto_sync_thread.start()
-        log.info("auto sync enabled: every %ds", settings.sync_interval_seconds)
-    log.info("shiori MCP server starting (%s)", transport)
+    log.info("shiori MCP server starting (%s), pull-type sync (#236)", transport)
     mcp.run(transport=transport)

@@ -260,22 +260,10 @@ def sync_docs(
 ) -> int:
     """Sync repo Markdown; index only changed files. Returns update count.
     When buffer specified (bulk path), uses ChunkBuffer for batch embedding."""
+    from .refresh import refresh_clone
+
+    head = refresh_clone(repo, provider, settings)
     repo_dir = settings.repo_dir(repo)
-    remote = f"https://github.com/{repo}.git"
-    authed_remote = _authed_url(remote, provider)
-    if os.path.isdir(os.path.join(repo_dir, ".git")):
-        # Overwrite even if old token-embedded URL remains in .git/config (idempotent).
-        _git(["remote", "set-url", "origin", authed_remote], cwd=repo_dir)
-        try:
-            _git(["fetch", "--depth=1", "origin"], cwd=repo_dir)
-        finally:
-            _git(["remote", "set-url", "origin", remote], cwd=repo_dir)
-        _git(["reset", "--hard", "origin/HEAD"], cwd=repo_dir)
-    else:
-        os.makedirs(os.path.dirname(repo_dir), exist_ok=True)
-        _git(["clone", "--depth=1", authed_remote, repo_dir])
-        _git(["remote", "set-url", "origin", remote], cwd=repo_dir)
-    head = _git(["rev-parse", "HEAD"], cwd=repo_dir)
 
     # Diff current file set against existing index
     current: dict[str, str] = {}
