@@ -1,4 +1,6 @@
-# 詳細設計/07: db / app の 2 サービス分離。DB とモデルは named volume に永続化。
+# 詳細設計/07: db / app の 2 サービス分離。DB は named volume に永続化。
+# 埋め込みモデルはイメージ内蔵（docker/app/Dockerfile でプリダウンロード、
+# 起動時は HF_HUB_OFFLINE=1 によりネットワーク問い合わせゼロ。issue #238）。
 # repos クローンだけは bind mount (./data:/data)。外部ツール (sunaba 等) が
 # ホスト側から ./data/repos/<owner>__<name> を直接読んでコピーするため
 # (詳細設計/12、sunaba#532)。named volume だと docker data-root の
@@ -65,6 +67,8 @@ services:
     restart: unless-stopped
 
   app:
+    image: ghcr.io/masuda-masuo/shiori/app
+    pull_policy: missing
     build:
       context: .
       dockerfile: docker/app/Dockerfile
@@ -85,7 +89,6 @@ services:
       GITHUB_TOKEN_SOCKET: ${GITHUB_TOKEN_SOCKET:-}
       GITHUB_TOKEN_COMMAND: ${GITHUB_TOKEN_COMMAND:-}
     volumes:
-      - models:/models   # 埋め込みモデルの重みキャッシュ
       - ./data:/data     # git クローン先 (ホスト可読 bind mount; 詳細設計/12)
       # mint socket はディレクトリごとマウントする(ファイル単位はNG; 詳細設計/15)。
       # SHIORI_MINT_SOCKET_DIR は dev-infra 等が override で差し替える想定。
@@ -100,6 +103,8 @@ services:
   # オンデマンドの同期ジョブ。`docker compose run --rm ingest` で実行する。
   # `docker compose up` では起動しない（profiles 指定）。cron からも同コマンド。
   ingest:
+    image: ghcr.io/masuda-masuo/shiori/app
+    pull_policy: missing
     build:
       context: .
       dockerfile: docker/app/Dockerfile
@@ -118,7 +123,6 @@ services:
       GITHUB_TOKEN_SOCKET: ${GITHUB_TOKEN_SOCKET:-}
       GITHUB_TOKEN_COMMAND: ${GITHUB_TOKEN_COMMAND:-}
     volumes:
-      - models:/models
       - ./data:/data
       - ${SHIORI_MINT_SOCKET_DIR:-${XDG_RUNTIME_DIR}/mcp-token}:/run/shiori:rw
     depends_on:
@@ -127,5 +131,4 @@ services:
 
 volumes:
   dbdata:
-  models:
 

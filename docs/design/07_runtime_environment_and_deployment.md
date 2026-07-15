@@ -23,7 +23,7 @@ By separating the database and server into two containers:
 ## 3. Data Persistence
 
 *   Database storage is mapped to a **named volume** so that index records and embeddings are preserved when containers are rebuilt.
-*   Embedding weights are cached in a named volume (`HF_HOME=/models`).
+*   Embedding weights are baked into the app image at build time (`docker/app/Dockerfile`). The default model is pre-downloaded to `/models` during `docker build` and loaded with `HF_HUB_OFFLINE=1` at runtime, eliminating startup-time HuggingFace requests (issue #238).
 *   Repository clones are mapped to a **bind mount** (`./data:/data`) rather than a named volume. This allows other developer tools (like `sunaba`) to copy from the clones directory directly without permission blocks.
 
 ---
