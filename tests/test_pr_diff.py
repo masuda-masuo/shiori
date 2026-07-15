@@ -181,7 +181,7 @@ class TestPrChangesIncludeDiff:
         assert mock_git_fetch.call_count == 2
         mock_git_fetch.assert_has_calls([
             call("pull/42/head", cwd="/data/repos/o/r", provider=mock_build.return_value),
-            call("origin/HEAD", cwd="/data/repos/o/r", provider=mock_build.return_value),
+            call("HEAD", cwd="/data/repos/o/r", provider=mock_build.return_value),
         ], any_order=False)
 
     def test_include_diff_true_handles_rename_in_name_status(self):
