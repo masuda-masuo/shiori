@@ -334,8 +334,8 @@ class TestStatusTokenProvider:
 
     def test_reports_selected_provider_name(self):
         """選ばれた provider 名をそのまま返す。"""
-        result = self._run_status("app")
-        assert result["token_provider"] == "app"
+        result = self._run_status("token_socket")
+        assert result["token_provider"] == "token_socket"
         assert not any("falling back" in w for w in result["repos"]["o/r"]["warnings"])
 
     def test_reports_token_command(self):
@@ -401,7 +401,7 @@ class TestStatusTokenProviderError:
     def test_normal_path_unaffected_when_no_error(self):
         """When build_token_provider() succeeds normally, no error warning is added."""
         mock_provider = MagicMock()
-        mock_provider.name = "app"
+        mock_provider.name = "token_socket"
         with (
             patch("shiori.mcp_server._conn"),
             patch("shiori.mcp_server.settings") as mock_settings,
@@ -414,7 +414,7 @@ class TestStatusTokenProviderError:
             mock_settings.repos = ["o/r"]
             mock_settings.sync_interval_seconds = 0
             result = status()
-        assert result["token_provider"] == "app"
+        assert result["token_provider"] == "token_socket"
         assert not any(
             "token_provider could not be determined" in w
             for w in result["repos"]["o/r"]["warnings"]

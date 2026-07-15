@@ -40,8 +40,6 @@ from typing import ClassVar
 
 log = logging.getLogger(__name__)
 
-API = "https://api.github.com"
-
 
 class TokenProvider:
     """Abstract token supplier. get_token() returning None means anonymous (no auth)."""
