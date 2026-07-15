@@ -442,6 +442,7 @@ _PHASE1_MIN_DEBOUNCE = 1.0
 # Per-repo Phase 2 in-flight set: tracks repos currently being synced.
 # Duplicate requests for the same repo are no-ops (single-flight, #236).
 _phase2_in_flight: set[str] = set()
+_phase2_pending: set[str] = set()  # repos waiting for a semaphore slot (#246)
 _phase2_lock = threading.Lock()
 
 # Phase 2 concurrency cap: at most N concurrent background sync threads (#236 self-review).
@@ -494,9 +495,14 @@ def _trigger_phase2(repo: str) -> None:
 
     Single-flight: if Phase 2 is already running for this repo, this is a no-op.
     Concurrency-capped: at most _phase2_semaphore's value concurrent threads (#236).
+    Pending queue: when the semaphore is saturated, the repo is enqueued and
+    will be picked up when a running Phase 2 finishes (#246).
     """
     with _phase2_lock:
-        if repo in _phase2_in_flight:
+        if repo in _phase2_in_flight or repo in _phase2_pending:
+            return
+        if not _phase2_semaphore.acquire(blocking=False):
+            _phase2_pending.add(repo)
             return
         _phase2_in_flight.add(repo)
 
@@ -508,14 +514,37 @@ def _trigger_phase2(repo: str) -> None:
         finally:
             with _phase2_lock:
                 _phase2_in_flight.discard(repo)
-            _phase2_semaphore.release()
-
-    if not _phase2_semaphore.acquire(blocking=False):
-        with _phase2_lock:
-            _phase2_in_flight.discard(repo)
-        return
+            _drain_pending()
 
     t = threading.Thread(target=_run, daemon=True)
+    t.start()
+
+
+def _drain_pending() -> None:
+    """Pick the next pending repo and start its Phase 2 sync (#246).
+
+    Called from a finished thread's finally block, after discarding the
+    finished repo from _phase2_in_flight.  Must be called outside
+    _phase2_lock to avoid deadlock with _trigger_phase2.
+    """
+    with _phase2_lock:
+        if not _phase2_pending:
+            _phase2_semaphore.release()
+            return
+        next_repo = _phase2_pending.pop()
+        _phase2_in_flight.add(next_repo)
+
+    def _next_run():
+        try:
+            _do_sync(repos=[next_repo], route="pull")
+        except Exception:
+            log.exception("Phase 2 sync failed for %s", next_repo)
+        finally:
+            with _phase2_lock:
+                _phase2_in_flight.discard(next_repo)
+            _drain_pending()
+
+    t = threading.Thread(target=_next_run, daemon=True)
     t.start()
 
 
@@ -670,7 +699,7 @@ def semantic_search(
         _ensure_phase1(resolved_repo)
         _trigger_phase2(resolved_repo)
     else:
-        for r in settings.repos:
+        for r in _resolve_repos("*"):
             _ensure_phase1(r)
             _trigger_phase2(r)
     with _conn() as conn:
@@ -713,7 +742,7 @@ def keyword_search(
         _ensure_phase1(resolved_repo)
         _trigger_phase2(resolved_repo)
     else:
-        for r in settings.repos:
+        for r in _resolve_repos("*"):
             _ensure_phase1(r)
             _trigger_phase2(r)
     with _conn() as conn:
