@@ -755,67 +755,6 @@ def bulk_insert_chunks(conn: psycopg.Connection, rows: list[dict]) -> None:
         cur.executemany(_BULK_INSERT_SQL, params)
 
 
-def get_pr_review_comments(
-    conn: psycopg.Connection, repo: str, issue_no: int
-) -> list[dict]:
-    """Fetch review comments for a PR (issue #96).
-    
-    Returns list of review comments with path, line, body, author, created_at.
-    """
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            SELECT comment_id, author, is_bot, path, line, body, url, created_at
-            FROM issue_items
-            WHERE repo = %s AND issue_no = %s AND kind = 'pr_review_comment'
-            ORDER BY created_at ASC
-            """,
-            (repo, issue_no),
-        )
-        rows = cur.fetchall()
-    return [
-        {
-            "comment_id": r[0],
-            "author": r[1],
-            "is_bot": r[2],
-            "path": r[3],
-            "line": r[4],
-            "body": r[5],
-            "url": r[6],
-            "created_at": r[7].isoformat() if r[7] else None,
-        }
-        for r in rows
-    ]
-
-
-def get_issue_bodies(
-    conn: psycopg.Connection, repo: str, issue_no: int
-) -> list[dict]:
-    """Get all body texts for an issue/PR for link extraction (issue #97)."""
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            SELECT comment_id, kind, author, body, url, created_at
-            FROM issue_items
-            WHERE repo = %s AND issue_no = %s
-            ORDER BY (comment_id = 0) DESC, created_at ASC
-            """,
-            (repo, issue_no),
-        )
-        rows = cur.fetchall()
-    return [
-        {
-            "comment_id": r[0],
-            "kind": r[1],
-            "author": r[2],
-            "body": r[3],
-            "url": r[4],
-            "created_at": r[5].isoformat() if r[5] else None,
-        }
-        for r in rows
-    ]
-
-
 def get_issues_by_numbers(
     conn: psycopg.Connection, repo: str, issue_nos: list[int]
 ) -> dict[int, dict]:
