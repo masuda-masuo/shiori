@@ -53,7 +53,7 @@ def _get_embedder() -> Embedder:
     global _embedder
     with _embedder_lock:
         if _embedder is None:
-            _embedder = Embedder(settings.embedding_model, settings.embedding_dim)
+            _embedder = Embedder()
     return _embedder
 
 

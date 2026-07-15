@@ -75,8 +75,6 @@ services:
     environment:
       DATABASE_URL: postgresql://shiori:shiori@db:5432/shiori
       SHIORI_REPOS: ${SHIORI_REPOS:-}
-      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-intfloat/multilingual-e5-small}
-      EMBEDDING_DIM: ${EMBEDDING_DIM:-384}
       SHIORI_SYNC_INTERVAL_SECONDS: ${SHIORI_SYNC_INTERVAL_SECONDS:-0}
       SHIORI_INDEX_BOT_LOGINS: ${SHIORI_INDEX_BOT_LOGINS:-}
       SHIORI_INDEX_CODE: ${SHIORI_INDEX_CODE:-}
@@ -113,8 +111,6 @@ services:
     environment:
       DATABASE_URL: postgresql://shiori:shiori@db:5432/shiori
       SHIORI_REPOS: ${SHIORI_REPOS:-}
-      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-intfloat/multilingual-e5-small}
-      EMBEDDING_DIM: ${EMBEDDING_DIM:-384}
       SHIORI_INDEX_BOT_LOGINS: ${SHIORI_INDEX_BOT_LOGINS:-}
       SHIORI_INDEX_CODE: ${SHIORI_INDEX_CODE:-}
       SHIORI_CODE_EXTENSIONS: ${SHIORI_CODE_EXTENSIONS:-}

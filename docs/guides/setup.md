@@ -85,11 +85,20 @@ mcp-launcher#42) -- it is a shared host primitive, not specific to shiori.
 
 ---
 
-## Changing Embedding Models
+## Customizing the Embedding Model
 
-If you change the vector model in your configuration, rebuild the entire index:
+The embedding model (`intfloat/multilingual-e5-small`) is baked into the Docker image at build time. Runtime env var override is not supported.
+
+To use a different model, fork the repository and edit `docker/app/Dockerfile`:
+
+```dockerfile
+RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('your-model-name')" || echo "WARNING: model pre-download failed, will lazy-load at runtime"
+```
+
+Then rebuild:
 
 ```bash
+docker compose build app
 docker compose run --build --rm ingest -- --rebuild
 ```
 
@@ -115,7 +124,6 @@ DATABASE_URL=postgresql://shiori:shiori@localhost:5432/shiori \
 
 ## Troubleshooting
 
-*   **`EMBEDDING_DIM=... but model produces ...`**: Model dimension mismatch. Align `.env`'s `EMBEDDING_DIM` value and run `ingest --rebuild`.
 *   **0 Search Results**: Confirm that `ingest` finished successfully and check that `SHIORI_REPOS` matches active paths.
 *   **Stale Code Execution**: Docker Compose does not automatically rebuild images on `run` or `up`. Rebuild manually using `docker compose build` or pass the `--build` flag.
 *   **VCS Rate Limits**: Authenticate using `GITHUB_TOKEN` to lift GitHub API rate limits.
