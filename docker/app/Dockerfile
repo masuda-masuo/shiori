@@ -18,5 +18,7 @@ COPY dashboard/dist ./src/shiori/dashboard_dist
 RUN pip install --no-cache-dir --no-deps --force-reinstall .
 
 ENV HF_HOME=/models
+RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('intfloat/multilingual-e5-small')"
+ENV HF_HUB_OFFLINE=1
 
 CMD ["python", "-m", "shiori", "serve", "--transport", "http"]
