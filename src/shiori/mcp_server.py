@@ -973,8 +973,8 @@ def pr_changes(
     include_diff: bool = False,
 ) -> dict[str, Any]:
     """PR change file map computed from git clone (issue #259).
-    git diff --name-status + --numstat でファイルリストを生成する。
-    blob_url は git 単体では計算不能のため省略。
+    Uses git diff --name-status + --numstat to build the file list.
+    blob_url is omitted because it cannot be computed from git alone.
     repo: "owner/name", or a short name if it uniquely matches one
           configured (indexed) repo (e.g. "shiori" -> "owner/shiori").
           Omit for the default configured repo."""
@@ -1072,9 +1072,9 @@ def _compute_pr_diff(
 ) -> tuple[str, str]:
     """Fetch PR head and compute unified diff + stat (issue #96, #259).
 
-    base_sha=None の場合はリモート HEAD（デフォルトブランチ）を base として diff する。
-    tmp_ref / tmp_base が渡された場合は fetch をスキップする（呼び出し元が
-    既に fetch 済みの場合の重複 fetch 回避）。
+    When base_sha=None, diffs against remote HEAD (default branch).
+    When tmp_ref / tmp_base are provided, skips fetch (avoids duplicate
+    fetch when the caller has already fetched).
     Returns (diff_text, stat_text). Raises FileNotFoundError if clone
     is missing.
     """
@@ -1133,15 +1133,16 @@ def pr_diff(
     path: str | None = None,
     repo: str | None = None,
 ) -> dict[str, Any]:
-    """PR の変更差分を返す（issue #96）。
+    """Return PR diff (issue #96).
 
-    PRのheadとbaseの差分を取得する。git diff で計算し、ファイル単位の
-    差分を返す。path を指定すると特定ファイルの差分のみ返す。
+    Computes the unified diff between PR head and base using git diff.
+    Returns per-file diffs. When path is given, returns diff for that file only.
 
-    number: PR番号
-    path: 特定ファイルのパスのみ取得（省略時は全ファイル）
-    repo: "owner/name"形式。一意に定まる短縮名（"owner/"なし）も可
-          （例: "shiori" -> "owner/shiori"）。省略時は既定の設定済みリポジトリ。
+    number: PR number
+    path: File path to scope the diff (omit for all files)
+    repo: "owner/name", or a short name if it uniquely matches one
+          configured (indexed) repo (e.g. "shiori" -> "owner/shiori").
+          Omit for the default configured repo.
     """
     target = _resolve_repo(repo)
     diff_text, stat_text = _compute_pr_diff(number, target, base_sha=None, path=path)
@@ -1155,14 +1156,15 @@ def pr_diff(
 
 @mcp.tool(name="shiori_pr_review_comments")
 def pr_review_comments(number: int, repo: str | None = None) -> dict[str, Any]:
-    """PR のレビューコメント一覧を返す（issue #96）。
+    """Return PR review comments (issue #96).
 
-    issue_items テーブルに保存済みの kind='pr_review_comment' を取得する。
-    ファイルパス、行番号、本文、作成者、作成日時を含む。
-    レビュー履歴の確認や他のレビュアーのコメント把握に使う。
+    Fetches kind='pr_review_comment' items from the issue_items table.
+    Includes file path, line number, body, author, and timestamps.
+    Useful for reviewing comment history and understanding other reviewers' feedback.
 
-    repo: "owner/name"形式。一意に定まる短縮名（"owner/"なし）も可
-          （例: "shiori" -> "owner/shiori"）。省略時は既定の設定済みリポジトリ。
+    repo: "owner/name", or a short name if it uniquely matches one
+          configured (indexed) repo (e.g. "shiori" -> "owner/shiori").
+          Omit for the default configured repo.
     """
     target = _resolve_repo(repo)
     with _conn() as conn:
@@ -2213,22 +2215,23 @@ def _extract_refs(text: str | None) -> list[dict]:
 
 @mcp.tool(name="shiori_issue_links")
 def issue_links(number: int, repo: str | None = None) -> dict[str, Any]:
-    """issue/PR の相互参照（inbound/outbound）を返す（issue #97）。
+    """Return issue/PR cross-references (inbound/outbound) (issue #97).
 
-    本文・コメント中の #N 参照を抽出し、種別（closes/duplicate/refs/mention）を
-    判定する。参照先のタイトル・state も合わせて返す。inbound はこの issue を
-    参照している他の issue/PR の一覧。
+    Extracts #N references from body text and comments, classifying
+    them as closes/duplicate/refs/mention. Includes target title and
+    state. Inbound lists other issues/PRs that reference this issue.
 
-    重複チェック、epic 構築、回帰追跡に使う。
+    Useful for duplicate detection, epic construction, and regression tracking.
 
-    repo: "owner/name"形式。一意に定まる短縮名（"owner/"なし）も可
-          （例: "shiori" -> "owner/shiori"）。省略時は既定の設定済みリポジトリ。
+    repo: "owner/name", or a short name if it uniquely matches one
+          configured (indexed) repo (e.g. "shiori" -> "owner/shiori").
+          Omit for the default configured repo.
     """
     target = _resolve_repo(repo)
     with _conn() as conn:
         bodies = db.get_issue_bodies(conn, target, number)
     if not bodies:
-        raise ValueError(f"#{number} は索引されていません（ingest 済みですか？）")
+        raise ValueError(f"#{number} is not indexed (run CLI ingest first)")
 
     # Extract outbound refs from all bodies
     outbound_refs: dict[int, dict] = {}
