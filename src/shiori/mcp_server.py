@@ -13,7 +13,9 @@ import ast
 import subprocess
 import threading
 import time
-from typing import Any, Literal
+from typing import Any, Iterator, Literal
+
+import httpx
 
 from mcp.server.fastmcp import FastMCP
 
@@ -25,10 +27,15 @@ from .dashboard import register_dashboard
 from .embedding import Embedder
 from .github_auth import build_token_provider
 from .github_sync import (
+    API,
     ChunkBuffer,
+    _api_pages,
+    _clean_text,
     _git,
     _git_delete_ref,
     _git_fetch_ref,
+    _GitHubAuth,
+    _is_bot,
     _is_excluded_dir,
     sync_code,
     sync_docs,
@@ -56,6 +63,17 @@ def _get_embedder() -> Embedder:
         if _embedder is None:
             _embedder = Embedder()
     return _embedder
+
+
+@contextlib.contextmanager
+def _github_client() -> Iterator[httpx.Client]:
+    provider = build_token_provider(settings)
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    with httpx.Client(headers=headers, auth=_GitHubAuth(provider), timeout=30.0) as client:
+        yield client
 
 
 def _conn():
@@ -875,51 +893,128 @@ def read_file(
 
 
 def _read_issue_single(target: str, number: int, exclude_noise_bots: bool) -> dict[str, Any]:
-    """Fetch single issue (internal helper). Raises ValueError if not indexed."""
-    with _conn() as conn, conn.cursor() as cur:
-        cur.execute(
-            """
-            SELECT comment_id, kind, title, author, is_bot, state, path, line,
-                   body, url, created_at
-            FROM issue_items
-            WHERE repo = %s AND issue_no = %s
-            ORDER BY (comment_id = 0) DESC, created_at ASC NULLS LAST
-            """,
-            (target, number),
+    """Fetch single issue/PR via GitHub API.
+    Raises ValueError if not found on GitHub.
+    """
+    with _github_client() as client:
+        try:
+            resp = client.get(f"{API}/repos/{target}/issues/{number}")
+            resp.raise_for_status()
+            issue = resp.json()
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                raise ValueError(f"#{number} not found on GitHub")
+            raise
+
+        is_pr = "pull_request" in issue
+        kind = "pr" if is_pr else "issue"
+        title = issue.get("title") or ""
+        state = issue.get("state")
+        url = issue.get("html_url")
+
+        items: list[dict[str, Any]] = [{
+            "author": (issue.get("user") or {}).get("login"),
+            "is_bot": _is_bot(issue.get("user")),
+            "kind": kind,
+            "state": state,
+            "created_at": issue.get("created_at"),
+            "body": _clean_text(issue.get("body") or ""),
+            "url": url,
+        }]
+
+        # Issue/PR comments
+        comments = _api_pages(
+            client,
+            f"{API}/repos/{target}/issues/{number}/comments",
+            {"per_page": 100},
         )
-        rows = cur.fetchall()
-    if not rows:
-        raise ValueError(f"#{number} is not indexed (run CLI ingest first)")
+        for c in comments:
+            items.append({
+                "author": (c.get("user") or {}).get("login"),
+                "is_bot": _is_bot(c.get("user")),
+                "kind": "comment",
+                "state": state,
+                "created_at": c.get("created_at"),
+                "body": _clean_text(c.get("body") or ""),
+                "url": c.get("html_url"),
+            })
+
+        if is_pr:
+            # PR review submissions
+            try:
+                reviews = _api_pages(
+                    client,
+                    f"{API}/repos/{target}/pulls/{number}/reviews",
+                    {"per_page": 100},
+                )
+                for r in reviews:
+                    rbody = _clean_text(r.get("body") or "")
+                    if not rbody:
+                        continue
+                    items.append({
+                        "author": (r.get("user") or {}).get("login"),
+                        "is_bot": _is_bot(r.get("user")),
+                        "kind": "pr_review",
+                        "state": r.get("state"),
+                        "created_at": r.get("submitted_at"),
+                        "body": rbody,
+                        "url": r.get("html_url"),
+                    })
+            except httpx.HTTPError:
+                pass
+
+            # PR inline review comments
+            try:
+                review_comments = _api_pages(
+                    client,
+                    f"{API}/repos/{target}/pulls/{number}/comments",
+                    {"per_page": 100},
+                )
+                for rc in review_comments:
+                    rc_line = rc.get("line") or rc.get("original_line")
+                    diff_hunk = rc.get("diff_hunk")
+                    rc_body = _clean_text(rc.get("body") or "")
+                    if diff_hunk:
+                        rc_body = f"{rc_body}\n\n```diff\n{_clean_text(diff_hunk)}\n```"
+                    item: dict[str, Any] = {
+                        "author": (rc.get("user") or {}).get("login"),
+                        "is_bot": _is_bot(rc.get("user")),
+                        "kind": "pr_review_comment",
+                        "state": state,
+                        "created_at": rc.get("created_at"),
+                        "body": rc_body,
+                        "url": rc.get("html_url"),
+                    }
+                    if rc.get("path"):
+                        item["path"] = rc["path"]
+                        item["line"] = rc_line
+                    items.append(item)
+            except httpx.HTTPError:
+                pass
+
+    # Sort: body first, then by created_at
+    body_item = items[0]
+    rest = sorted(items[1:], key=lambda x: x.get("created_at") or "")
+    items = [body_item] + rest
+
     # Exclude bots outside the allowlist (issue #44)
     if exclude_noise_bots:
         allowlist = settings.index_bot_logins
-        rows = [
-            r for r in rows
-            if not r[4] or (r[3] and r[3].lower() in allowlist)
+        items = [
+            item for item in items
+            if not item["is_bot"] or (item["author"] and item["author"].lower() in allowlist)
         ]
-        if not rows:
+        if not items:
             raise ValueError(f"#{number}: all items are bots outside the allowlist")
-    head = rows[0]
+
     return {
         "repo": target,
         "number": number,
-        "kind": head[1],
-        "title": head[2],
-        "state": head[5],
-        "url": head[9],
-        "items": [
-            {
-                "author": r[3],
-                "is_bot": r[4],
-                "kind": r[1],
-                "state": r[5],
-                **( {"path": r[6], "line": r[7]} if r[6] else {}),
-                "created_at": r[10].isoformat() if r[10] else None,
-                "body": r[8],
-                "url": r[9],
-            }
-            for r in rows
-        ],
+        "kind": kind,
+        "title": title,
+        "state": state,
+        "url": url,
+        "items": items,
     }
 
 
@@ -1158,7 +1253,7 @@ def pr_diff(
 def pr_review_comments(number: int, repo: str | None = None) -> dict[str, Any]:
     """Return PR review comments (issue #96).
 
-    Fetches kind='pr_review_comment' items from the issue_items table.
+    Fetches from GitHub Pull Request Review Comments API directly.
     Includes file path, line number, body, author, and timestamps.
     Useful for reviewing comment history and understanding other reviewers' feedback.
 
@@ -1167,8 +1262,30 @@ def pr_review_comments(number: int, repo: str | None = None) -> dict[str, Any]:
           Omit for the default configured repo.
     """
     target = _resolve_repo(repo)
-    with _conn() as conn:
-        comments = db.get_pr_review_comments(conn, target, number)
+    with _github_client() as client:
+        try:
+            rows = _api_pages(
+                client,
+                f"{API}/repos/{target}/pulls/{number}/comments",
+                {"per_page": 100},
+            )
+        except httpx.HTTPError as exc:
+            raise ValueError(f"PR #{number} not found on GitHub: {exc}")
+
+    comments = []
+    for r in rows:
+        line = r.get("line") or r.get("original_line")
+        comments.append({
+            "comment_id": r["id"],
+            "author": (r.get("user") or {}).get("login"),
+            "is_bot": _is_bot(r.get("user")),
+            "path": r.get("path"),
+            "line": line,
+            "body": _clean_text(r.get("body") or ""),
+            "url": r.get("html_url"),
+            "created_at": r.get("created_at"),
+        })
+
     return {
         "repo": target,
         "number": number,
@@ -2228,10 +2345,30 @@ def issue_links(number: int, repo: str | None = None) -> dict[str, Any]:
           Omit for the default configured repo.
     """
     target = _resolve_repo(repo)
-    with _conn() as conn:
-        bodies = db.get_issue_bodies(conn, target, number)
-    if not bodies:
-        raise ValueError(f"#{number} is not indexed (run CLI ingest first)")
+
+    # Fetch issue body + comments from GitHub API
+    with _github_client() as client:
+        try:
+            resp = client.get(f"{API}/repos/{target}/issues/{number}")
+            resp.raise_for_status()
+            issue = resp.json()
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                raise ValueError(f"#{number} not found on GitHub")
+            raise
+
+        bodies = [{"body": issue.get("body") or ""}]
+        try:
+            comments = _api_pages(
+                client,
+                f"{API}/repos/{target}/issues/{number}/comments",
+                {"per_page": 100},
+            )
+            for c in comments:
+                if c.get("body"):
+                    bodies.append({"body": c["body"]})
+        except httpx.HTTPError:
+            pass
 
     # Extract outbound refs from all bodies
     outbound_refs: dict[int, dict] = {}
