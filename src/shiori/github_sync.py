@@ -20,6 +20,7 @@ import logging
 import os
 import re
 import subprocess
+from collections.abc import Iterator
 import uuid
 
 import httpx
@@ -609,7 +610,7 @@ def _api_pages(client: httpx.Client, url: str, params: dict) -> "list[dict]":
     return items
 
 
-def _api_pages_gen(client: httpx.Client, url: str, params: dict):
+def _api_pages_gen(client: httpx.Client, url: str, params: dict) -> "Iterator[list[dict]]":
     """Yield one page at a time via Link header.
     Page-at-a-time processing avoids idle-in-transaction timeout on large repos
     and enables per-page cursor updates for resume on interruption (issue #250).
@@ -898,6 +899,8 @@ def sync_issues(
         if since:
             params["since"] = since
         for page in _api_pages_gen(client, f"{API}/repos/{repo}/issues", params):
+            if not page:
+                break
             for it in page:
                 no = it["number"]
                 kind = "pr" if "pull_request" in it else "issue"
@@ -952,6 +955,8 @@ def sync_issues(
         if since:
             params["since"] = since
         for page in _api_pages_gen(client, f"{API}/repos/{repo}/issues/comments", params):
+            if not page:
+                break
             for c in page:
                 no = int(c["issue_url"].rstrip("/").rsplit("/", 1)[-1])
                 title, state, issue_kind = _issue_title_state_kind(conn, repo, no)
@@ -989,6 +994,8 @@ def sync_issues(
         if since:
             params["since"] = since
         for page in _api_pages_gen(client, f"{API}/repos/{repo}/pulls/comments", params):
+            if not page:
+                break
             for c in page:
                 no = int(c["pull_request_url"].rstrip("/").rsplit("/", 1)[-1])
                 title, state, _ = _issue_title_state_kind(conn, repo, no)
