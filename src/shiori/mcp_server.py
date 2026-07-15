@@ -995,7 +995,7 @@ def pr_changes(
         head_sha = _git(["rev-parse", tmp_ref], cwd=git_dir)
 
         tmp_base = _git_fetch_ref(
-            "origin/HEAD", cwd=git_dir, provider=provider,
+            "HEAD", cwd=git_dir, provider=provider,
         )
         base_sha = _git(["rev-parse", tmp_base], cwd=git_dir)
 
@@ -1072,7 +1072,7 @@ def _compute_pr_diff(
 ) -> tuple[str, str]:
     """Fetch PR head and compute unified diff + stat (issue #96, #259).
 
-    base_sha=None の場合は origin/HEAD を base として diff する。
+    base_sha=None の場合はリモート HEAD（デフォルトブランチ）を base として diff する。
     tmp_ref / tmp_base が渡された場合は fetch をスキップする（呼び出し元が
     既に fetch 済みの場合の重複 fetch 回避）。
     Returns (diff_text, stat_text). Raises FileNotFoundError if clone
@@ -1106,7 +1106,7 @@ def _compute_pr_diff(
         else:
             provider = build_token_provider(settings)
             owned_base = _git_fetch_ref(
-                "origin/HEAD", cwd=git_dir, provider=provider,
+                "HEAD", cwd=git_dir, provider=provider,
             )
             diff_base = owned_base
 
