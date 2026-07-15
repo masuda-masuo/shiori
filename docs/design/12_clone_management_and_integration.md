@@ -50,10 +50,13 @@ Double underscores (`__`) are used instead of `/` to avoid introducing deep fold
 
 ## 3. Clone Management Strategy
 
-The `sync_docs` module (`src/shiori/github_sync.py`) manages clones via:
+Clone refreshes are managed by `src/shiori/refresh.py` (`refresh_clone()`, extracted from `sync_docs` in #236):
+
 *   **Initial Setup**: Runs `git clone --depth=1 <remote_url> <repo_dir>`.
 *   **Sync Update**: Runs `git fetch --depth=1 origin` followed by `git reset --hard origin/HEAD` to pull clean main branches.
-*   **Authentication**: Injects credentials via `http.extraHeader` configurations (`_auth_args()`).
+*   **Authentication**: Injects credentials via token-embedded URL (`_authed_url()`).
+
+Clone refresh is the **cheap path (Phase 1)** of the pull-type sync model (#236). It runs inline (blocking) when tools that read clone files directly (`shiori_read_file`, `shiori_grep`) are called, and as a precondition for search tools (`shiori_search`, `shiori_keyword_search`). The expensive re-indexing (Phase 2) runs in the background and does not block clone freshness.
 
 ---
 
@@ -64,9 +67,15 @@ Because checkouts are shallow clones (`--depth=1`), operations like viewing logs
 *   *Solution*: Copying tools (like `sunaba`) can lift this constraint after copy extraction by running `git fetch --unshallow` inside the sandbox.
 
 ### Freshness Verification
-By default, Shiori's background auto-sync is disabled (`SHIORI_SYNC_INTERVAL_SECONDS=0`). Clone update timestamps can be checked via the `last_synced_at` field in `shiori_status()`.
+Shiori uses pull-type on-demand sync (#236). Clone freshness is verified via:
 
-External tools using these folders must assume that the clone state might be out of date, triggering a manual `python -m shiori ingest` prior to copy execution if fresh code is required.
+*   **`clone_head`** in `shiori_status()`: The on-disk HEAD after the most recent Phase 1 (clone refresh).
+*   **`indexed_head`** in `shiori_status()`: The HEAD reflected in the index after the most recent Phase 2 (re-indexing).
+*   **`index_stale`** in `shiori_status()`: True when `clone_head != indexed_head`, meaning the on-disk clone is ahead of the indexed content.
+
+The `SHIORI_SYNC_INTERVAL_SECONDS` setting is now a **debounce interval** (max N seconds between pulls for the same repo), not a push interval. There is no background auto-sync loop.
+
+External tools using these folders must assume that the clone state might be out of date; calling `shiori_read_file` or `shiori_search` will trigger a Phase 1 refresh inline if the debounce interval has elapsed.
 
 ### Allowlist Validation
 Sync updates are restricted to repositories defined in `SHIORI_REPOS`. Attempting to ingest non-listed targets is rejected. External tools copying from these paths must restrict reads to paths matching the `{SHIORI_DATA_DIR}/repos/` prefix to prevent path traversal issues.

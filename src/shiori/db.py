@@ -32,6 +32,7 @@ REPO_SCOPED_TABLES: tuple[str, ...] = (
     "pr_changes",
     "sync_state",
     "sync_runs",
+    "repo_index_state",
 )
 
 
@@ -102,6 +103,14 @@ CREATE TABLE IF NOT EXISTS sync_runs (
     last_attempt_at TIMESTAMPTZ,
     last_error TEXT,
     consecutive_failures INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS repo_index_state (
+    repo TEXT PRIMARY KEY,
+    clone_head TEXT,               -- Phase 1 completed on-disk HEAD
+    indexed_head TEXT,             -- Phase 2 completed indexed HEAD
+    last_sync_at TIMESTAMPTZ,
+    last_sync_error TEXT
 );
 
 CREATE TABLE IF NOT EXISTS doc_files (
@@ -248,6 +257,22 @@ def _run_alter_statements(conn: psycopg.Connection) -> None:
             "ALTER TABLE sync_runs ADD COLUMN IF NOT EXISTS consecutive_failures "
             "INTEGER NOT NULL DEFAULT 0"
         )
+    # 8. Add repo_index_state table for pull-type sync tracking (#236)
+    with conn.cursor() as cur:
+        cur.execute("SELECT to_regclass('repo_index_state')")
+        row = cur.fetchone()
+        if row is not None and row[0] is None:
+            cur.execute(
+                """
+                CREATE TABLE repo_index_state (
+                    repo TEXT PRIMARY KEY,
+                    clone_head TEXT,
+                    indexed_head TEXT,
+                    last_sync_at TIMESTAMPTZ,
+                    last_sync_error TEXT
+                )
+                """
+            )
     conn.commit()
 
 
@@ -885,3 +910,90 @@ def get_code_chunks(
         }
         for r in rows
     ]
+
+
+# ---------------------------------------------------------------------------
+# repo_index_state: pull-type sync tracking (#236)
+# ---------------------------------------------------------------------------
+
+
+def upsert_clone_head(
+    conn: psycopg.Connection,
+    repo: str,
+    clone_head: str,
+) -> None:
+    """Record Phase 1 completion: store on-disk HEAD after refresh_clone."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO repo_index_state (repo, clone_head)
+            VALUES (%s, %s)
+            ON CONFLICT (repo) DO UPDATE SET
+                clone_head = EXCLUDED.clone_head
+            """,
+            (repo, clone_head),
+        )
+    conn.commit()
+
+
+def upsert_indexed_head(
+    conn: psycopg.Connection,
+    repo: str,
+    indexed_head: str,
+    last_sync_error: str | None = None,
+) -> None:
+    """Record Phase 2 completion: store indexed HEAD after sync succeeds."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO repo_index_state (repo, indexed_head, last_sync_at, last_sync_error)
+            VALUES (%s, %s, now(), %s)
+            ON CONFLICT (repo) DO UPDATE SET
+                indexed_head = EXCLUDED.indexed_head,
+                last_sync_at = now(),
+                last_sync_error = EXCLUDED.last_sync_error
+            """,
+            (repo, indexed_head, last_sync_error),
+        )
+    conn.commit()
+
+
+def record_repo_sync_error(
+    conn: psycopg.Connection,
+    repo: str,
+    error: str,
+) -> None:
+    """Record a Phase 2 sync error for the repo."""
+    truncated_error = (error or "")[:2000]
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO repo_index_state (repo, last_sync_error)
+            VALUES (%s, %s)
+            ON CONFLICT (repo) DO UPDATE SET
+                last_sync_error = EXCLUDED.last_sync_error
+            """,
+            (repo, truncated_error),
+        )
+    conn.commit()
+
+
+def get_all_repo_index_state(
+    conn: psycopg.Connection,
+) -> dict[str, dict]:
+    """Get repo_index_state for all repos. Returns {repo: {clone_head, indexed_head, ...}}."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT repo, clone_head, indexed_head, last_sync_at, last_sync_error "
+            "FROM repo_index_state"
+        )
+        rows = cur.fetchall()
+    return {
+        r[0]: {
+            "clone_head": r[1],
+            "indexed_head": r[2],
+            "last_sync_at": r[3].isoformat() if r[3] is not None else None,
+            "last_sync_error": r[4],
+        }
+        for r in rows
+    }
