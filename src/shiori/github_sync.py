@@ -20,6 +20,7 @@ import logging
 import os
 import re
 import subprocess
+from collections.abc import Iterator
 import uuid
 
 import httpx
@@ -609,6 +610,21 @@ def _api_pages(client: httpx.Client, url: str, params: dict) -> "list[dict]":
     return items
 
 
+def _api_pages_gen(client: httpx.Client, url: str, params: dict) -> "Iterator[list[dict]]":
+    """Yield one page at a time via Link header.
+    Page-at-a-time processing avoids idle-in-transaction timeout on large repos
+    and enables per-page cursor updates for resume on interruption (issue #250).
+    """
+    next_params: dict | None = params
+    next_url: str | None = url
+    while next_url:
+        resp = client.get(next_url, params=next_params)
+        resp.raise_for_status()
+        yield resp.json()
+        next_url = resp.links.get("next", {}).get("url")
+        next_params = None
+
+
 def _upsert_issue_item(conn: psycopg.Connection, row: dict) -> None:
     with conn.cursor() as cur:
         cur.execute(
@@ -882,137 +898,140 @@ def sync_issues(
         }
         if since:
             params["since"] = since
-        items = _api_pages(client, f"{API}/repos/{repo}/issues", params)
-        for it in items:
-            no = it["number"]
-            kind = "pr" if "pull_request" in it else "issue"
-            author = (it.get("user") or {}).get("login")
-            title = _clean_text(it.get("title"))
-            body = _clean_text(it.get("body") or "")
-            row = {
-                "repo": repo,
-                "issue_no": no,
-                "comment_id": 0,
-                "kind": kind,
-                "title": title,
-                "author": author,
-                "is_bot": _is_bot(it.get("user")),
-                "state": it.get("state"),
-                "path": None,
-                "line": None,
-                "body": body,
-                "url": it.get("html_url"),
-                "created_at": it.get("created_at"),
-                "updated_at": it.get("updated_at"),
-            }
-            _upsert_issue_item(conn, row)
-            _propagate_issue_state(conn, repo, no, it.get("state"))
-            if _should_index(row["is_bot"], author, settings):
-                _index_item(
-                    settings, conn, embedder,
-                    chunk_key=f"issue:{repo}:{no}:body",
-                    source_type="issue",
-                    repo=repo, issue_no=no, comment_id=None,
-                    kind=kind,
-                    title=title, body=body,
-                    state=it.get("state"), author=author,
-                    path=None, line=None,
-                    created_at=it.get("created_at"),
-                    updated_at=it.get("updated_at"),
-                    url=it.get("html_url"),
-                    buffer=buffer,
-                )
-                n_indexed += 1
-            # Sync change file maps and review submissions for PRs
-            if kind == "pr":
-                _sync_pr_changes(client, conn, repo, no)
-                _sync_pr_reviews(client, conn, embedder, settings, repo, no, buffer=buffer)
+        for page in _api_pages_gen(client, f"{API}/repos/{repo}/issues", params):
+            if not page:
+                break
+            for it in page:
+                no = it["number"]
+                kind = "pr" if "pull_request" in it else "issue"
+                author = (it.get("user") or {}).get("login")
+                title = _clean_text(it.get("title"))
+                body = _clean_text(it.get("body") or "")
+                row = {
+                    "repo": repo,
+                    "issue_no": no,
+                    "comment_id": 0,
+                    "kind": kind,
+                    "title": title,
+                    "author": author,
+                    "is_bot": _is_bot(it.get("user")),
+                    "state": it.get("state"),
+                    "path": None,
+                    "line": None,
+                    "body": body,
+                    "url": it.get("html_url"),
+                    "created_at": it.get("created_at"),
+                    "updated_at": it.get("updated_at"),
+                }
+                _upsert_issue_item(conn, row)
+                _propagate_issue_state(conn, repo, no, it.get("state"))
+                if _should_index(row["is_bot"], author, settings):
+                    _index_item(
+                        settings, conn, embedder,
+                        chunk_key=f"issue:{repo}:{no}:body",
+                        source_type="issue",
+                        repo=repo, issue_no=no, comment_id=None,
+                        kind=kind,
+                        title=title, body=body,
+                        state=it.get("state"), author=author,
+                        path=None, line=None,
+                        created_at=it.get("created_at"),
+                        updated_at=it.get("updated_at"),
+                        url=it.get("html_url"),
+                        buffer=buffer,
+                    )
+                    n_indexed += 1
+                # Sync change file maps and review submissions for PRs
+                if kind == "pr":
+                    _sync_pr_changes(client, conn, repo, no)
+                    _sync_pr_reviews(client, conn, embedder, settings, repo, no, buffer=buffer)
             if buffer is None:
                 conn.commit()
-        if items:
-            set_cursor(conn, repo, "issues", items[-1]["updated_at"])
+            set_cursor(conn, repo, "issues", page[-1]["updated_at"])
 
         # --- Issue/PR comments ---
         since = get_cursor(conn, repo, "issue_comments")
         params = {"sort": "updated", "direction": "asc", "per_page": 100}
         if since:
             params["since"] = since
-        comments = _api_pages(client, f"{API}/repos/{repo}/issues/comments", params)
-        for c in comments:
-            no = int(c["issue_url"].rstrip("/").rsplit("/", 1)[-1])
-            title, state, issue_kind = _issue_title_state_kind(conn, repo, no)
-            author = (c.get("user") or {}).get("login")
-            is_bot = _is_bot(c.get("user"))
-            body = _clean_text(c.get("body") or "")
-            _upsert_issue_item(conn, {
-                "repo": repo, "issue_no": no, "comment_id": c["id"],
-                "kind": "comment", "title": None, "author": author,
-                "is_bot": is_bot, "state": state, "path": None, "line": None,
-                "body": body, "url": c.get("html_url"),
-                "created_at": c.get("created_at"), "updated_at": c.get("updated_at"),
-            })
-            if _should_index(is_bot, author, settings):
-                _index_item(
-                    settings, conn, embedder,
-                    chunk_key=f"issue:{repo}:{no}:c{c['id']}",
-                    source_type="issue",
-                    repo=repo, issue_no=no, comment_id=c["id"],
-                    kind=issue_kind,
-                    title=title, body=body,
-                    state=state, author=author, path=None, line=None,
-                    created_at=c.get("created_at"), updated_at=c.get("updated_at"),
-                    url=c.get("html_url"),
-                    buffer=buffer,
-                )
-                n_indexed += 1
+        for page in _api_pages_gen(client, f"{API}/repos/{repo}/issues/comments", params):
+            if not page:
+                break
+            for c in page:
+                no = int(c["issue_url"].rstrip("/").rsplit("/", 1)[-1])
+                title, state, issue_kind = _issue_title_state_kind(conn, repo, no)
+                author = (c.get("user") or {}).get("login")
+                is_bot = _is_bot(c.get("user"))
+                body = _clean_text(c.get("body") or "")
+                _upsert_issue_item(conn, {
+                    "repo": repo, "issue_no": no, "comment_id": c["id"],
+                    "kind": "comment", "title": None, "author": author,
+                    "is_bot": is_bot, "state": state, "path": None, "line": None,
+                    "body": body, "url": c.get("html_url"),
+                    "created_at": c.get("created_at"), "updated_at": c.get("updated_at"),
+                })
+                if _should_index(is_bot, author, settings):
+                    _index_item(
+                        settings, conn, embedder,
+                        chunk_key=f"issue:{repo}:{no}:c{c['id']}",
+                        source_type="issue",
+                        repo=repo, issue_no=no, comment_id=c["id"],
+                        kind=issue_kind,
+                        title=title, body=body,
+                        state=state, author=author, path=None, line=None,
+                        created_at=c.get("created_at"), updated_at=c.get("updated_at"),
+                        url=c.get("html_url"),
+                        buffer=buffer,
+                    )
+                    n_indexed += 1
             if buffer is None:
                 conn.commit()
-        if comments:
-            set_cursor(conn, repo, "issue_comments", comments[-1]["updated_at"])
+            set_cursor(conn, repo, "issue_comments", page[-1]["updated_at"])
 
         # --- PR review comments (with path/line/diff_hunk) ---
         since = get_cursor(conn, repo, "pr_review_comments")
         params = {"sort": "updated", "direction": "asc", "per_page": 100}
         if since:
             params["since"] = since
-        reviews = _api_pages(client, f"{API}/repos/{repo}/pulls/comments", params)
-        for c in reviews:
-            no = int(c["pull_request_url"].rstrip("/").rsplit("/", 1)[-1])
-            title, state, _ = _issue_title_state_kind(conn, repo, no)
-            author = (c.get("user") or {}).get("login")
-            is_bot = _is_bot(c.get("user"))
-            line = c.get("line") or c.get("original_line")
-            # Append diff_hunk to body as context (within decision not to index diffs themselves)
-            body = _clean_text(c.get("body") or "")
-            diff_hunk = c.get("diff_hunk")
-            if diff_hunk:
-                body = f"{body}\n\n```diff\n{_clean_text(diff_hunk)}\n```"
-            _upsert_issue_item(conn, {
-                "repo": repo, "issue_no": no, "comment_id": c["id"],
-                "kind": "pr_review_comment", "title": None, "author": author,
-                "is_bot": is_bot, "state": state,
-                "path": c.get("path"), "line": line,
-                "body": body, "url": c.get("html_url"),
-                "created_at": c.get("created_at"), "updated_at": c.get("updated_at"),
-            })
-            if _should_index(is_bot, author, settings):
-                _index_item(
-                    settings, conn, embedder,
-                    chunk_key=f"pr_review:{repo}:{no}:rc{c['id']}",
-                    source_type="pr_review",
-                    repo=repo, issue_no=no, comment_id=c["id"],
-                    kind="pr",
-                    title=title, body=body,
-                    state=state, author=author,
-                    path=c.get("path"), line=line,
-                    created_at=c.get("created_at"), updated_at=c.get("updated_at"),
-                    url=c.get("html_url"),
-                    buffer=buffer,
-                )
-                n_indexed += 1
+        for page in _api_pages_gen(client, f"{API}/repos/{repo}/pulls/comments", params):
+            if not page:
+                break
+            for c in page:
+                no = int(c["pull_request_url"].rstrip("/").rsplit("/", 1)[-1])
+                title, state, _ = _issue_title_state_kind(conn, repo, no)
+                author = (c.get("user") or {}).get("login")
+                is_bot = _is_bot(c.get("user"))
+                line = c.get("line") or c.get("original_line")
+                # Append diff_hunk to body as context (within decision not to index diffs themselves)
+                body = _clean_text(c.get("body") or "")
+                diff_hunk = c.get("diff_hunk")
+                if diff_hunk:
+                    body = f"{body}\n\n```diff\n{_clean_text(diff_hunk)}\n```"
+                _upsert_issue_item(conn, {
+                    "repo": repo, "issue_no": no, "comment_id": c["id"],
+                    "kind": "pr_review_comment", "title": None, "author": author,
+                    "is_bot": is_bot, "state": state,
+                    "path": c.get("path"), "line": line,
+                    "body": body, "url": c.get("html_url"),
+                    "created_at": c.get("created_at"), "updated_at": c.get("updated_at"),
+                })
+                if _should_index(is_bot, author, settings):
+                    _index_item(
+                        settings, conn, embedder,
+                        chunk_key=f"pr_review:{repo}:{no}:rc{c['id']}",
+                        source_type="pr_review",
+                        repo=repo, issue_no=no, comment_id=c["id"],
+                        kind="pr",
+                        title=title, body=body,
+                        state=state, author=author,
+                        path=c.get("path"), line=line,
+                        created_at=c.get("created_at"), updated_at=c.get("updated_at"),
+                        url=c.get("html_url"),
+                        buffer=buffer,
+                    )
+                    n_indexed += 1
             if buffer is None:
                 conn.commit()
-        if reviews:
-            set_cursor(conn, repo, "pr_review_comments", reviews[-1]["updated_at"])
+            set_cursor(conn, repo, "pr_review_comments", page[-1]["updated_at"])
 
     return n_indexed

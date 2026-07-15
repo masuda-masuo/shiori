@@ -15,6 +15,7 @@ import pytest
 from shiori.config import Settings
 from shiori.github_sync import (
     ChunkBuffer,
+    _api_pages_gen,
     _authed_url,
     _clean_text,
     _git,
@@ -848,3 +849,79 @@ class TestLooksMinified:
         """501 chars (threshold + 1, should be flagged)."""
         content = (b"x" * 501)
         assert _looks_minified(content) is True
+
+
+# ===================================================================
+# _api_pages_gen (issue #250)
+# ===================================================================
+
+
+class TestApiPagesGen:
+    """_api_pages_gen: page-at-a-time generator."""
+
+    def test_single_page(self):
+        client = MagicMock()
+        resp = MagicMock()
+        resp.raise_for_status.return_value = None
+        resp.json.return_value = [{"id": 1}, {"id": 2}]
+        resp.links = {}
+        client.get.return_value = resp
+
+        pages = list(_api_pages_gen(client, "https://api.github.com/repos/o/r/issues", {"per_page": 100}))
+        assert pages == [[{"id": 1}, {"id": 2}]]
+
+    def test_multi_page(self):
+        client = MagicMock()
+        resp1 = MagicMock()
+        resp1.raise_for_status.return_value = None
+        resp1.json.return_value = [{"id": 1}]
+        resp1.links = {"next": {"url": "https://api.github.com/repos/o/r/issues?page=2"}}
+
+        resp2 = MagicMock()
+        resp2.raise_for_status.return_value = None
+        resp2.json.return_value = [{"id": 2}]
+        resp2.links = {}
+
+        client.get.side_effect = [resp1, resp2]
+
+        pages = list(_api_pages_gen(client, "https://api.github.com/repos/o/r/issues", {"per_page": 100}))
+        assert pages == [[{"id": 1}], [{"id": 2}]]
+
+    def test_empty_page(self):
+        client = MagicMock()
+        resp = MagicMock()
+        resp.raise_for_status.return_value = None
+        resp.json.return_value = []
+        resp.links = {}
+        client.get.return_value = resp
+
+        pages = list(_api_pages_gen(client, "https://api.github.com/repos/o/r/issues", {"per_page": 100}))
+        assert pages == [[]]
+
+    def test_http_error_propagated(self):
+        client = MagicMock()
+        client.get.side_effect = httpx.HTTPError("500")
+
+        with pytest.raises(httpx.HTTPError):
+            list(_api_pages_gen(client, "https://api.github.com/repos/o/r/issues", {"per_page": 100}))
+
+    def test_link_header_preserves_query_params(self):
+        """Next URL's query params should be used as-is (next_params=None)."""
+        client = MagicMock()
+        resp1 = MagicMock()
+        resp1.raise_for_status.return_value = None
+        resp1.json.return_value = [{"id": 1}]
+        resp1.links = {"next": {"url": "https://api.github.com/repos/o/r/issues?page=2&per_page=50"}}
+
+        resp2 = MagicMock()
+        resp2.raise_for_status.return_value = None
+        resp2.json.return_value = [{"id": 2}]
+        resp2.links = {}
+
+        client.get.side_effect = [resp1, resp2]
+
+        pages = list(_api_pages_gen(client, "https://api.github.com/repos/o/r/issues", {"per_page": 100}))
+        assert pages == [[{"id": 1}], [{"id": 2}]]
+        # Second call uses the next URL as-is (no params dict)
+        assert client.get.call_args_list[1][0][0] == "https://api.github.com/repos/o/r/issues?page=2&per_page=50"
+        assert client.get.call_args_list[1][1]["params"] is None
