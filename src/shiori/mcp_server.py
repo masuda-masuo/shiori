@@ -56,6 +56,18 @@ SYNC_LOCK_KEY = 0x5348494F
 # ChunkBuffer flush threshold for bulk path (issue #72)
 _BULK_BUFFER_SIZE = 500
 
+# Cached token provider (built once, reused across _github_client calls)
+_token_provider: Any | None = None
+_token_provider_lock = threading.Lock()
+
+
+def _get_token_provider():
+    global _token_provider
+    with _token_provider_lock:
+        if _token_provider is None:
+            _token_provider = build_token_provider(settings)
+    return _token_provider
+
 
 def _get_embedder() -> Embedder:
     global _embedder
@@ -67,7 +79,7 @@ def _get_embedder() -> Embedder:
 
 @contextlib.contextmanager
 def _github_client() -> Iterator[httpx.Client]:
-    provider = build_token_provider(settings)
+    provider = _get_token_provider()
     headers = {
         "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
@@ -1030,12 +1042,12 @@ def read_issue(
     Each item has a state field: for kind='pr_review' it is the review
     submission state (APPROVED/COMMENTED/CHANGES_REQUESTED); for other
     kinds it is the overall issue state (open/closed).
+    Items have a kind field: 'issue', 'pr', 'comment', 'pr_review', or
+    'pr_review_comment'.
     repo: "owner/name", or a short name if it uniquely matches one
           configured (indexed) repo (e.g. "shiori" -> "owner/shiori").
           Omit for the default configured repo. An unresolvable repo
-          raises immediately with the indexed-repo list, distinct from
-          the "not indexed" error for a known repo whose issue hasn't
-          been ingested yet."""
+          raises immediately with the indexed-repo list."""
     if number is not None and numbers is not None:
         raise ValueError("number and numbers cannot be specified together")
     target = _resolve_repo(repo)

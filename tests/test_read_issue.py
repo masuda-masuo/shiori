@@ -212,6 +212,17 @@ class TestReadIssueExcludeNoiseBots:
                 with pytest.raises(ValueError, match="not found on GitHub"):
                     read_issue(42)
 
+    def test_network_error_raises(self):
+        """Raises httpx.HTTPError when API is unreachable."""
+        with patch("shiori.mcp_server._github_client") as mock_gh:
+            client = MagicMock()
+            mock_gh.return_value.__enter__.return_value = client
+            client.get.side_effect = httpx.ConnectError("connection refused")
+
+            with patch("shiori.mcp_server._resolve_repo", return_value="o/r"):
+                with pytest.raises(httpx.ConnectError):
+                    read_issue(42)
+
 
 class TestReadIssueNumbers:
     """Behavior of read_issue numbers parameter (batch fetch, issue #86)."""
