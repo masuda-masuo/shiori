@@ -424,48 +424,57 @@ def _do_sync(
         _sync_lock.release()
 
 
+# Per-repo Phase 1 single-flight: one concurrent git fetch per repo.
+# Key: repo name. Value: threading.Lock for that repo.
+# _phase1_locks lock protects the dict itself.
+_phase1_locks: dict[str, threading.Lock] = {}
+_phase1_locks_guard = threading.Lock()
+
 # Per-repo Phase 1 debounce: last fetch timestamp for each repo.
-# Used to enforce SHIORI_SYNC_INTERVAL_SECONDS as "max Ns between pulls"
-# instead of "push every Ns" (#236).
+# Updated atomically within the per-repo lock after fetch completes.
+# Guarded by the individual per-repo lock, not a separate lock.
 _phase1_last_fetch: dict[str, float] = {}
-_phase1_lock = threading.Lock()
 
 # Per-repo Phase 2 in-flight set: tracks repos currently being synced.
 # Duplicate requests for the same repo are no-ops (single-flight, #236).
 _phase2_in_flight: set[str] = set()
 _phase2_lock = threading.Lock()
 
-# Phase 2 background thread handle
-_phase2_thread: threading.Thread | None = None
-
 
 def _ensure_phase1(repo: str) -> str | None:
     """Ensure clone is fresh for *repo*. Returns HEAD SHA or None on failure.
 
-    Inline (blocking) call for Phase 1. Debounced: skips if repo was fetched
-    within SHIORI_SYNC_INTERVAL_SECONDS. Updates _phase1_last_fetch on success.
+    Inline (blocking) call for Phase 1. Per-repo single-flight with debounce:
+    at most one git fetch per repo at any time; subsequent callers within the
+    debounce window (or while a fetch is in-flight) wait behind the per-repo
+    lock and see the result immediately without re-fetching (#236 review fix).
     """
-    now = time.monotonic()
-    with _phase1_lock:
+    with _phase1_locks_guard:
+        lock = _phase1_locks.get(repo)
+        if lock is None:
+            lock = threading.Lock()
+            _phase1_locks[repo] = lock
+
+    with lock:
+        now = time.monotonic()
         last = _phase1_last_fetch.get(repo, 0.0)
         if last > 0 and (now - last) < settings.sync_interval_seconds:
             return None  # debounced: skip
 
-    try:
-        provider = build_token_provider(settings)
-        from .refresh import refresh_clone
-        head = refresh_clone(repo, provider, settings)
-        with _phase1_lock:
-            _phase1_last_fetch[repo] = now
         try:
-            with _conn() as conn:
-                db.upsert_clone_head(conn, repo, head)
+            provider = build_token_provider(settings)
+            from .refresh import refresh_clone
+            head = refresh_clone(repo, provider, settings)
+            _phase1_last_fetch[repo] = time.monotonic()
+            try:
+                with _conn() as conn:
+                    db.upsert_clone_head(conn, repo, head)
+            except Exception:
+                log.exception("upsert_clone_head failed for %s", repo)
+            return head
         except Exception:
-            log.exception("upsert_clone_head failed for %s", repo)
-        return head
-    except Exception:
-        log.exception("Phase 1 clone refresh failed for %s", repo)
-        return None
+            log.exception("Phase 1 clone refresh failed for %s", repo)
+            return None
 
 
 def _trigger_phase2(repo: str) -> None:
@@ -473,14 +482,12 @@ def _trigger_phase2(repo: str) -> None:
 
     Single-flight: if Phase 2 is already running for this repo, this is a no-op.
     """
-    global _phase2_thread
     with _phase2_lock:
         if repo in _phase2_in_flight:
             return
         _phase2_in_flight.add(repo)
 
     def _run():
-        global _phase2_thread
         try:
             _do_sync(repos=[repo], route="pull")
         except Exception:
@@ -491,7 +498,6 @@ def _trigger_phase2(repo: str) -> None:
 
     t = threading.Thread(target=_run, daemon=True)
     t.start()
-    _phase2_thread = t
 
 
 # ── _walk_code_files: collect code files ──
@@ -639,11 +645,15 @@ def semantic_search(
     repo: "owner/name" filter, or a short name if it uniquely matches one
           configured (indexed) repo (e.g. "shiori" -> "owner/shiori").
           Omit to search across all indexed repos."""
+    # Phase 1/2 for cross-repo search: refresh all repos when no filter (#236)
     resolved_repo = _resolve_repo_filter(repo)
-    # Phase 1 inline: refresh clone before search (#236)
-    _ensure_phase1(resolved_repo) if resolved_repo else None
-    # Phase 2 background: trigger re-index if stale
-    _trigger_phase2(resolved_repo) if resolved_repo else None
+    if resolved_repo:
+        _ensure_phase1(resolved_repo)
+        _trigger_phase2(resolved_repo)
+    else:
+        for r in settings.repos:
+            _ensure_phase1(r)
+            _trigger_phase2(r)
     with _conn() as conn:
         return search.semantic_search(
             settings, conn, _get_embedder(), query,
@@ -678,11 +688,15 @@ def keyword_search(
     repo: "owner/name" filter, or a short name if it uniquely matches one
           configured (indexed) repo (e.g. "shiori" -> "owner/shiori").
           Omit to search across all indexed repos."""
+    # Phase 1/2 for cross-repo search: refresh all repos when no filter (#236)
     resolved_repo = _resolve_repo_filter(repo)
-    # Phase 1 inline: refresh clone before search (#236)
-    _ensure_phase1(resolved_repo) if resolved_repo else None
-    # Phase 2 background: trigger re-index if stale
-    _trigger_phase2(resolved_repo) if resolved_repo else None
+    if resolved_repo:
+        _ensure_phase1(resolved_repo)
+        _trigger_phase2(resolved_repo)
+    else:
+        for r in settings.repos:
+            _ensure_phase1(r)
+            _trigger_phase2(r)
     with _conn() as conn:
         return search.keyword_search(
             settings, conn, query,
@@ -1975,8 +1989,13 @@ def _build_warnings(
     """Detect index anomalies and return warning list (issue #31)."""
     warnings: list[str] = []
 
-    # Pull-type freshness: clone_head != indexed_head means Phase 2 is behind (#236)
-    if info.get("index_stale"):
+    # Pull-type freshness: clone on disk is ahead of indexed content (#236)
+    if info.get("never_indexed"):
+        warnings.append(
+            f"clone exists but has never been indexed "
+            f"(clone_head={info.get('clone_head', '?')[:7]})"
+        )
+    elif info.get("index_stale"):
         warnings.append(
             f"index is stale: on-disk clone is ahead of indexed content "
             f"(clone_head={info.get('clone_head', '?')[:7]}, "
@@ -2175,11 +2194,19 @@ def status() -> dict[str, Any]:
             info["clone_head"] = state.get("clone_head")
             info["indexed_head"] = state.get("indexed_head")
             info["last_sync_error"] = state.get("last_sync_error")
-            info["index_stale"] = bool(
-                state.get("clone_head")
-                and state.get("indexed_head")
-                and state["clone_head"] != state["indexed_head"]
-            )
+            # Stale detection (#236): clone exists but index doesn't match.
+            # - never_indexed: clone exists, no indexed_head (never completed Phase 2)
+            # - behind: both exist but differ (clone moved ahead since last Phase 2)
+            # - fresh: both exist and match
+            clone_head = state.get("clone_head")
+            indexed_head = state.get("indexed_head")
+            if clone_head and indexed_head:
+                info["index_stale"] = clone_head != indexed_head
+            elif clone_head and not indexed_head:
+                info["index_stale"] = True  # never indexed
+            else:
+                info["index_stale"] = False  # no clone yet
+            info["never_indexed"] = bool(clone_head and not indexed_head)
             chunk_counts = db.get_chunk_counts(conn, repo)
             items_in_db = db.get_issue_item_count(conn, repo)
             cursors = db.get_cursors(conn, repo)
