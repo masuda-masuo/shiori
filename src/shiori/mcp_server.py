@@ -512,6 +512,8 @@ def _trigger_phase2(repo: str) -> None:
         except Exception:
             log.exception("Phase 2 sync failed for %s", repo)
         finally:
+            with _phase2_lock:
+                _phase2_in_flight.discard(repo)
             _drain_pending()
 
     t = threading.Thread(target=_run, daemon=True)
@@ -521,8 +523,9 @@ def _trigger_phase2(repo: str) -> None:
 def _drain_pending() -> None:
     """Pick the next pending repo and start its Phase 2 sync (#246).
 
-    Called from _run()'s finally block after releasing the semaphore slot.
-    Must be called outside _phase2_lock to avoid deadlock with _trigger_phase2.
+    Called from a finished thread's finally block, after discarding the
+    finished repo from _phase2_in_flight.  Must be called outside
+    _phase2_lock to avoid deadlock with _trigger_phase2.
     """
     with _phase2_lock:
         if not _phase2_pending:
@@ -537,6 +540,8 @@ def _drain_pending() -> None:
         except Exception:
             log.exception("Phase 2 sync failed for %s", next_repo)
         finally:
+            with _phase2_lock:
+                _phase2_in_flight.discard(next_repo)
             _drain_pending()
 
     t = threading.Thread(target=_next_run, daemon=True)
