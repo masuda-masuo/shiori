@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -971,36 +972,93 @@ def pr_changes(
     repo: str | None = None,
     include_diff: bool = False,
 ) -> dict[str, Any]:
-    """PR change file map (metadata pointer; issue #54, #100).
-    Stored: head_sha / path / status / additions / deletions / changes / blob_url
-    Not stored: patch hunks (via GitHub MCP) and PR head files (via shiori_read_pr_file).
+    """PR change file map computed from git clone (issue #259).
+    git diff --name-status + --numstat でファイルリストを生成する。
+    blob_url は git 単体では計算不能のため省略。
     repo: "owner/name", or a short name if it uniquely matches one
           configured (indexed) repo (e.g. "shiori" -> "owner/shiori").
           Omit for the default configured repo."""
     target = _resolve_repo(repo)
-    with _conn() as conn:
-        files, head_sha, base_sha = db.get_pr_changes(conn, target, number)
-    if head_sha is None:
-        raise ValueError(
-            f"PR #{number} change file map not found. "
-            "Check shiori_status and sync if stale."
+    git_dir = os.path.realpath(settings.repo_dir(target))
+    if not os.path.isdir(os.path.join(git_dir, ".git")):
+        raise FileNotFoundError(
+            f"Clone for {target} does not exist. Run python -m shiori ingest first."
         )
-    result: dict[str, Any] = {
-        "repo": target,
-        "number": number,
-        "head_sha": head_sha,
-        "files": files,
-    }
-    if base_sha is not None:
-        result["base_sha"] = base_sha
-    if include_diff:
-        diff_text, stat_text = _compute_pr_diff(
-            number, target, base_sha, path=None
+
+    provider = build_token_provider(settings)
+    tmp_ref = None
+    tmp_base = None
+    try:
+        tmp_ref = _git_fetch_ref(
+            f"pull/{number}/head", cwd=git_dir, provider=provider,
         )
-        result["diff"] = diff_text
-        if stat_text:
-            result["stats"] = stat_text
-    return result
+        head_sha = _git(["rev-parse", tmp_ref], cwd=git_dir)
+
+        tmp_base = _git_fetch_ref(
+            "origin/HEAD", cwd=git_dir, provider=provider,
+        )
+        base_sha = _git(["rev-parse", tmp_base], cwd=git_dir)
+
+        name_status_text = _git(
+            ["diff", "--name-status", f"{tmp_base}..{tmp_ref}"], cwd=git_dir,
+        )
+        numstat_text = _git(
+            ["diff", "--numstat", f"{tmp_base}..{tmp_ref}"], cwd=git_dir,
+        )
+
+        numstat_map: dict[str, tuple[int, int]] = {}
+        for line in numstat_text.split("\n"):
+            if not line.strip():
+                continue
+            parts = line.split("\t")
+            if len(parts) >= 3:
+                try:
+                    add = int(parts[0])
+                    delete = int(parts[1])
+                except ValueError:
+                    add = 0
+                    delete = 0
+                numstat_map[parts[-1]] = (add, delete)
+
+        files: list[dict[str, Any]] = []
+        for line in name_status_text.split("\n"):
+            if not line.strip():
+                continue
+            parts = line.split("\t")
+            status = parts[0]
+            path = parts[-1]
+            add, delete = numstat_map.get(path, (0, 0))
+            files.append({
+                "path": path,
+                "status": status,
+                "additions": add,
+                "deletions": delete,
+                "changes": add + delete,
+            })
+
+        result: dict[str, Any] = {
+            "repo": target,
+            "number": number,
+            "head_sha": head_sha,
+            "base_sha": base_sha,
+            "files": files,
+        }
+        if include_diff:
+            diff_text, stat_text = _compute_pr_diff(
+                number, target, base_sha=None, path=None,
+                tmp_ref=tmp_ref, tmp_base=tmp_base,
+            )
+            result["diff"] = diff_text
+            if stat_text:
+                result["stats"] = stat_text
+        return result
+    finally:
+        with contextlib.suppress(RuntimeError):
+            if tmp_ref:
+                _git_delete_ref(tmp_ref, cwd=git_dir)
+        with contextlib.suppress(RuntimeError):
+            if tmp_base:
+                _git_delete_ref(tmp_base, cwd=git_dir)
 
 
 def _compute_pr_diff(
@@ -1008,11 +1066,17 @@ def _compute_pr_diff(
     target: str,
     base_sha: str | None,
     path: str | None = None,
+    *,
+    tmp_ref: str | None = None,
+    tmp_base: str | None = None,
 ) -> tuple[str, str]:
-    """Fetch PR head and compute unified diff + stat (issue #96).
+    """Fetch PR head and compute unified diff + stat (issue #96, #259).
 
+    base_sha=None の場合は origin/HEAD を base として diff する。
+    tmp_ref / tmp_base が渡された場合は fetch をスキップする（呼び出し元が
+    既に fetch 済みの場合の重複 fetch 回避）。
     Returns (diff_text, stat_text). Raises FileNotFoundError if clone
-    is missing, or ValueError if the PR is not in the DB.
+    is missing.
     """
     git_dir = os.path.realpath(settings.repo_dir(target))
     if not os.path.isdir(os.path.join(git_dir, ".git")):
@@ -1021,33 +1085,46 @@ def _compute_pr_diff(
         )
 
     ref = f"pull/{number}/head"
-    tmp_ref = None
-    tmp_base = None
+    owned_ref: str | None = None
+    owned_base: str | None = None
     try:
-        provider = build_token_provider(settings)
-        tmp_ref = _git_fetch_ref(ref, cwd=git_dir, provider=provider)
+        if tmp_ref:
+            diff_head = tmp_ref
+        else:
+            provider = build_token_provider(settings)
+            owned_ref = _git_fetch_ref(ref, cwd=git_dir, provider=provider)
+            diff_head = owned_ref
 
-        if base_sha:
-            tmp_base = _git_fetch_ref(
+        if tmp_base:
+            diff_base = tmp_base
+        elif base_sha:
+            provider = build_token_provider(settings)
+            owned_base = _git_fetch_ref(
                 base_sha, cwd=git_dir, provider=provider,
             )
-            diff_base = tmp_base
+            diff_base = owned_base
         else:
-            diff_base = "HEAD"
+            provider = build_token_provider(settings)
+            owned_base = _git_fetch_ref(
+                "origin/HEAD", cwd=git_dir, provider=provider,
+            )
+            diff_base = owned_base
 
-        args = ["diff", f"{diff_base}..{tmp_ref}", "--unified=3"]
+        args = ["diff", f"{diff_base}..{diff_head}", "--unified=3"]
         if path:
             args.extend(["--", path])
         diff_text = _git(args, cwd=git_dir)
         stat_text = _git(
-            ["diff", f"{diff_base}..{tmp_ref}", "--stat"], cwd=git_dir
+            ["diff", f"{diff_base}..{diff_head}", "--stat"], cwd=git_dir
         )
         return diff_text, stat_text.strip() if stat_text else ""
     finally:
-        if tmp_ref:
-            _git_delete_ref(tmp_ref, cwd=git_dir)
-        if tmp_base:
-            _git_delete_ref(tmp_base, cwd=git_dir)
+        with contextlib.suppress(RuntimeError):
+            if owned_ref:
+                _git_delete_ref(owned_ref, cwd=git_dir)
+        with contextlib.suppress(RuntimeError):
+            if owned_base:
+                _git_delete_ref(owned_base, cwd=git_dir)
 
 
 @mcp.tool(name="shiori_pr_diff")
@@ -1067,22 +1144,10 @@ def pr_diff(
           （例: "shiori" -> "owner/shiori"）。省略時は既定の設定済みリポジトリ。
     """
     target = _resolve_repo(repo)
-    with _conn() as conn:
-        _, head_sha, base_sha = db.get_pr_changes(conn, target, number)
-
-    if head_sha is None:
-        raise ValueError(
-            f"PR #{number} change file map not found. "
-            "Check shiori_status and sync if stale."
-        )
-
-    diff_text, stat_text = _compute_pr_diff(number, target, base_sha, path)
-
+    diff_text, stat_text = _compute_pr_diff(number, target, base_sha=None, path=path)
     return {
         "repo": target,
         "number": number,
-        "head_sha": head_sha,
-        "base_sha": base_sha,
         "diff": diff_text,
         "stats": stat_text,
     }
