@@ -426,19 +426,26 @@ def _do_sync(
 
 # Per-repo Phase 1 single-flight: one concurrent git fetch per repo.
 # Key: repo name. Value: threading.Lock for that repo.
-# _phase1_locks lock protects the dict itself.
+# _phase1_locks guard protects the dict itself.
 _phase1_locks: dict[str, threading.Lock] = {}
 _phase1_locks_guard = threading.Lock()
 
 # Per-repo Phase 1 debounce: last fetch timestamp for each repo.
 # Updated atomically within the per-repo lock after fetch completes.
-# Guarded by the individual per-repo lock, not a separate lock.
 _phase1_last_fetch: dict[str, float] = {}
+
+# Minimum debounce interval (seconds) when sync_interval_seconds=0.
+# Prevents sequential re-fetches within the per-repo lock even when
+# debounce is disabled by configuration (#236 self-review).
+_PHASE1_MIN_DEBOUNCE = 1.0
 
 # Per-repo Phase 2 in-flight set: tracks repos currently being synced.
 # Duplicate requests for the same repo are no-ops (single-flight, #236).
 _phase2_in_flight: set[str] = set()
 _phase2_lock = threading.Lock()
+
+# Phase 2 concurrency cap: at most N concurrent background sync threads (#236 self-review).
+_phase2_semaphore = threading.BoundedSemaphore(2)
 
 
 def _ensure_phase1(repo: str) -> str | None:
@@ -458,7 +465,12 @@ def _ensure_phase1(repo: str) -> str | None:
     with lock:
         now = time.monotonic()
         last = _phase1_last_fetch.get(repo, 0.0)
-        if last > 0 and (now - last) < settings.sync_interval_seconds:
+        try:
+            interval = int(settings.sync_interval_seconds)
+        except (TypeError, ValueError):
+            interval = 0
+        debounce = max(interval, _PHASE1_MIN_DEBOUNCE)
+        if last > 0 and (now - last) < debounce:
             return None  # debounced: skip
 
         try:
@@ -481,6 +493,7 @@ def _trigger_phase2(repo: str) -> None:
     """Trigger Phase 2 (re-index) for *repo* in the background.
 
     Single-flight: if Phase 2 is already running for this repo, this is a no-op.
+    Concurrency-capped: at most _phase2_semaphore's value concurrent threads (#236).
     """
     with _phase2_lock:
         if repo in _phase2_in_flight:
@@ -495,6 +508,12 @@ def _trigger_phase2(repo: str) -> None:
         finally:
             with _phase2_lock:
                 _phase2_in_flight.discard(repo)
+            _phase2_semaphore.release()
+
+    if not _phase2_semaphore.acquire(blocking=False):
+        with _phase2_lock:
+            _phase2_in_flight.discard(repo)
+        return
 
     t = threading.Thread(target=_run, daemon=True)
     t.start()
@@ -761,6 +780,7 @@ def list_tree(
 
     # 2. Code files (clone filesystem)
     if source_type is None or source_type == "code":
+        _ensure_phase1(target)  # Phase 1: ensure clone is fresh (#236)
         base = os.path.realpath(settings.repo_dir(target))
         prefix = path.rstrip("/") if path else ""
         code_paths = _walk_code_files(base, prefix, extension=extension)
@@ -1325,6 +1345,7 @@ def report(
         )
 
     target = _resolve_repo(repo)
+    _ensure_phase1(target)  # Phase 1: ensure clone is fresh for report (#236)
     base = os.path.realpath(settings.repo_dir(target))
 
     if not os.path.isdir(base):
