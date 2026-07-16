@@ -1421,7 +1421,7 @@ def grep_search(
         else:
             resolved = base
 
-        cmd = ["rg", "-n", "--no-heading", "--color", "never"]
+        cmd = ["rg", "-n", "--no-heading", "--color", "never", "--with-filename"]
         if ignore_case:
             cmd.append("-i")
         if not regex:
@@ -1452,7 +1452,7 @@ def grep_search(
                 parts = line.split(":", 2)
                 if len(parts) >= 2:
                     try:
-                        int(parts[1])
+                        line_num = int(parts[1])
                         total += 1
                         text = parts[2] if len(parts) > 2 else ""
                         if len(all_matches) < max_results:
@@ -1462,9 +1462,10 @@ def grep_search(
                             all_matches.append({
                                 "repo": target,
                                 "path": rel_path,
-                                "line": int(parts[1]),
+                                "line": line_num,
                                 "text": text,
                             })
+                        continue
                     except ValueError:
                         pass
 
