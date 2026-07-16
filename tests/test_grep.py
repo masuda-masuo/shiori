@@ -418,3 +418,45 @@ class TestGrepSearch:
             repos_found = {m["repo"] for m in result["matches"]}
             assert repos_found == {"o/r1", "o/r2", "o/r3"}
             assert result["skipped_repos"] == []
+
+    def test_file_path_parses_rg_line_only_format(self):
+        """File path with rg FILE:LINE:CONTENT output parses correctly (regression #210).
+
+        When -H/--with-filename is passed, rg always emits FILE:LINE:CONTENT
+        even for a single file argument.  The parser's single branch must strip
+        the absolute prefix and return a repo-relative path, consistent with
+        directory-mode results.
+        """
+        base = "/data/repos/o__r"
+        rg_out = f"{base}/src/file.py:42:def foo():\n"
+        result = self._run_grep(rg_stdout=rg_out, path="src/file.py")
+
+        assert result["total_matches"] == 1
+        assert len(result["matches"]) == 1
+        assert result["matches"][0]["path"] == "src/file.py"
+        assert result["matches"][0]["line"] == 42
+        assert result["matches"][0]["text"] == "def foo():"
+
+    def test_with_filename_in_rg_command(self):
+        """--with-filename is in the rg command so output is always FILE:LINE:CONTENT."""
+        with (
+            patch("shiori.mcp_server._resolve_repos", return_value=["o/r"]),
+            patch("shiori.mcp_server.settings") as mock_settings,
+            patch("shiori.mcp_server.os.path.isdir", return_value=True),
+            patch(
+                "shiori.mcp_server.os.path.realpath",
+                side_effect=lambda p: p,
+            ),
+            patch("shiori.mcp_server.subprocess.run") as mock_run,
+        ):
+            mock_settings.repo_dir.side_effect = lambda r: f"/data/repos/{r.replace('/', '__')}"
+            mock_result = MagicMock()
+            mock_result.stdout = ""
+            mock_result.returncode = 1
+            mock_result.stderr = ""
+            mock_run.return_value = mock_result
+
+            grep_search(pattern="test", path="src/file.py")
+
+            cmd = mock_run.call_args[0][0]
+            assert "--with-filename" in cmd
