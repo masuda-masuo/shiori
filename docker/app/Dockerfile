@@ -10,7 +10,8 @@ WORKDIR /app
 
 COPY pyproject.toml README.md ./
 RUN mkdir -p src/shiori && touch src/shiori/__init__.py \
-    && pip install torch --index-url https://download.pytorch.org/whl/cpu \
+    # CUDA 版 PyTorch (~2GB)。CPU-only なら --index-url https://download.pytorch.org/whl/cpu を追加
+    && pip install torch \
     && pip install --no-cache-dir .[embed]
 
 COPY src ./src
