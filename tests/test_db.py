@@ -97,8 +97,8 @@ class TestGetPrChanges:
 class TestUpsertPrChanges:
     """upsert_pr_changes の振る舞い。"""
 
-    def test_deletes_existing_and_inserts_new(self):
-        """既存行を DELETE してから新しい行を INSERT する。commit は呼ばない。"""
+    def test_upserts_files_and_deletes_stale_paths(self):
+        """各ファイルを ON CONFLICT で UPSERT し、一覧に無い path だけ DELETE する（issue #269）。commit は呼ばない。"""
         conn = MagicMock()
         cursor = MagicMock()
         conn.cursor.return_value.__enter__.return_value = cursor
@@ -124,37 +124,61 @@ class TestUpsertPrChanges:
 
         upsert_pr_changes(conn, "o/r", 42, "abc1234", "def4567", files)
 
-        # DELETE が 1 回呼ばれたか
-        cursor.execute.assert_any_call(
-            "DELETE FROM pr_changes WHERE repo = %s AND issue_no = %s",
-            ("o/r", 42),
-        )
+        # ファイル数分の UPSERT + 末尾の DELETE
+        assert cursor.execute.call_count == 3  # 2 INSERT + 1 DELETE
 
-        # INSERT がファイル数だけ呼ばれたか
-        assert cursor.execute.call_count == 3  # 1 DELETE + 2 INSERT
+        # INSERT は ON CONFLICT DO UPDATE で duplicate key に耐える
+        for call in cursor.execute.call_args_list[:2]:
+            assert "ON CONFLICT (repo, issue_no, path) DO UPDATE" in call[0][0]
+
+        # DELETE は一覧に無い path のみ対象（全削除しない）
+        delete_sql, delete_params = cursor.execute.call_args_list[2][0]
+        assert "path != ALL(%s)" in delete_sql
+        assert delete_params == ("o/r", 42, ["src/a.py", "src/b.py"])
 
         # commit は呼ばれない（呼び出し側の責任）
         conn.commit.assert_not_called()
 
+    def test_duplicate_paths_in_file_list_use_on_conflict(self):
+        """API のページずれ等で同じ path が2回来ても ON CONFLICT で UPDATE になる（issue #269）。"""
+        conn = MagicMock()
+        cursor = MagicMock()
+        conn.cursor.return_value.__enter__.return_value = cursor
+
+        files = [
+            {"filename": "AGENTS.md", "status": "modified",
+             "additions": 1, "deletions": 1, "changes": 2, "blob_url": "u1"},
+            {"filename": "AGENTS.md", "status": "modified",
+             "additions": 3, "deletions": 0, "changes": 3, "blob_url": "u2"},
+        ]
+
+        upsert_pr_changes(conn, "o/r", 5572, "abc1234", "def4567", files)
+
+        # 両方 ON CONFLICT 付き INSERT として発行される（2回目は DB 側で UPDATE になる）
+        for call in cursor.execute.call_args_list[:2]:
+            assert "ON CONFLICT (repo, issue_no, path) DO UPDATE" in call[0][0]
+
     def test_empty_files_list_inserts_sentinel(self):
-        """ファイル0件の場合、head_sha を保持する sentinel 行を挿入する。"""
+        """ファイル0件の場合、head_sha を保持する sentinel 行を UPSERT する。"""
         conn = MagicMock()
         cursor = MagicMock()
         conn.cursor.return_value.__enter__.return_value = cursor
 
         upsert_pr_changes(conn, "o/r", 42, "abc1234", "def4567", [])
 
-        # DELETE + sentinel INSERT の 2 回
+        # sentinel 以外の DELETE + sentinel UPSERT の 2 回
         assert cursor.execute.call_count == 2
 
-        # sentinel INSERT のパラメータを検証
-        # path='' は SQL に直書きのため、パラメータは (repo, issue_no, head_sha, base_sha) の 4 要素
-        sentinel_params = cursor.execute.call_args_list[1][0][1]
-        assert len(sentinel_params) == 4
+        delete_sql = cursor.execute.call_args_list[0][0][0]
+        assert "path != ''" in delete_sql
+
+        sentinel_sql, sentinel_params = cursor.execute.call_args_list[1][0]
+        assert "ON CONFLICT (repo, issue_no, path) DO UPDATE" in sentinel_sql
         assert sentinel_params[0] == "o/r"       # repo
         assert sentinel_params[1] == 42           # issue_no
         assert sentinel_params[2] == "abc1234"    # head_sha
         assert sentinel_params[3] == "def4567"    # base_sha
+        assert sentinel_params[4] == ""           # path（sentinel）
 
     def test_handles_none_fields(self):
         """blob_url 等が None でも正しく扱われる。"""
@@ -175,7 +199,7 @@ class TestUpsertPrChanges:
 
         upsert_pr_changes(conn, "o/r", 42, "def5678", "base9999", files)
 
-        insert_params = cursor.execute.call_args_list[1][0][1]
+        insert_params = cursor.execute.call_args_list[0][0][1]
         assert insert_params[4] == "deleted.py"  # path (after repo, issue_no, head_sha, base_sha)
         assert insert_params[5] == "removed"     # status
         assert insert_params[9] is None          # blob_url

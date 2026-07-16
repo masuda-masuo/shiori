@@ -549,25 +549,36 @@ def upsert_pr_changes(
     base_sha: str | None = None,
     files: list[dict] | None = None,
 ) -> None:
-    """Upsert PR change file map (issue #54). Deletes existing entries for the same PR before insert.
-    
+    """Upsert PR change file map (issue #54, #269).
+
+    Uses INSERT ... ON CONFLICT DO UPDATE per file, then deletes only rows
+    whose path is no longer in the PR. The previous DELETE → INSERT approach
+    raised duplicate-key errors when the paginated file list contained the
+    same path twice (page drift while fetching) or when rows left behind by
+    an interrupted run collided with a fresh insert in another transaction.
+
     base_sha is optional for backward compatibility with callers that don't provide it.
     """
     if files is None:
         files = []
+    upsert_sql = """
+        INSERT INTO pr_changes (repo, issue_no, head_sha, base_sha, path, status,
+                                additions, deletions, changes, blob_url)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (repo, issue_no, path) DO UPDATE SET
+            head_sha = EXCLUDED.head_sha,
+            base_sha = EXCLUDED.base_sha,
+            status = EXCLUDED.status,
+            additions = EXCLUDED.additions,
+            deletions = EXCLUDED.deletions,
+            changes = EXCLUDED.changes,
+            blob_url = EXCLUDED.blob_url
+        """
     with conn.cursor() as cur:
-        cur.execute(
-            "DELETE FROM pr_changes WHERE repo = %s AND issue_no = %s",
-            (repo, issue_no),
-        )
         if files:
             for f in files:
                 cur.execute(
-                    """
-                    INSERT INTO pr_changes (repo, issue_no, head_sha, base_sha, path, status,
-                                            additions, deletions, changes, blob_url)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    """,
+                    upsert_sql,
                     (
                         repo, issue_no, head_sha, base_sha,
                         f["filename"],
@@ -578,15 +589,24 @@ def upsert_pr_changes(
                         f.get("blob_url"),
                     ),
                 )
+            # Remove files no longer in the PR (also drops a stale sentinel row)
+            cur.execute(
+                """
+                DELETE FROM pr_changes
+                WHERE repo = %s AND issue_no = %s AND path != ALL(%s)
+                """,
+                (repo, issue_no, [f["filename"] for f in files]),
+            )
         else:
             # Preserve head_sha even for PR with 0 files (sentinel row, path='')
             cur.execute(
-                """
-                INSERT INTO pr_changes (repo, issue_no, head_sha, base_sha, path, status,
-                                        additions, deletions, changes, blob_url)
-                VALUES (%s, %s, %s, %s, '', NULL, NULL, NULL, NULL, NULL)
-                """,
-                (repo, issue_no, head_sha, base_sha),
+                "DELETE FROM pr_changes WHERE repo = %s AND issue_no = %s AND path != ''",
+                (repo, issue_no),
+            )
+            cur.execute(
+                upsert_sql,
+                (repo, issue_no, head_sha, base_sha,
+                 "", None, None, None, None, None),
             )
 
 
