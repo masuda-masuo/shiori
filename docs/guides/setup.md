@@ -16,6 +16,7 @@ cp .env.example .env
 # Edit .env:
 #   SHIORI_REPOS=owner/name      (comma-separated list of target repos)
 #   GITHUB_TOKEN=ghp_xxx         (optional for public repositories)
+#   GHCR_USER=your-username      (default: masuda-masuo, for ghcr.io pull in update.sh)
 
 # Start the DB and MCP server (builds images on first run)
 docker compose up -d --build
