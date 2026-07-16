@@ -1,0 +1,23 @@
+# GPU 加速用 override。
+# nvidia-container-toolkit がインストールされたホストでのみ使用する。
+# CPU-only ホストでは本ファイルを指定しないこと。
+#
+# 使い方:
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml run --rm ingest
+#
+# app (常時稼働): deploy.resources.reservations.devices (docker compose up 時のみ有効)
+# ingest (on-demand): runtime: nvidia (docker compose run でも有効)
+
+services:
+  app:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  ingest:
+    runtime: nvidia
