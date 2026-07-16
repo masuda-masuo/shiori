@@ -9,13 +9,15 @@ git pull
 # GITHUB_TOKEN (read:packages) comes from the environment or .env — never
 # from the repository itself.
 if [[ -z "${GITHUB_TOKEN:-}" && -f .env ]]; then
-  GITHUB_TOKEN="$(sed -n 's/^GITHUB_TOKEN=//p' .env | tail -1 | tr -d '"' )"
+  GITHUB_TOKEN="$(sed -n 's/^GITHUB_TOKEN=//p' .env | tail -1 | tr -d "\"'" )"
 fi
 
 pulled=""
 if [[ -n "${GITHUB_TOKEN:-}" ]]; then
+  login_err=$(mktemp /tmp/docker-login-err.XXXXXX)
   if printf '%s' "$GITHUB_TOKEN" \
-      | docker login ghcr.io -u "${GHCR_USER:-masuda-masuo}" --password-stdin >/dev/null 2>&1; then
+      | docker login ghcr.io -u "${GHCR_USER:-masuda-masuo}" --password-stdin >/dev/null 2>"$login_err"; then
+    rm -f "$login_err"
     if docker compose pull app; then
       pulled=1
       echo "Pulled prebuilt app image from ghcr.io — skipping local build."
@@ -25,6 +27,8 @@ if [[ -n "${GITHUB_TOKEN:-}" ]]; then
     docker logout ghcr.io >/dev/null 2>&1 || true
   else
     echo "docker login ghcr.io failed — falling back to local build."
+    sed 's/^/  | /' "$login_err"
+    rm -f "$login_err"
   fi
 else
   echo "GITHUB_TOKEN not set — building locally."
