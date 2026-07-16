@@ -97,6 +97,13 @@ services:
       db:
         condition: service_healthy
     restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
 
   # オンデマンドの同期ジョブ。`docker compose run --rm ingest` で実行する。
   # `docker compose up` では起動しない（profiles 指定）。cron からも同コマンド。
@@ -124,6 +131,13 @@ services:
     depends_on:
       db:
         condition: service_healthy
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
 
 volumes:
   dbdata:
