@@ -21,6 +21,7 @@ import os
 import re
 import subprocess
 from collections.abc import Iterator
+from datetime import datetime, timezone
 import uuid
 
 import httpx
@@ -949,6 +950,9 @@ def sync_issues(
                 conn.commit()
             set_cursor(conn, repo, "issues", page[-1]["updated_at"])
 
+        if get_cursor(conn, repo, "issues") is None:
+            set_cursor(conn, repo, "issues", datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
+
         # --- Issue/PR comments ---
         since = get_cursor(conn, repo, "issue_comments")
         params = {"sort": "updated", "direction": "asc", "per_page": 100}
@@ -987,6 +991,9 @@ def sync_issues(
             if buffer is None:
                 conn.commit()
             set_cursor(conn, repo, "issue_comments", page[-1]["updated_at"])
+
+        if get_cursor(conn, repo, "issue_comments") is None:
+            set_cursor(conn, repo, "issue_comments", datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
 
         # --- PR review comments (with path/line/diff_hunk) ---
         since = get_cursor(conn, repo, "pr_review_comments")
@@ -1033,5 +1040,8 @@ def sync_issues(
             if buffer is None:
                 conn.commit()
             set_cursor(conn, repo, "pr_review_comments", page[-1]["updated_at"])
+
+        if get_cursor(conn, repo, "pr_review_comments") is None:
+            set_cursor(conn, repo, "pr_review_comments", datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
 
     return n_indexed

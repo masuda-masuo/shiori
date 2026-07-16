@@ -28,6 +28,7 @@ from shiori.github_sync import (
     _should_index,
     _sync_pr_changes,
     _sync_pr_reviews,
+    sync_issues,
 )
 
 
@@ -925,3 +926,94 @@ class TestApiPagesGen:
         # Second call uses the next URL as-is (no params dict)
         assert client.get.call_args_list[1][0][0] == "https://api.github.com/repos/o/r/issues?page=2&per_page=50"
         assert client.get.call_args_list[1][1]["params"] is None
+
+# ===================================================================
+# sync_issues cursor fallback (PR #275)
+# ===================================================================
+
+
+class TestSyncIssuesCursor:
+    """sync_issues: cursor is set even on empty API response (PR #275)."""
+
+    def test_empty_issues_sets_cursor_fallback(self):
+        settings = Settings()
+        conn = MagicMock()
+        embedder = MagicMock()
+        provider = MagicMock()
+
+        with (
+            patch("shiori.github_sync._api_pages_gen", return_value=iter([[]])),
+            patch("shiori.github_sync.get_cursor", return_value=None),
+            patch("shiori.github_sync.set_cursor") as mock_set,
+        ):
+            n = sync_issues(settings, conn, embedder, "o/r", provider)
+
+        assert n == 0
+        # Each of the 3 categories should get a fallback cursor
+        assert mock_set.call_count == 3
+        kinds = [call[0][2] for call in mock_set.call_args_list]
+        assert kinds == ["issues", "issue_comments", "pr_review_comments"]
+        # Each cursor value should be a Z-suffixed ISO timestamp
+        for call in mock_set.call_args_list:
+            cursor = call[0][3]
+            assert cursor.endswith("Z"), f"Expected Z suffix, got: {cursor}"
+            assert "T" in cursor, f"Expected ISO 8601 format, got: {cursor}"
+
+    def test_existing_cursor_skips_fallback(self):
+        settings = Settings()
+        conn = MagicMock()
+        embedder = MagicMock()
+        provider = MagicMock()
+        existing = "2024-01-01T00:00:00Z"
+
+        def get_cursor_side(conn, repo, kind):
+            return existing
+
+        with (
+            patch("shiori.github_sync._api_pages_gen", return_value=iter([[]])),
+            patch("shiori.github_sync.get_cursor", side_effect=get_cursor_side),
+            patch("shiori.github_sync.set_cursor") as mock_set,
+        ):
+            n = sync_issues(settings, conn, embedder, "o/r", provider)
+
+        assert n == 0
+        # No fallback cursor should be set (existing cursor means earlier sync ran)
+        mock_set.assert_not_called()
+
+    def test_with_data_uses_api_cursor(self):
+        settings = Settings()
+        conn = MagicMock()
+        embedder = MagicMock()
+        provider = MagicMock()
+
+        page = [{
+            "number": 1,
+            "user": {"login": "alice", "type": "User"},
+            "title": "Test Issue",
+            "body": "Test body",
+            "state": "open",
+            "html_url": "https://github.com/o/r/issues/1",
+            "created_at": "2024-01-01T00:00:00Z",
+            "updated_at": "2024-01-02T00:00:00Z",
+        }]
+
+        with (
+            patch("shiori.github_sync._api_pages_gen", return_value=iter([page])),
+            patch("shiori.github_sync.get_cursor", return_value=None),
+            patch("shiori.github_sync._upsert_issue_item"),
+            patch("shiori.github_sync._propagate_issue_state"),
+            patch("shiori.github_sync._should_index", return_value=False),
+            patch("shiori.github_sync.set_cursor") as mock_set,
+        ):
+            n = sync_issues(settings, conn, embedder, "o/r", provider)
+
+        assert n == 0  # _should_index=False
+        # set_cursor should be called with API timestamps (not fallback)
+        issues_calls = [
+            c for c in mock_set.call_args_list
+            if c[0][2] == "issues"
+        ]
+        assert len(issues_calls) >= 1
+        # The cursor should be the API timestamp, not a fallback Z timestamp
+        api_cursor = issues_calls[0][0][3]
+        assert api_cursor == "2024-01-02T00:00:00Z"
