@@ -14,7 +14,6 @@ Auth via TokenProvider (detailed design/09); git via http.extraHeader; API via h
 
 from __future__ import annotations
 
-import fnmatch
 import hashlib
 import logging
 import os
@@ -44,6 +43,12 @@ from .db import (
 )
 from .embedding import Embedder
 from .github_auth import TokenProvider
+from .walk_utils import (
+    _is_excluded_by_glob,
+    _is_excluded_dir,
+    _is_code_file,
+    _looks_minified,
+)
 
 log = logging.getLogger(__name__)
 
@@ -364,76 +369,6 @@ def sync_docs(
 # ---------------------------------------------------------------------------
 # code (shares same git clone, sha delta)
 # ---------------------------------------------------------------------------
-
-# Directory names to skip in os.walk
-_EXCLUDE_DIRS = {
-    ".git",
-    "node_modules",
-    ".venv", "venv",
-    "dist", "build",
-    "__pycache__",
-    ".tox", ".eggs",
-    ".next",
-    "target",
-    ".cache",
-}
-
-# Directory name suffixes to skip in os.walk (build-output dirs that don't
-# match _EXCLUDE_DIRS exactly, e.g. "dashboard_dist"; issue #235)
-_EXCLUDE_DIR_SUFFIXES = ("_dist", "-dist")
-
-# Longest line (chars) a hand-written source file is expected to have.
-# Minified/bundled JS routinely puts an entire file on one line; filename-based
-# detection (".min.js") misses non-suffixed bundles like Vite's "index-*.js".
-_MINIFIED_LINE_THRESHOLD = 500
-
-
-def _looks_minified(content: bytes) -> bool:
-    """Heuristic: a single very long line strongly suggests a minified bundle."""
-    try:
-        sample = content[:8192].decode("utf-8", errors="ignore")
-    except Exception:
-        return False
-    return any(len(line) > _MINIFIED_LINE_THRESHOLD for line in sample.splitlines())
-
-
-def _is_excluded_dir(name: str) -> bool:
-    """Directory should be pruned from os.walk (issue #235)."""
-    return name in _EXCLUDE_DIRS or name.endswith(_EXCLUDE_DIR_SUFFIXES)
-
-# File extensions excluded from code indexing (binary/asset etc.)
-_EXCLUDE_EXTENSIONS = {
-    ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".webp",
-    ".woff", ".woff2", ".ttf", ".eot", ".otf",
-    ".pyc", ".pyo",
-    ".so", ".dylib", ".dll", ".wasm",
-    ".zip", ".tar", ".gz", ".bz2", ".xz", ".7z",
-    ".pdf",
-    ".lock",
-    ".min.js", ".min.css",
-}
-
-
-def _is_code_file(filename: str, settings: Settings) -> bool:
-    """Determine if the relative path is a code file that should be indexed.
-"""
-    lower = filename.lower()
-    if lower.endswith((".md", ".mdx", ".markdown")):
-        return False
-    if any(lower.endswith(ext) for ext in _EXCLUDE_EXTENSIONS):
-        return False
-    if settings.code_extensions:
-        return any(lower.endswith(ext) for ext in settings.code_extensions)
-    return True
-
-
-def _is_excluded_by_glob(rel_path: str, settings: Settings) -> bool:
-    """Check if path matches excluded glob patterns."""
-    for pattern in settings.code_exclude_globs:
-        if fnmatch.fnmatch(rel_path, pattern):
-            return True
-    return False
-
 
 def sync_code(
     settings: Settings,

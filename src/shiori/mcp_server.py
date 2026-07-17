@@ -42,10 +42,14 @@ from .github_sync import (
     _git_fetch_ref,
     _GitHubAuth,
     _is_bot,
-    _is_excluded_dir,
     sync_code,
     sync_docs,
     sync_issues,
+)
+from .ingest import SYNC_LOCK_KEY, _BULK_BUFFER_SIZE
+from .walk_utils import (
+    _match_extension,
+    _walk_code_files,
 )
 
 log = logging.getLogger(__name__)
@@ -54,13 +58,6 @@ settings: Settings = load_settings()
 _embedder: Embedder | None = None
 _embedder_lock = threading.Lock()
 _sync_lock = threading.Lock()
-
-# PostgreSQL advisory lock key (cross-process mutex, shared with ingest.py)
-# ASCII codes for 'SHIO' packed into 32 bits
-SYNC_LOCK_KEY = 0x5348494F
-
-# ChunkBuffer flush threshold for bulk path (issue #72)
-_BULK_BUFFER_SIZE = 500
 
 # Cached token provider (built once, reused across _github_client calls)
 _token_provider: Any | None = None
@@ -585,82 +582,6 @@ def _drain_pending() -> None:
 
     t = threading.Thread(target=_next_run, daemon=True)
     t.start()
-
-
-# ── _walk_code_files: collect code files ──
-
-# Document extensions (case-insensitive). Excluded from walk; handled by doc_files table
-_DOC_EXTENSIONS = {".md", ".mdx", ".markdown"}
-
-# Directory names to skip in os.walk (design 10 decision 7: noise reduction for quality and quantity)
-_EXCLUDE_DIRS = {
-    ".git",
-    "node_modules",
-    ".venv", "venv",
-    "dist", "build",
-    "__pycache__",
-    ".tox", ".eggs",
-    ".next",  # Next.js
-    "target",  # Rust
-    ".cache",
-}
-
-# File extensions excluded from code listing (case-insensitive)
-# Binary/asset/lock files that are not useful for LLM reading
-_EXCLUDE_EXTENSIONS = {
-    ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".webp",
-    ".woff", ".woff2", ".ttf", ".eot", ".otf",
-    ".pyc", ".pyo",
-    ".so", ".dylib", ".dll", ".wasm",
-    ".zip", ".tar", ".gz", ".bz2", ".xz", ".7z",
-    ".pdf",
-    ".lock",  # package-lock.json, yarn.lock, Gemfile.lock etc.
-    ".min.js", ".min.css",  # minified
-}
-
-
-def _is_doc_file(filename: str) -> bool:
-    """Check if filename has a document extension (case-insensitive)."""
-    return any(filename.lower().endswith(ext) for ext in _DOC_EXTENSIONS)
-
-
-def _is_excluded_file(filename: str) -> bool:
-    """Check if filename has an excluded extension (case-insensitive)."""
-    lower = filename.lower()
-    return any(lower.endswith(ext) for ext in _EXCLUDE_EXTENSIONS)
-
-
-def _match_extension(path: str, extension: str) -> bool:
-    """Check if extension matches given value (case-insensitive, with/without leading dot)."""
-    ext = extension if extension.startswith(".") else "." + extension
-    return path.lower().endswith(ext.lower())
-
-
-def _walk_code_files(base: str, prefix: str, extension: str | None = None) -> set[str]:
-    """Walk clone and return code file relative paths.
-    Skips .git/node_modules/.venv, binary extensions.
-    Only extensions in _CODE_EXTENSIONS."""
-    paths: set[str] = set()
-    if not os.path.isdir(base):
-        return paths
-    for dirpath, dirnames, filenames in os.walk(base):
-        dirnames[:] = [d for d in dirnames if not _is_excluded_dir(d)]
-        rel_dir = os.path.relpath(dirpath, base)
-        if rel_dir == ".":
-            rel_dir = ""
-        for fn in filenames:
-            if _is_doc_file(fn) or _is_excluded_file(fn):
-                continue
-            rel_path = os.path.join(rel_dir, fn) if rel_dir else fn
-            if prefix and not (
-                rel_path == prefix or rel_path.startswith(prefix + "/")
-            ):
-                continue
-            if extension and not _match_extension(rel_path, extension):
-                continue
-            paths.add(rel_path)
-    return paths
-
 
 mcp = FastMCP(
     "shiori",

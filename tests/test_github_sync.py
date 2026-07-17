@@ -21,12 +21,14 @@ from shiori.github_sync import (
     _git_delete_ref,
     _git_fetch_ref,
     _is_bot,
-    _is_excluded_dir,
-    _looks_minified,
     _propagate_issue_state,
     _should_index,
     _sync_pr_reviews,
     sync_issues,
+)
+from shiori.walk_utils import (
+    _is_excluded_dir,
+    _looks_minified,
 )
 
 

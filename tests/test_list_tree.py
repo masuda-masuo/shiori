@@ -16,9 +16,11 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from shiori.mcp_server import (
+    list_tree,
+)
+from shiori.walk_utils import (
     _match_extension,
     _walk_code_files,
-    list_tree,
 )
 
 
@@ -344,7 +346,7 @@ class TestListTreeEndToEnd:
                 patch("shiori.mcp_server.settings") as mock_settings,
                 patch("shiori.mcp_server._conn", side_effect=_fake_conn),
                 patch(
-                    "shiori.mcp_server._walk_code_files",
+                    "shiori.walk_utils._walk_code_files",
                     return_value=mock_walk_return,
                 ),
             ):
