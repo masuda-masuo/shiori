@@ -192,13 +192,16 @@ class TestStatusCodeAdded:
             patch("shiori.mcp_server.db.get_cursors", return_value={}),
         ):
             mock_settings.repos = ["o/r"]
+            mock_settings.dev_repos = {"o/r"}
             mock_settings.sync_interval_seconds = 300
             result = status()
 
         repo_info = result["repos"]["o/r"]
         assert "code_added" in repo_info
-        assert "code_indexed" not in repo_info
+        assert "code_indexed" in repo_info
         assert repo_info["code_added"] == 3
+        assert repo_info["code_indexed"] is True
+        assert repo_info["role"] == "dev"
 
     def test_code_added_default_when_no_sync_run(self):
         """同期記録がない場合のデフォルトに code_added が含まれる。"""
@@ -212,13 +215,16 @@ class TestStatusCodeAdded:
             patch("shiori.mcp_server.db.get_cursors", return_value={}),
         ):
             mock_settings.repos = ["o/r"]
+            mock_settings.dev_repos = set()
             mock_settings.sync_interval_seconds = 300
             result = status()
 
         repo_info = result["repos"]["o/r"]
         assert "code_added" in repo_info
-        assert "code_indexed" not in repo_info
+        assert "code_indexed" in repo_info
         assert repo_info["code_added"] is None
+        assert repo_info["code_indexed"] is False
+        assert repo_info["role"] == "ref"
 
 
 class TestStatusTokenProvider:

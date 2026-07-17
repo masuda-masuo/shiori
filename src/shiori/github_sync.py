@@ -446,8 +446,10 @@ def sync_code(
     buffer: ChunkBuffer | None = None,
 ) -> int:
     """Sync source code; index only changed files (detailed design/10 Step 3).
-    Shares clone with sync_docs."""
-    if not settings.index_code:
+    Shares clone with sync_docs.
+    Only indexes code for dev repos (those in SHIORI_DEV_REPOS). Reference
+    repos are clone-only; use shiori_grep for code search."""
+    if repo not in settings.dev_repos:
         return 0
 
     repo_dir = settings.repo_dir(repo)

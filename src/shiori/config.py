@@ -31,6 +31,23 @@ def _code_exclude_globs_from_env() -> list[str]:
     return [s.strip() for s in raw.split(",") if s.strip()]
 
 
+def _dev_repos_from_env() -> set[str]:
+    """Return dev repos (code-indexed) from SHIORI_DEV_REPOS.
+
+    Backward compat: if SHIORI_DEV_REPOS is unset and SHIORI_INDEX_CODE=true,
+    all repos are treated as dev. SHIORI_INDEX_CODE is deprecated.
+    """
+    raw = os.environ.get("SHIORI_DEV_REPOS", "")
+    if raw:
+        return {s.strip() for s in raw.split(",") if s.strip()}
+    index_code = os.environ.get("SHIORI_INDEX_CODE", "").lower() in (
+        "1", "true", "yes"
+    )
+    if index_code:
+        return set(_repos_from_env())
+    return set()
+
+
 def _allow_rebuild_from_env() -> bool:
     """Return SHIORI_ALLOW_REBUILD as a bool."""
     return os.environ.get("SHIORI_ALLOW_REBUILD", "").lower() in (
@@ -104,11 +121,10 @@ class Settings:
     # behalf of users can be allowlisted here for indexing.
     index_bot_logins: set[str] = field(default_factory=_index_bot_logins_from_env)
     # --- Source code indexing (detailed design/10, decision 7) ---
-    # Master switch. Off skips code indexing entirely.
-    index_code: bool = field(
-        default_factory=lambda: os.environ.get("SHIORI_INDEX_CODE", "").lower()
-        in ("1", "true", "yes")
-    )
+    # Dev repos get code indexed. Reference repos (in SHIORI_REPOS but not
+    # in SHIORI_DEV_REPOS) are clone-only (grep-able via shiori_grep).
+    # SHIORI_INDEX_CODE is deprecated; removed in a future release.
+    dev_repos: set[str] = field(default_factory=_dev_repos_from_env)
     # Code file extensions (lowercase). Empty/unset = all code extensions.
     code_extensions: set[str] = field(default_factory=_code_extensions_from_env)
     # Exclude glob patterns (comma-separated). E.g. "**/test_*, **/migrations/*"
