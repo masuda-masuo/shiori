@@ -72,12 +72,8 @@ class TestReport:
 
     def test_tokei_not_installed(self):
         """Missing tokei raises RuntimeError."""
-        with (
-            patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
-            patch("shiori.mcp_server.os.path.isdir", return_value=True),
-            patch("shiori.mcp_server.os.path.realpath", side_effect=lambda p: p),
-            patch("shiori.report.subprocess.run", side_effect=FileNotFoundError),
-        ):
+        with _report_setup() as mock_run:
+            mock_run.side_effect = FileNotFoundError
             with pytest.raises(RuntimeError, match="tokei is not installed"):
                 report(template="stats")
 
@@ -223,12 +219,8 @@ class TestSymbolIndex:
 
     def test_ctags_not_installed(self):
         """Missing ctags raises RuntimeError."""
-        with (
-            patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
-            patch("shiori.mcp_server.os.path.isdir", return_value=True),
-            patch("shiori.mcp_server.os.path.realpath", side_effect=lambda p: p),
-            patch("shiori.report.subprocess.run", side_effect=FileNotFoundError),
-        ):
+        with _report_setup() as mock_run:
+            mock_run.side_effect = FileNotFoundError
             with pytest.raises(RuntimeError, match="universal-ctags is not installed"):
                 report(template="symbol_index")
 
@@ -359,12 +351,8 @@ class TestModuleTree:
 
     def test_ctags_not_installed(self):
         """Missing ctags raises RuntimeError."""
-        with (
-            patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
-            patch("shiori.mcp_server.os.path.isdir", return_value=True),
-            patch("shiori.mcp_server.os.path.realpath", side_effect=lambda p: p),
-            patch("shiori.report.subprocess.run", side_effect=FileNotFoundError),
-        ):
+        with _report_setup() as mock_run:
+            mock_run.side_effect = FileNotFoundError
             with pytest.raises(RuntimeError, match="universal-ctags is not installed"):
                 report(template="module_tree")
 
@@ -420,7 +408,7 @@ class TestApiReference:
                 patch("shiori.report._conn"),
                 patch("shiori.report.db.get_code_chunks", return_value=dummy_chunks) as mock_get,
             ):
-            result = report(template="api_reference", prog_lang="python", path="src/")
+                result = report(template="api_reference", prog_lang="python", path="src/")
 
         mock_get.assert_called_once_with(
             mock_get.call_args[0][0],  # conn
@@ -469,7 +457,7 @@ class TestApiReference:
                 patch("shiori.report._conn"),
                 patch("shiori.report.db.get_code_chunks", return_value=dummy_chunks),
             ):
-            result = report(template="api_reference", max_chars=80)
+                result = report(template="api_reference", max_chars=80)
 
         assert result["truncated"] is True
         assert "## src/a.py" in result["markdown"]
@@ -493,7 +481,7 @@ class TestApiReference:
                 patch("shiori.report._conn"),
                 patch("shiori.report.db.get_code_chunks", return_value=dummy_chunks),
             ):
-            result = report(template="api_reference", prog_lang="python", path="src/")
+                result = report(template="api_reference", prog_lang="python", path="src/")
 
         assert result["markdown"] == ""
         assert result["truncated"] is False
@@ -505,7 +493,7 @@ class TestApiReference:
                 patch("shiori.report._conn"),
                 patch("shiori.report.db.get_code_chunks", return_value=[]),
             ):
-            result = report(template="api_reference", prog_lang="python", path="src/")
+                result = report(template="api_reference", prog_lang="python", path="src/")
 
         assert result["markdown"] == ""
         assert result["truncated"] is False
