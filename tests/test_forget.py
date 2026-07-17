@@ -56,7 +56,6 @@ class TestRepoScopedTablesCoversSchema:
             "chunks",
             "doc_files",
             "issue_items",
-            "pr_changes",
             "repo_index_state",
             "sync_state",
             "sync_runs",

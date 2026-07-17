@@ -1,7 +1,6 @@
-"""Unit tests for github_sync (issue #25, #54, #72, #73, #81).
+"""Unit tests for github_sync (issue #25, #72, #73, #81).
 
-_should_index allowlist logic, _sync_pr_changes head_sha comparison for
- skip/re-fetch logic, ChunkBuffer batch accumulation/flush,
+_should_index allowlist logic, ChunkBuffer batch accumulation/flush,
 _clean_text control character removal, _git_fetch_ref / _git_delete_ref.
 """
 
@@ -26,7 +25,6 @@ from shiori.github_sync import (
     _looks_minified,
     _propagate_issue_state,
     _should_index,
-    _sync_pr_changes,
     _sync_pr_reviews,
     sync_issues,
 )
@@ -236,92 +234,6 @@ class TestPropagateIssueState:
 
         _propagate_issue_state(conn, "o/r", 42, "open")
 
-
-# ===================================================================
-# _sync_pr_changes（issue #54）
-# ===================================================================
-
-
-class TestSyncPrChanges:
-    """_sync_pr_changes behavior."""
-
-    def test_skips_when_head_sha_unchanged(self):
-        client = MagicMock()
-        conn = MagicMock()
-
-        # PR detail response
-        client.get.return_value.raise_for_status.return_value = None
-        client.get.return_value.json.return_value = {
-            "head": {"sha": "abc1234"},
-        }
-
-        # mock get_pr_head_sha to return the same SHA
-        with patch("shiori.github_sync.get_pr_head_sha", return_value="abc1234"):
-            with patch("shiori.github_sync.upsert_pr_changes") as mock_upsert:
-                _sync_pr_changes(client, conn, "o/r", 42)
-
-        # files not fetched, upsert not called
-        mock_upsert.assert_not_called()
-
-    def test_fetches_files_when_head_sha_changed(self):
-        client = MagicMock()
-        conn = MagicMock()
-
-        # PR detail
-        client.get.side_effect = [
-            MagicMock(
-                raise_for_status=lambda: None,
-                json=lambda: {"head": {"sha": "newsha"}},
-            ),
-            # files
-            MagicMock(
-                raise_for_status=lambda: None,
-                json=lambda: [
-                    {"filename": "a.py", "status": "modified", "additions": 1, "deletions": 0, "changes": 1, "blob_url": "u"},
-                ],
-                links={},
-            ),
-        ]
-
-        with patch("shiori.github_sync.get_pr_head_sha", return_value="oldsha"):
-            with patch("shiori.github_sync.upsert_pr_changes") as mock_upsert:
-                _sync_pr_changes(client, conn, "o/r", 42)
-
-        mock_upsert.assert_called_once()
-
-    def test_fetches_files_when_no_previous_sha(self):
-        client = MagicMock()
-        conn = MagicMock()
-
-        client.get.side_effect = [
-            MagicMock(
-                raise_for_status=lambda: None,
-                json=lambda: {"head": {"sha": "abc"}},
-            ),
-            MagicMock(
-                raise_for_status=lambda: None,
-                json=lambda: [],
-                links={},
-            ),
-        ]
-
-        with patch("shiori.github_sync.get_pr_head_sha", return_value=None):
-            with patch("shiori.github_sync.upsert_pr_changes") as mock_upsert:
-                _sync_pr_changes(client, conn, "o/r", 42)
-
-        mock_upsert.assert_called_once()
-
-    def test_returns_early_when_no_head_sha_in_response(self):
-        client = MagicMock()
-        conn = MagicMock()
-
-        client.get.return_value.raise_for_status.return_value = None
-        client.get.return_value.json.return_value = {"head": {}}
-
-        with patch("shiori.github_sync.upsert_pr_changes") as mock_upsert:
-            _sync_pr_changes(client, conn, "o/r", 42)
-
-        mock_upsert.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -1017,3 +929,74 @@ class TestSyncIssuesCursor:
         # The cursor should be the API timestamp, not a fallback Z timestamp
         api_cursor = issues_calls[0][0][3]
         assert api_cursor == "2024-01-02T00:00:00Z"
+
+
+class TestSyncIssuesPrReviewGuard:
+    """sync_issues の PR review 同期ガード条件のテスト（issue #289）。"""
+
+    def _page_with_pr(self) -> list[dict]:
+        return [{
+            "number": 42,
+            "pull_request": {},  # PR であることを示す
+            "user": {"login": "alice", "type": "User"},
+            "title": "Test PR",
+            "body": "PR body",
+            "state": "open",
+            "html_url": "https://github.com/o/r/pull/42",
+            "created_at": "2024-01-01T00:00:00Z",
+            "updated_at": "2024-01-02T00:00:00Z",
+        }]
+
+    @patch("shiori.github_sync.get_cursor", return_value=None)
+    @patch("shiori.github_sync._api_pages_gen")
+    @patch("shiori.github_sync._upsert_issue_item")
+    @patch("shiori.github_sync._propagate_issue_state")
+    @patch("shiori.github_sync._should_index", return_value=False)
+    @patch("shiori.github_sync._sync_pr_reviews")
+    @patch("shiori.github_sync.set_cursor")
+    def test_dev_repo_calls_reviews(
+        self, mock_set, mock_reviews, mock_should,
+        mock_prop, mock_upsert, mock_pages, mock_cursor,
+    ):
+        """dev repo の diff sync では _sync_pr_reviews が呼ばれる。"""
+        settings = Settings()
+        settings.dev_repos = {"o/r"}
+        mock_pages.return_value = iter([self._page_with_pr()])
+        sync_issues(settings, MagicMock(), MagicMock(), "o/r", MagicMock(), buffer=None)
+        mock_reviews.assert_called_once()
+
+    @patch("shiori.github_sync.get_cursor", return_value=None)
+    @patch("shiori.github_sync._api_pages_gen")
+    @patch("shiori.github_sync._upsert_issue_item")
+    @patch("shiori.github_sync._propagate_issue_state")
+    @patch("shiori.github_sync._should_index", return_value=False)
+    @patch("shiori.github_sync._sync_pr_reviews")
+    @patch("shiori.github_sync.set_cursor")
+    def test_ref_repo_skips_reviews_on_diff_sync(
+        self, mock_set, mock_reviews, mock_should,
+        mock_prop, mock_upsert, mock_pages, mock_cursor,
+    ):
+        """ref repo の diff sync では _sync_pr_reviews は呼ばれない。"""
+        settings = Settings()
+        settings.dev_repos = ["other/repo"]  # o/r は dev ではない
+        mock_pages.return_value = iter([self._page_with_pr()])
+        sync_issues(settings, MagicMock(), MagicMock(), "o/r", MagicMock(), buffer=None)
+        mock_reviews.assert_not_called()
+
+    @patch("shiori.github_sync.get_cursor", return_value=None)
+    @patch("shiori.github_sync._api_pages_gen")
+    @patch("shiori.github_sync._upsert_issue_item")
+    @patch("shiori.github_sync._propagate_issue_state")
+    @patch("shiori.github_sync._should_index", return_value=False)
+    @patch("shiori.github_sync._sync_pr_reviews")
+    @patch("shiori.github_sync.set_cursor")
+    def test_ref_repo_calls_reviews_on_bulk(
+        self, mock_set, mock_reviews, mock_should,
+        mock_prop, mock_upsert, mock_pages, mock_cursor,
+    ):
+        """ref repo でも bulk 時は _sync_pr_reviews が呼ばれる。"""
+        settings = Settings()
+        settings.dev_repos = ["other/repo"]
+        mock_pages.return_value = iter([self._page_with_pr()])
+        sync_issues(settings, MagicMock(), MagicMock(), "o/r", MagicMock(), buffer=MagicMock())
+        mock_reviews.assert_called_once()

@@ -39,10 +39,8 @@ from .db import (
     bulk_insert_chunks,
     delete_chunks_by_key,
     get_cursor,
-    get_pr_head_sha,
     insert_chunk,
     set_cursor,
-    upsert_pr_changes,
 )
 from .embedding import Embedder
 from .github_auth import TokenProvider
@@ -754,52 +752,6 @@ def _index_item(
             )
 
 
-def _sync_pr_changes(
-    client: httpx.Client,
-    conn: psycopg.Connection,
-    repo: str,
-    issue_no: int,
-) -> None:
-    """Sync PR change file maps (issue #54).
-    GET /repos/{repo}/pulls/{issue_number}/files"""
-    # 1. Fetch PR details to get head_sha and base_sha
-    try:
-        resp = client.get(f"{API}/repos/{repo}/pulls/{issue_no}")
-        resp.raise_for_status()
-        pr_data = resp.json()
-        head_sha = pr_data.get("head", {}).get("sha")
-        base_sha = pr_data.get("base", {}).get("sha")
-        if not head_sha:
-            log.debug("PR #%d: could not obtain head_sha", issue_no)
-            return
-    except httpx.HTTPError as exc:
-        log.warning("PR #%d: failed to fetch details: %s", issue_no, exc)
-        return
-
-    # 2. Skip if head_sha unchanged
-    prev_sha = get_pr_head_sha(conn, repo, issue_no)
-    if prev_sha == head_sha:
-        log.debug("PR #%d: head_sha unchanged, skipping", issue_no)
-        return
-
-    # 3. Fetch file list
-    try:
-        files = _api_pages(
-            client,
-            f"{API}/repos/{repo}/pulls/{issue_no}/files",
-            {"per_page": 100},
-        )
-        log.debug("PR #%d: %d files fetched", issue_no, len(files))
-    except httpx.HTTPError as exc:
-        log.warning("PR #%d: failed to fetch file list: %s", issue_no, exc)
-        return
-
-    # 4. upsert
-    upsert_pr_changes(conn, repo, issue_no, head_sha, base_sha, files)
-    log.info("PR #%d: updated change file map (head_sha=%s, base_sha=%s, %d files)",
-             issue_no, head_sha[:7], (base_sha or "?")[:7], len(files))
-
-
 def _sync_pr_reviews(
     client: httpx.Client,
     conn: psycopg.Connection,
@@ -944,9 +896,11 @@ def sync_issues(
                         buffer=buffer,
                     )
                     n_indexed += 1
-                # Sync change file maps and review submissions for PRs
-                if kind == "pr":
-                    _sync_pr_changes(client, conn, repo, no)
+                # Sync review submissions for PRs (only dev repos during diff sync;
+                # all repos during bulk/rebuild).  Skips ref repos on diff sync
+                # because per-PR sequential API calls block the issues cursor
+                # on large repos (e.g. opencode: 113K issues).
+                if kind == "pr" and (buffer is not None or repo in settings.dev_repos):
                     _sync_pr_reviews(client, conn, embedder, settings, repo, no, buffer=buffer)
             if buffer is None:
                 conn.commit()
