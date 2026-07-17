@@ -5,12 +5,21 @@ from __future__ import annotations
 import threading
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from shiori import pipeline as sync_pipeline
 from shiori.mcp_server import (
     _ensure_phase1,
     _trigger_phase2,
     status,
 )
+
+
+@pytest.fixture(autouse=True)
+def _reset_pipeline_state():
+    sync_pipeline._phase2_in_flight.clear()
+    sync_pipeline._phase2_pending.clear()
+    sync_pipeline._phase1_last_fetch.clear()
 
 
 # ── _ensure_phase1: single-flight + debounce ──

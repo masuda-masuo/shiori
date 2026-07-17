@@ -170,7 +170,13 @@ def _trigger_phase2(repo: str) -> None:
             _drain_pending()
 
     t = threading.Thread(target=_run, daemon=True)
-    t.start()
+    try:
+        t.start()
+    except Exception:
+        with _phase2_lock:
+            _phase2_in_flight.discard(repo)
+        _phase2_semaphore.release()
+        raise
 
 
 def _drain_pending() -> None:
@@ -198,7 +204,13 @@ def _drain_pending() -> None:
             _drain_pending()
 
     t = threading.Thread(target=_next_run, daemon=True)
-    t.start()
+    try:
+        t.start()
+    except Exception:
+        with _phase2_lock:
+            _phase2_in_flight.discard(next_repo)
+        _phase2_semaphore.release()
+        raise
 
 
 def _do_sync(
