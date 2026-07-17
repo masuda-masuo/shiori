@@ -183,8 +183,6 @@ def _api_reference_data(
     rendered to Markdown via _api_reference_to_markdown() or consumed
     directly by dashboards.
     """
-    from .config import load_settings
-    settings = load_settings()
     base = os.path.realpath(settings.repo_dir(target_repo))
 
     search_dir = os.path.join(base, path_prefix) if path_prefix else base
