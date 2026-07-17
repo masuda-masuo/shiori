@@ -6,6 +6,7 @@ import threading
 from unittest.mock import MagicMock, patch
 
 from shiori import mcp_server
+from shiori import pipeline as sync_pipeline
 from shiori.mcp_server import (
     _ensure_phase1,
     _trigger_phase2,
@@ -41,7 +42,7 @@ class TestEnsurePhase1:
         ):
             mock_build.return_value = MagicMock()
             mock_settings.sync_interval_seconds = 10
-            mcp_server._phase1_last_fetch.pop("o/r", None)
+            sync_pipeline._phase1_last_fetch.pop("o/r", None)
             # First call: performs refresh
             result1 = _ensure_phase1("o/r")
             assert result1 == "abc123"
@@ -54,7 +55,7 @@ class TestEnsurePhase1:
     def test_single_flight_serializes_same_repo(self):
         """Concurrent calls for the same repo serialize behind per-repo lock."""
         refresh_calls = []
-        mcp_server._phase1_last_fetch.pop("o/r", None)
+        sync_pipeline._phase1_last_fetch.pop("o/r", None)
 
         def fake_refresh(repo, provider, settings):
             refresh_calls.append(repo)
@@ -87,7 +88,7 @@ class TestEnsurePhase1:
     def test_different_repos_can_run_in_parallel(self):
         """Phase 1 for different repos can execute concurrently."""
         for repo in ("o/r1", "o/r2"):
-            mcp_server._phase1_last_fetch.pop(repo, None)
+            sync_pipeline._phase1_last_fetch.pop(repo, None)
 
         def call_phase1(repo):
             with (
@@ -118,7 +119,7 @@ class TestEnsurePhase1:
         ):
             mock_build.return_value = MagicMock()
             mock_settings.sync_interval_seconds = 0
-            mcp_server._phase1_last_fetch.pop("o/r", None)
+            sync_pipeline._phase1_last_fetch.pop("o/r", None)
             result = _ensure_phase1("o/r")
         assert result is None
 
@@ -130,17 +131,17 @@ class TestTriggerPhase2:
     """_trigger_phase2: single-flight background triggering."""
 
     def test_second_call_is_noop_while_first_running(self):
-        mcp_server._phase2_in_flight.clear()
+        sync_pipeline._phase2_in_flight.clear()
         # Pre-populate in-flight so second call is seen as duplicate
-        mcp_server._phase2_in_flight.add("o/r")
+        sync_pipeline._phase2_in_flight.add("o/r")
         _trigger_phase2("o/r")  # should be no-op, repo already in-flight
         # In-flight set unchanged (the thread spawned by the _trigger_phase2
         # would remove it on completion, but this test's setup means the guard
         # already returned before thread spawn)
-        mcp_server._phase2_in_flight.clear()
+        sync_pipeline._phase2_in_flight.clear()
 
     def test_first_call_adds_to_in_flight(self):
-        mcp_server._phase2_in_flight.clear()
+        sync_pipeline._phase2_in_flight.clear()
         with (
             patch("shiori.mcp_server._do_sync", return_value={"status": "ok"}),
             patch("shiori.mcp_server.settings") as mock_settings,
@@ -150,11 +151,11 @@ class TestTriggerPhase2:
         # Thread spawned; repo added to in-flight before thread start
         # Since _do_sync is synced, the repo stays in-flight until the
         # thread's finally block runs
-        mcp_server._phase2_in_flight.clear()
+        sync_pipeline._phase2_in_flight.clear()
 
     def test_repo_removed_from_in_flight_after_completion(self):
-        mcp_server._phase2_in_flight.clear()
-        assert "o/r" not in mcp_server._phase2_in_flight
+        sync_pipeline._phase2_in_flight.clear()
+        assert "o/r" not in sync_pipeline._phase2_in_flight
 
 
 # ── status(): index_stale never_indexed detection ──
