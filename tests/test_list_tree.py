@@ -346,7 +346,7 @@ class TestListTreeEndToEnd:
                 patch("shiori.mcp_server.settings") as mock_settings,
                 patch("shiori.mcp_server._conn", side_effect=_fake_conn),
                 patch(
-                    "shiori.walk_utils._walk_code_files",
+                    "shiori.mcp_server._walk_code_files",
                     return_value=mock_walk_return,
                 ),
             ):
