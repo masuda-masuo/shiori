@@ -402,10 +402,6 @@ def _stats_to_markdown(stats: dict[str, Any]) -> str:
     return "\n".join([header, sep] + md_rows + [total_row])
 
 
-def _report_stats(target_path: str) -> str:
-    """Run tokei and format output as a Markdown table."""
-    return _stats_to_markdown(_stats_data(target_path))
-
 
 def _symbol_index_data(
     target_path: str,
