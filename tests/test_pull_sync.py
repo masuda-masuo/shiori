@@ -239,7 +239,7 @@ class TestCrossRepoSearchPhase1:
             patch("shiori.mcp_server.settings") as mock_settings,
             patch("shiori.mcp_server.search.semantic_search", return_value=[]),
             patch("shiori.mcp_server._resolve_repo_filter", return_value=None),
-            patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
+            patch("shiori.mcp_server._resolve_repos", return_value=["r1", "r2", "r3"]),
             patch("shiori.mcp_server._ensure_phase1", side_effect=fake_phase1),
             patch("shiori.mcp_server._trigger_phase2", side_effect=fake_phase2),
         ):

@@ -35,8 +35,8 @@ class TestResolveRepo:
 
     def test_infer_from_cwd_matches(self, monkeypatch):
         """Repo inferred from cwd is returned when it matches."""
-        monkeypatch.setattr("shiori.mcp_server.settings.repos", ["o/r1", "o/r2"])
-        with patch("shiori.mcp_server._infer_repo_from_cwd", return_value="o/r2"):
+        monkeypatch.setattr("shiori.tools.common.settings.repos", ["o/r1", "o/r2"])
+        with patch("shiori.tools.common._infer_repo_from_cwd", return_value="o/r2"):
             assert _resolve_repo(None) == "o/r2"
 
     def test_no_repos_raises(self, monkeypatch):

@@ -239,6 +239,7 @@ class TestListTreeSourceTypeValidation:
         """
         with (
             patch("shiori.mcp_server.settings") as mock_settings,
+            patch("shiori.tools.common.settings", mock_settings),
             patch("shiori.mcp_server._conn"),
         ):
             mock_settings.repos = ["test/repo"]
@@ -259,7 +260,8 @@ class TestListTreeSourceTypeValidation:
     def test_invalid_raises(self):
         """Invalid source_type raises ValueError"""
         with (
-            patch("shiori.mcp_server.settings"),
+            patch("shiori.mcp_server.settings") as mock_settings,
+            patch("shiori.tools.common.settings", mock_settings),
             patch("shiori.mcp_server._conn"),
             pytest.raises(ValueError, match="Invalid source_type"),
         ):
@@ -268,7 +270,8 @@ class TestListTreeSourceTypeValidation:
     def test_empty_string_raises(self):
         """Empty string is also invalid"""
         with (
-            patch("shiori.mcp_server.settings"),
+            patch("shiori.mcp_server.settings") as mock_settings,
+            patch("shiori.tools.common.settings", mock_settings),
             patch("shiori.mcp_server._conn"),
             pytest.raises(ValueError, match="Invalid source_type"),
         ):
@@ -277,7 +280,8 @@ class TestListTreeSourceTypeValidation:
     def test_random_string_raises(self):
         """Arbitrary string is also invalid"""
         with (
-            patch("shiori.mcp_server.settings"),
+            patch("shiori.mcp_server.settings") as mock_settings,
+            patch("shiori.tools.common.settings", mock_settings),
             patch("shiori.mcp_server._conn"),
             pytest.raises(ValueError, match="Invalid source_type"),
         ):
@@ -344,6 +348,7 @@ class TestListTreeEndToEnd:
         if mock_walk_return is not None:
             with (
                 patch("shiori.mcp_server.settings") as mock_settings,
+                patch("shiori.tools.common.settings", mock_settings),
                 patch("shiori.mcp_server._conn", side_effect=_fake_conn),
                 patch(
                     "shiori.mcp_server._walk_code_files",
@@ -356,6 +361,7 @@ class TestListTreeEndToEnd:
         else:
             with (
                 patch("shiori.mcp_server.settings") as mock_settings,
+                patch("shiori.tools.common.settings", mock_settings),
                 patch("shiori.mcp_server._conn", side_effect=_fake_conn),
             ):
                 mock_settings.repos = ["test/repo"]
