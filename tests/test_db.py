@@ -6,12 +6,14 @@ from unittest.mock import MagicMock
 
 from shiori.db import (
     bulk_insert_chunks,
-    create_heavy_indexes,
-    drop_heavy_indexes,
     get_code_chunks,
     get_sync_runs,
-    migrate_light,
     record_sync_attempt,
+)
+from shiori.schema import (
+    create_heavy_indexes,
+    drop_heavy_indexes,
+    migrate_light,
 )
 
 

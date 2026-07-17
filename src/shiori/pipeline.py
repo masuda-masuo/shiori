@@ -17,7 +17,7 @@ from typing import Any
 
 import psycopg
 
-from . import db
+from . import db, schema
 from .config import Settings, load_settings
 from .embedding import Embedder
 from .github_auth import build_token_provider
@@ -252,9 +252,9 @@ def _do_sync(
 
                 if is_bulk:
                     log.info("bulk path detected (rebuild=%s), using light schema + deferred indexes", rebuild)
-                    db.migrate_light(conn, settings)
+                    schema.migrate_light(conn, settings)
                 else:
-                    db.migrate(conn, settings)
+                    schema.migrate(conn, settings)
 
                 with conn.cursor() as cur:
                     cur.execute("SELECT pg_try_advisory_lock(%s)", (SYNC_LOCK_KEY,))
@@ -275,9 +275,9 @@ def _do_sync(
                 if is_bulk:
                     if rebuild:
                         log.warning("rebuild: discarding existing index and sync cursors")
-                        db.truncate_all_repos(conn)
+                        schema.truncate_all_repos(conn)
                         conn.commit()
-                    db.drop_heavy_indexes(conn)
+                    schema.drop_heavy_indexes(conn)
 
                 buffer: ChunkBuffer | None = None
                 if is_bulk:
@@ -363,7 +363,7 @@ def _do_sync(
                             )
 
                 if is_bulk:
-                    db.create_heavy_indexes(conn)
+                    schema.create_heavy_indexes(conn)
 
                 if failed_repos:
                     detail = "; ".join(f"{r}: {e}" for r, e in failed_repos.items())

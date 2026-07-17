@@ -15,7 +15,7 @@ import httpx
 
 from mcp.server.fastmcp import FastMCP
 
-from . import db, search
+from . import db, search, schema
 from .dashboard import register_dashboard
 from .report import (
     _REPORT_TEMPLATES,
@@ -1406,6 +1406,6 @@ register_dashboard(mcp)
 
 def run(transport: Literal["stdio", "sse", "streamable-http"] = "streamable-http") -> None:
     with _conn() as conn:
-        db.migrate(conn, settings)
+        schema.migrate(conn, settings)
     log.info("shiori MCP server starting (%s), pull-type sync (#236)", transport)
     mcp.run(transport=transport)

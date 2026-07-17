@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from unittest.mock import MagicMock
 
-from shiori.db import (
+from shiori.schema import (
     REPO_SCOPED_TABLES,
     SCHEMA_SQL,
     forget_repo,

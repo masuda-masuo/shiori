@@ -222,8 +222,8 @@ class TestRunIngestSyncAttemptRecording:
 
         with (
             patch("shiori.ingest.db.connect", return_value=mock_conn),
-            patch("shiori.ingest.db.migrate"),
-            patch("shiori.ingest.db.migrate_light"),
+            patch("shiori.ingest.schema.migrate"),
+            patch("shiori.ingest.schema.migrate_light"),
             patch("shiori.ingest._is_bulk_path", return_value=False),
             patch("shiori.ingest.build_token_provider", return_value=MagicMock()),
             patch("shiori.ingest.Embedder", return_value=MagicMock()),
@@ -257,8 +257,8 @@ class TestRunIngestSyncAttemptRecording:
 
         with (
             patch("shiori.ingest.db.connect", return_value=mock_conn),
-            patch("shiori.ingest.db.migrate"),
-            patch("shiori.ingest.db.migrate_light"),
+            patch("shiori.ingest.schema.migrate"),
+            patch("shiori.ingest.schema.migrate_light"),
             patch("shiori.ingest._is_bulk_path", return_value=False),
             patch("shiori.ingest.build_token_provider", return_value=MagicMock()),
             patch("shiori.ingest.Embedder", return_value=MagicMock()),
@@ -283,8 +283,8 @@ class TestRunIngestSyncAttemptRecording:
 
         with (
             patch("shiori.ingest.db.connect", return_value=mock_conn),
-            patch("shiori.ingest.db.migrate"),
-            patch("shiori.ingest.db.migrate_light"),
+            patch("shiori.ingest.schema.migrate"),
+            patch("shiori.ingest.schema.migrate_light"),
             patch("shiori.ingest._is_bulk_path", return_value=False),
             patch("shiori.ingest.build_token_provider", return_value=MagicMock()),
             patch("shiori.ingest.Embedder", return_value=MagicMock()),
@@ -471,7 +471,7 @@ class TestDoSyncMidStageFailureRecording:
             patch("shiori.pipeline._conn", return_value=mock_conn) as mock_conn_factory,
             patch("shiori.pipeline._is_bulk_path", return_value=False),
             patch(
-                "shiori.mcp_server.db.migrate",
+                "shiori.pipeline.schema.migrate",
                 side_effect=RuntimeError("migrate failed"),
             ),
             patch("shiori.mcp_server.db.record_sync_attempt") as mock_record_attempt,
@@ -512,7 +512,7 @@ class TestDoSyncMidStageFailureRecording:
             patch("shiori.pipeline._get_embedder", return_value=MagicMock()),
             patch("shiori.pipeline._conn", return_value=mock_conn),
             patch("shiori.pipeline._is_bulk_path", return_value=False),
-            patch("shiori.mcp_server.db.migrate"),
+            patch("shiori.pipeline.schema.migrate"),
             patch("shiori.mcp_server.db.record_sync_attempt") as mock_record_attempt,
         ):
             mock_settings.repos = ["owner/repo"]
@@ -564,7 +564,7 @@ class TestDoSyncMidStageFailureRecording:
             patch("shiori.pipeline._conn", return_value=mock_conn),
             patch("shiori.pipeline._is_bulk_path", return_value=False),
             patch(
-                "shiori.mcp_server.db.migrate",
+                "shiori.pipeline.schema.migrate",
                 side_effect=RuntimeError("migrate failed"),
             ),
             patch("shiori.mcp_server.db.record_sync_attempt"),
@@ -619,7 +619,7 @@ class TestDoSyncPerRepoContinueOnFailure:
             patch("shiori.pipeline._get_embedder", return_value=MagicMock()),
             patch("shiori.pipeline._conn", return_value=mock_conn),
             patch("shiori.pipeline._is_bulk_path", return_value=False),
-            patch("shiori.mcp_server.db.migrate"),
+            patch("shiori.pipeline.schema.migrate"),
             patch("shiori.pipeline.sync_docs", side_effect=fake_sync_docs),
             patch("shiori.pipeline.sync_issues", return_value=2),
             patch("shiori.pipeline.sync_code", return_value=3),
@@ -657,7 +657,7 @@ class TestDoSyncPerRepoContinueOnFailure:
             patch("shiori.pipeline._get_embedder", return_value=MagicMock()),
             patch("shiori.pipeline._conn", return_value=mock_conn),
             patch("shiori.pipeline._is_bulk_path", return_value=False),
-            patch("shiori.mcp_server.db.migrate"),
+            patch("shiori.pipeline.schema.migrate"),
             patch("shiori.pipeline.sync_docs", return_value=1),
             patch("shiori.pipeline.sync_issues", return_value=2),
             patch("shiori.pipeline.sync_code", return_value=3),
@@ -694,8 +694,8 @@ class TestDoSyncPerRepoContinueOnFailure:
             patch("shiori.pipeline._get_embedder", return_value=MagicMock()),
             patch("shiori.pipeline._conn", return_value=mock_conn),
             patch("shiori.pipeline._is_bulk_path", return_value=True),
-            patch("shiori.mcp_server.db.migrate_light"),
-            patch("shiori.mcp_server.db.drop_heavy_indexes"),
+            patch("shiori.pipeline.schema.migrate_light"),
+            patch("shiori.pipeline.schema.drop_heavy_indexes"),
             patch("shiori.pipeline.ChunkBuffer", return_value=MagicMock()),
             patch("shiori.pipeline.sync_docs", side_effect=fake_sync_docs),
             patch("shiori.pipeline.sync_issues", return_value=2),
@@ -748,8 +748,8 @@ class TestRunIngestPerRepoContinueOnFailure:
 
         with (
             patch("shiori.ingest.db.connect", return_value=mock_conn),
-            patch("shiori.ingest.db.migrate"),
-            patch("shiori.ingest.db.migrate_light"),
+            patch("shiori.ingest.schema.migrate"),
+            patch("shiori.ingest.schema.migrate_light"),
             patch("shiori.ingest._is_bulk_path", return_value=False),
             patch("shiori.ingest.build_token_provider", return_value=MagicMock()),
             patch("shiori.ingest.Embedder", return_value=MagicMock()),
@@ -781,8 +781,8 @@ class TestRunIngestPerRepoContinueOnFailure:
 
         with (
             patch("shiori.ingest.db.connect", return_value=mock_conn),
-            patch("shiori.ingest.db.migrate"),
-            patch("shiori.ingest.db.migrate_light"),
+            patch("shiori.ingest.schema.migrate"),
+            patch("shiori.ingest.schema.migrate_light"),
             patch("shiori.ingest._is_bulk_path", return_value=False),
             patch("shiori.ingest.build_token_provider", return_value=MagicMock()),
             patch("shiori.ingest.Embedder", return_value=MagicMock()),
@@ -815,10 +815,10 @@ class TestRunIngestPerRepoContinueOnFailure:
 
         with (
             patch("shiori.ingest.db.connect", return_value=mock_conn),
-            patch("shiori.ingest.db.migrate"),
-            patch("shiori.ingest.db.migrate_light"),
+            patch("shiori.ingest.schema.migrate"),
+            patch("shiori.ingest.schema.migrate_light"),
             patch("shiori.ingest._is_bulk_path", return_value=True),
-            patch("shiori.ingest.db.drop_heavy_indexes"),
+            patch("shiori.ingest.schema.drop_heavy_indexes"),
             patch("shiori.ingest.ChunkBuffer", return_value=MagicMock()),
             patch("shiori.ingest.build_token_provider", return_value=MagicMock()),
             patch("shiori.ingest.Embedder", return_value=MagicMock()),
@@ -871,7 +871,7 @@ class TestDoSyncOperationalErrorHandling:
             patch("shiori.pipeline._get_embedder", return_value=MagicMock()),
             patch("shiori.pipeline._conn", return_value=mock_conn),
             patch("shiori.pipeline._is_bulk_path", return_value=False),
-            patch("shiori.mcp_server.db.migrate"),
+            patch("shiori.pipeline.schema.migrate"),
             patch(
                 "shiori.pipeline.sync_docs",
                 side_effect=fake_sync_docs,
@@ -927,7 +927,7 @@ class TestDoSyncOperationalErrorHandling:
             patch("shiori.pipeline._get_embedder", return_value=MagicMock()),
             patch("shiori.pipeline._conn", side_effect=fake_conn),
             patch("shiori.pipeline._is_bulk_path", return_value=False),
-            patch("shiori.mcp_server.db.migrate"),
+            patch("shiori.pipeline.schema.migrate"),
             patch(
                 "shiori.pipeline.sync_docs",
                 side_effect=fake_sync_docs,
