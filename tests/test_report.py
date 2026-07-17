@@ -2,11 +2,24 @@
 
 from __future__ import annotations
 
+import contextlib
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from shiori.mcp_server import report
+
+
+@contextlib.contextmanager
+def _report_setup(mock_subprocess: bool = True):
+    with contextlib.ExitStack() as stack:
+        stack.enter_context(patch("shiori.mcp_server._resolve_repo", return_value="o/r"))
+        stack.enter_context(patch("shiori.mcp_server.os.path.isdir", return_value=True))
+        stack.enter_context(patch("shiori.mcp_server.os.path.realpath", side_effect=lambda p: p))
+        if mock_subprocess:
+            yield stack.enter_context(patch("shiori.report.subprocess.run"))
+        else:
+            yield None
 
 
 class TestReport:
@@ -15,12 +28,7 @@ class TestReport:
     def test_stats_basic(self):
         """stats template returns markdown table."""
         tokei_out = '{"Python": {"code": 10, "comments": 2, "blanks": 3, "reports": [{"name": "f.py", "stats": {"code": 10, "comments": 2, "blanks": 3}}]}, "Total": {"code": 10, "comments": 2, "blanks": 3}}'
-        with (
-            patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
-            patch("shiori.mcp_server.os.path.isdir", return_value=True),
-            patch("shiori.mcp_server.os.path.realpath", side_effect=lambda p: p),
-            patch("shiori.mcp_server.subprocess.run") as mock_run,
-        ):
+        with _report_setup() as mock_run:
             mock_result = MagicMock()
             mock_result.stdout = tokei_out
             mock_result.returncode = 0
@@ -42,12 +50,7 @@ class TestReport:
   "Rust": { "code": 20, "comments": 4, "blanks": 5, "reports": [{"name": "b.rs", "stats": {"code": 20, "comments": 4, "blanks": 5}}] },
   "Total": { "code": 30, "comments": 6, "blanks": 8 }
 }'''
-        with (
-            patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
-            patch("shiori.mcp_server.os.path.isdir", return_value=True),
-            patch("shiori.mcp_server.os.path.realpath", side_effect=lambda p: p),
-            patch("shiori.mcp_server.subprocess.run") as mock_run,
-        ):
+        with _report_setup() as mock_run:
             mock_result = MagicMock()
             mock_result.stdout = tokei_out
             mock_result.returncode = 0
@@ -63,22 +66,14 @@ class TestReport:
 
     def test_unknown_template(self):
         """Unknown template name raises ValueError with valid list."""
-        with (
-            patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
-            patch("shiori.mcp_server.os.path.isdir", return_value=True),
-            patch("shiori.mcp_server.os.path.realpath", side_effect=lambda p: p),
-        ):
+        with _report_setup(mock_subprocess=False):
             with pytest.raises(ValueError, match="Unknown template"):
                 report(template="nonexistent")
 
     def test_tokei_not_installed(self):
         """Missing tokei raises RuntimeError."""
-        with (
-            patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
-            patch("shiori.mcp_server.os.path.isdir", return_value=True),
-            patch("shiori.mcp_server.os.path.realpath", side_effect=lambda p: p),
-            patch("shiori.mcp_server.subprocess.run", side_effect=FileNotFoundError),
-        ):
+        with _report_setup() as mock_run:
+            mock_run.side_effect = FileNotFoundError
             with pytest.raises(RuntimeError, match="tokei is not installed"):
                 report(template="stats")
 
@@ -90,12 +85,7 @@ class TestReport:
   "Python": { "code": 3, "comments": 0, "blanks": 0, "reports": [{"name": "a.py", "stats": {"code": 3, "comments": 0, "blanks": 0}}] },
   "Total": { "code": 6, "comments": 0, "blanks": 0 }
 }'''
-        with (
-            patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
-            patch("shiori.mcp_server.os.path.isdir", return_value=True),
-            patch("shiori.mcp_server.os.path.realpath", side_effect=lambda p: p),
-            patch("shiori.mcp_server.subprocess.run") as mock_run,
-        ):
+        with _report_setup() as mock_run:
             mock_result = MagicMock()
             mock_result.stdout = tokei_out
             mock_result.returncode = 0
@@ -112,12 +102,7 @@ class TestReport:
     def test_repo_path_param(self):
         """path parameter scopes tokei to subdirectory."""
         tokei_out = '{"Python": { "code": 1, "comments": 0, "blanks": 0, "reports": [{"name": "a.py", "stats": {"code": 1, "comments": 0, "blanks": 0}}] }, "Total": { "code": 1, "comments": 0, "blanks": 0 }}'
-        with (
-            patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
-            patch("shiori.mcp_server.os.path.isdir", return_value=True),
-            patch("shiori.mcp_server.os.path.realpath", side_effect=lambda p: p),
-            patch("shiori.mcp_server.subprocess.run") as mock_run,
-        ):
+        with _report_setup() as mock_run:
             mock_result = MagicMock()
             mock_result.stdout = tokei_out
             mock_result.returncode = 0
@@ -145,12 +130,7 @@ class TestSymbolIndex:
 
     def test_basic(self):
         """Basic symbol_index returns markdown table."""
-        with (
-            patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
-            patch("shiori.mcp_server.os.path.isdir", return_value=True),
-            patch("shiori.mcp_server.os.path.realpath", side_effect=lambda p: p),
-            patch("shiori.mcp_server.subprocess.run") as mock_run,
-        ):
+        with _report_setup() as mock_run:
             mock_result = MagicMock()
             mock_result.stdout = NDJSON_SYMBOLS
             mock_result.returncode = 0
@@ -170,12 +150,7 @@ class TestSymbolIndex:
 
     def test_kind_filter(self):
         """kind parameter filters to matching symbol kinds."""
-        with (
-            patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
-            patch("shiori.mcp_server.os.path.isdir", return_value=True),
-            patch("shiori.mcp_server.os.path.realpath", side_effect=lambda p: p),
-            patch("shiori.mcp_server.subprocess.run") as mock_run,
-        ):
+        with _report_setup() as mock_run:
             mock_result = MagicMock()
             mock_result.stdout = NDJSON_SYMBOLS
             mock_result.returncode = 0
@@ -191,12 +166,7 @@ class TestSymbolIndex:
 
     def test_public_only(self):
         """public_only=True excludes private/protected symbols."""
-        with (
-            patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
-            patch("shiori.mcp_server.os.path.isdir", return_value=True),
-            patch("shiori.mcp_server.os.path.realpath", side_effect=lambda p: p),
-            patch("shiori.mcp_server.subprocess.run") as mock_run,
-        ):
+        with _report_setup() as mock_run:
             mock_result = MagicMock()
             mock_result.stdout = NDJSON_SYMBOLS
             mock_result.returncode = 0
@@ -217,12 +187,7 @@ class TestSymbolIndex:
 {"name":"visible","path":"/data/repos/o__r/src/a.py","line":1,"kind":"function"}
 {"name":"hidden","path":"/data/repos/o__r/src/b.py","line":2,"kind":"function","access":"private"}
 """
-        with (
-            patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
-            patch("shiori.mcp_server.os.path.isdir", return_value=True),
-            patch("shiori.mcp_server.os.path.realpath", side_effect=lambda p: p),
-            patch("shiori.mcp_server.subprocess.run") as mock_run,
-        ):
+        with _report_setup() as mock_run:
             mock_result = MagicMock()
             mock_result.stdout = ndjson
             mock_result.returncode = 0
@@ -240,12 +205,7 @@ class TestSymbolIndex:
             '{{"name":"s{}","path":"/data/repos/o__r/f.py","line":{},"kind":"function","access":"public"}}'.format(i, i)
             for i in range(10)
         )
-        with (
-            patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
-            patch("shiori.mcp_server.os.path.isdir", return_value=True),
-            patch("shiori.mcp_server.os.path.realpath", side_effect=lambda p: p),
-            patch("shiori.mcp_server.subprocess.run") as mock_run,
-        ):
+        with _report_setup() as mock_run:
             mock_result = MagicMock()
             mock_result.stdout = lines
             mock_result.returncode = 0
@@ -259,23 +219,14 @@ class TestSymbolIndex:
 
     def test_ctags_not_installed(self):
         """Missing ctags raises RuntimeError."""
-        with (
-            patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
-            patch("shiori.mcp_server.os.path.isdir", return_value=True),
-            patch("shiori.mcp_server.os.path.realpath", side_effect=lambda p: p),
-            patch("shiori.mcp_server.subprocess.run", side_effect=FileNotFoundError),
-        ):
+        with _report_setup() as mock_run:
+            mock_run.side_effect = FileNotFoundError
             with pytest.raises(RuntimeError, match="universal-ctags is not installed"):
                 report(template="symbol_index")
 
     def test_path_param(self):
         """path parameter is passed to ctags target."""
-        with (
-            patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
-            patch("shiori.mcp_server.os.path.isdir", return_value=True),
-            patch("shiori.mcp_server.os.path.realpath", side_effect=lambda p: p),
-            patch("shiori.mcp_server.subprocess.run") as mock_run,
-        ):
+        with _report_setup() as mock_run:
             mock_result = MagicMock()
             mock_result.stdout = ""
             mock_result.returncode = 0
@@ -304,12 +255,7 @@ class TestModuleTree:
 
     def test_basic(self):
         """Basic module_tree returns Mermaid mindmap."""
-        with (
-            patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
-            patch("shiori.mcp_server.os.path.isdir", return_value=True),
-            patch("shiori.mcp_server.os.path.realpath", side_effect=lambda p: p),
-            patch("shiori.mcp_server.subprocess.run") as mock_run,
-        ):
+        with _report_setup() as mock_run:
             mock_result = MagicMock()
             mock_result.stdout = NDJSON_MODULE_TREE
             mock_result.returncode = 0
@@ -332,12 +278,7 @@ class TestModuleTree:
 
     def test_symbol_hierarchy(self):
         """Symbols are nested under files; scoped symbols under parents."""
-        with (
-            patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
-            patch("shiori.mcp_server.os.path.isdir", return_value=True),
-            patch("shiori.mcp_server.os.path.realpath", side_effect=lambda p: p),
-            patch("shiori.mcp_server.subprocess.run") as mock_run,
-        ):
+        with _report_setup() as mock_run:
             mock_result = MagicMock()
             mock_result.stdout = NDJSON_MODULE_TREE
             mock_result.returncode = 0
@@ -360,12 +301,7 @@ class TestModuleTree:
                 '{{"name":"f{}","path":"/data/repos/o__r/src/a.py","line":{},"kind":"function","access":"public"}}'.format(i, i)
             )
         ndjson = "\n".join(ndjson_lines)
-        with (
-            patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
-            patch("shiori.mcp_server.os.path.isdir", return_value=True),
-            patch("shiori.mcp_server.os.path.realpath", side_effect=lambda p: p),
-            patch("shiori.mcp_server.subprocess.run") as mock_run,
-        ):
+        with _report_setup() as mock_run:
             mock_result = MagicMock()
             mock_result.stdout = ndjson
             mock_result.returncode = 0
@@ -385,12 +321,7 @@ class TestModuleTree:
 
     def test_degrade_empty(self):
         """Degradation with empty tree produces valid mindmap."""
-        with (
-            patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
-            patch("shiori.mcp_server.os.path.isdir", return_value=True),
-            patch("shiori.mcp_server.os.path.realpath", side_effect=lambda p: p),
-            patch("shiori.mcp_server.subprocess.run") as mock_run,
-        ):
+        with _report_setup() as mock_run:
             mock_result = MagicMock()
             mock_result.stdout = ""
             mock_result.returncode = 0
@@ -406,12 +337,7 @@ class TestModuleTree:
 
     def test_path_param(self):
         """path parameter scopes ctags to subdirectory."""
-        with (
-            patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
-            patch("shiori.mcp_server.os.path.isdir", return_value=True),
-            patch("shiori.mcp_server.os.path.realpath", side_effect=lambda p: p),
-            patch("shiori.mcp_server.subprocess.run") as mock_run,
-        ):
+        with _report_setup() as mock_run:
             mock_result = MagicMock()
             mock_result.stdout = ""
             mock_result.returncode = 0
@@ -425,23 +351,14 @@ class TestModuleTree:
 
     def test_ctags_not_installed(self):
         """Missing ctags raises RuntimeError."""
-        with (
-            patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
-            patch("shiori.mcp_server.os.path.isdir", return_value=True),
-            patch("shiori.mcp_server.os.path.realpath", side_effect=lambda p: p),
-            patch("shiori.mcp_server.subprocess.run", side_effect=FileNotFoundError),
-        ):
+        with _report_setup() as mock_run:
+            mock_run.side_effect = FileNotFoundError
             with pytest.raises(RuntimeError, match="universal-ctags is not installed"):
                 report(template="module_tree")
 
     def test_no_symbols(self):
         """Repo with no symbols produces mindmap with dir+file only."""
-        with (
-            patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
-            patch("shiori.mcp_server.os.path.isdir", return_value=True),
-            patch("shiori.mcp_server.os.path.realpath", side_effect=lambda p: p),
-            patch("shiori.mcp_server.subprocess.run") as mock_run,
-        ):
+        with _report_setup() as mock_run:
             mock_result = MagicMock()
             mock_result.stdout = ""
             mock_result.returncode = 0
@@ -486,14 +403,12 @@ class TestApiReference:
             },
         ]
 
-        with (
-            patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
-            patch("shiori.mcp_server.os.path.isdir", return_value=True),
-            patch("shiori.mcp_server.os.path.realpath", side_effect=lambda p: p),
-            patch("shiori.mcp_server._conn"),
-            patch("shiori.mcp_server.db.get_code_chunks", return_value=dummy_chunks) as mock_get,
-        ):
-            result = report(template="api_reference", prog_lang="python", path="src/")
+        with _report_setup(mock_subprocess=False):
+            with (
+                patch("shiori.report._conn"),
+                patch("shiori.report.db.get_code_chunks", return_value=dummy_chunks) as mock_get,
+            ):
+                result = report(template="api_reference", prog_lang="python", path="src/")
 
         mock_get.assert_called_once_with(
             mock_get.call_args[0][0],  # conn
@@ -537,14 +452,12 @@ class TestApiReference:
             },
         ]
 
-        with (
-            patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
-            patch("shiori.mcp_server.os.path.isdir", return_value=True),
-            patch("shiori.mcp_server.os.path.realpath", side_effect=lambda p: p),
-            patch("shiori.mcp_server._conn"),
-            patch("shiori.mcp_server.db.get_code_chunks", return_value=dummy_chunks),
-        ):
-            result = report(template="api_reference", max_chars=80)
+        with _report_setup(mock_subprocess=False):
+            with (
+                patch("shiori.report._conn"),
+                patch("shiori.report.db.get_code_chunks", return_value=dummy_chunks),
+            ):
+                result = report(template="api_reference", max_chars=80)
 
         assert result["truncated"] is True
         assert "## src/a.py" in result["markdown"]
@@ -563,28 +476,24 @@ class TestApiReference:
             },
         ]
 
-        with (
-            patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
-            patch("shiori.mcp_server.os.path.isdir", return_value=True),
-            patch("shiori.mcp_server.os.path.realpath", side_effect=lambda p: p),
-            patch("shiori.mcp_server._conn"),
-            patch("shiori.mcp_server.db.get_code_chunks", return_value=dummy_chunks),
-        ):
-            result = report(template="api_reference", prog_lang="python", path="src/")
+        with _report_setup(mock_subprocess=False):
+            with (
+                patch("shiori.report._conn"),
+                patch("shiori.report.db.get_code_chunks", return_value=dummy_chunks),
+            ):
+                result = report(template="api_reference", prog_lang="python", path="src/")
 
         assert result["markdown"] == ""
         assert result["truncated"] is False
 
     def test_empty_results(self):
         """api_reference returns empty string and truncated=False when no chunks are returned."""
-        with (
-            patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
-            patch("shiori.mcp_server.os.path.isdir", return_value=True),
-            patch("shiori.mcp_server.os.path.realpath", side_effect=lambda p: p),
-            patch("shiori.mcp_server._conn"),
-            patch("shiori.mcp_server.db.get_code_chunks", return_value=[]),
-        ):
-            result = report(template="api_reference", prog_lang="python", path="src/")
+        with _report_setup(mock_subprocess=False):
+            with (
+                patch("shiori.report._conn"),
+                patch("shiori.report.db.get_code_chunks", return_value=[]),
+            ):
+                result = report(template="api_reference", prog_lang="python", path="src/")
 
         assert result["markdown"] == ""
         assert result["truncated"] is False
