@@ -1,4 +1,4 @@
-"""db モジュールのユニットテスト（issue #54, #72）。"""
+"""db モジュールのユニットテスト（issue #72）。"""
 
 from __future__ import annotations
 
@@ -9,233 +9,14 @@ from shiori.db import (
     create_heavy_indexes,
     drop_heavy_indexes,
     get_code_chunks,
-    get_pr_changes,
-    get_pr_head_sha,
     get_sync_runs,
     migrate_light,
     record_sync_attempt,
-    upsert_pr_changes,
 )
 
 
-# ── get_pr_changes ──
-
-
-class TestGetPrChanges:
-    """get_pr_changes の振る舞い。"""
-
-    def _mock_conn(self, rows: list[tuple]):
-        """pr_changes の SELECT 結果を返すモック接続を作る。"""
-        conn = MagicMock()
-        cursor = MagicMock()
-        cursor.fetchall.return_value = rows
-        conn.cursor.return_value.__enter__.return_value = cursor
-        return conn, cursor
-
-    def test_returns_files_and_head_sha(self):
-        """ファイル一覧と head_sha + base_sha も含めて返す。"""
-        conn, cursor = self._mock_conn(
-            [
-                ("src/a.py", "modified", 5, 2, 7, "url_a", "abc1234", "def4567"),
-                ("src/b.py", "added", 10, 0, 10, "url_b", "abc1234", "def4567"),
-            ],
-        )
-        files, head_sha, base_sha = get_pr_changes(conn, "o/r", 42)
-
-        assert head_sha == "abc1234"
-        assert base_sha == "def4567"
-        assert len(files) == 2
-        assert files[0] == {
-            "path": "src/a.py",
-            "status": "modified",
-            "additions": 5,
-            "deletions": 2,
-            "changes": 7,
-            "blob_url": "url_a",
-        }
-        assert files[1]["path"] == "src/b.py"
-
-    def test_returns_empty_list_and_none_when_no_rows(self):
-        """pr_changes に行がない場合、空リストと None×2 を返す。"""
-        conn, cursor = self._mock_conn([])
-
-        files, head_sha, base_sha = get_pr_changes(conn, "o/r", 42)
-
-        assert files == []
-        assert head_sha is None
-        assert base_sha is None
-
-    def test_excludes_sentinel_rows(self):
-        """path が空文字の sentinel 行は files に含まれず、head_sha と base_sha は取得される。"""
-        conn, cursor = self._mock_conn(
-            [
-                ("", None, None, None, None, None, "abc1234", "def4567"),  # sentinel
-            ],
-        )
-        files, head_sha, base_sha = get_pr_changes(conn, "o/r", 42)
-
-        assert files == []
-        assert head_sha == "abc1234"
-        assert base_sha == "def4567"
-
-    def test_uses_order_by_path_in_query(self):
-        """SQL に ORDER BY path が含まれている。ソートは DB 側に委譲。"""
-        conn = MagicMock()
-        cursor = MagicMock()
-        cursor.fetchall.return_value = []
-        conn.cursor.return_value.__enter__.return_value = cursor
-
-        get_pr_changes(conn, "o/r", 42)
-
-        sql = cursor.execute.call_args_list[0][0][0]
-        assert "ORDER BY path" in sql
-
-
-# ── upsert_pr_changes ──
-
-
-class TestUpsertPrChanges:
-    """upsert_pr_changes の振る舞い。"""
-
-    def test_upserts_files_and_deletes_stale_paths(self):
-        """各ファイルを ON CONFLICT で UPSERT し、一覧に無い path だけ DELETE する（issue #269）。commit は呼ばない。"""
-        conn = MagicMock()
-        cursor = MagicMock()
-        conn.cursor.return_value.__enter__.return_value = cursor
-
-        files = [
-            {
-                "filename": "src/a.py",
-                "status": "modified",
-                "additions": 5,
-                "deletions": 2,
-                "changes": 7,
-                "blob_url": "https://example.com/blob",
-            },
-            {
-                "filename": "src/b.py",
-                "status": "added",
-                "additions": 10,
-                "deletions": 0,
-                "changes": 10,
-                "blob_url": "https://example.com/blob2",
-            },
-        ]
-
-        upsert_pr_changes(conn, "o/r", 42, "abc1234", "def4567", files)
-
-        # ファイル数分の UPSERT + 末尾の DELETE
-        assert cursor.execute.call_count == 3  # 2 INSERT + 1 DELETE
-
-        # INSERT は ON CONFLICT DO UPDATE で duplicate key に耐える
-        for call in cursor.execute.call_args_list[:2]:
-            assert "ON CONFLICT (repo, issue_no, path) DO UPDATE" in call[0][0]
-
-        # DELETE は一覧に無い path のみ対象（全削除しない）
-        delete_sql, delete_params = cursor.execute.call_args_list[2][0]
-        assert "path != ALL(%s)" in delete_sql
-        assert delete_params == ("o/r", 42, ["src/a.py", "src/b.py"])
-
-        # commit は呼ばれない（呼び出し側の責任）
-        conn.commit.assert_not_called()
-
-    def test_duplicate_paths_in_file_list_use_on_conflict(self):
-        """API のページずれ等で同じ path が2回来ても ON CONFLICT で UPDATE になる（issue #269）。"""
-        conn = MagicMock()
-        cursor = MagicMock()
-        conn.cursor.return_value.__enter__.return_value = cursor
-
-        files = [
-            {"filename": "AGENTS.md", "status": "modified",
-             "additions": 1, "deletions": 1, "changes": 2, "blob_url": "u1"},
-            {"filename": "AGENTS.md", "status": "modified",
-             "additions": 3, "deletions": 0, "changes": 3, "blob_url": "u2"},
-        ]
-
-        upsert_pr_changes(conn, "o/r", 5572, "abc1234", "def4567", files)
-
-        # 両方 ON CONFLICT 付き INSERT として発行される（2回目は DB 側で UPDATE になる）
-        for call in cursor.execute.call_args_list[:2]:
-            assert "ON CONFLICT (repo, issue_no, path) DO UPDATE" in call[0][0]
-
-    def test_empty_files_list_inserts_sentinel(self):
-        """ファイル0件の場合、head_sha を保持する sentinel 行を UPSERT する。"""
-        conn = MagicMock()
-        cursor = MagicMock()
-        conn.cursor.return_value.__enter__.return_value = cursor
-
-        upsert_pr_changes(conn, "o/r", 42, "abc1234", "def4567", [])
-
-        # sentinel 以外の DELETE + sentinel UPSERT の 2 回
-        assert cursor.execute.call_count == 2
-
-        delete_sql = cursor.execute.call_args_list[0][0][0]
-        assert "path != ''" in delete_sql
-
-        sentinel_sql, sentinel_params = cursor.execute.call_args_list[1][0]
-        assert "ON CONFLICT (repo, issue_no, path) DO UPDATE" in sentinel_sql
-        assert sentinel_params[0] == "o/r"       # repo
-        assert sentinel_params[1] == 42           # issue_no
-        assert sentinel_params[2] == "abc1234"    # head_sha
-        assert sentinel_params[3] == "def4567"    # base_sha
-        assert sentinel_params[4] == ""           # path（sentinel）
-
-    def test_handles_none_fields(self):
-        """blob_url 等が None でも正しく扱われる。"""
-        conn = MagicMock()
-        cursor = MagicMock()
-        conn.cursor.return_value.__enter__.return_value = cursor
-
-        files = [
-            {
-                "filename": "deleted.py",
-                "status": "removed",
-                "additions": 0,
-                "deletions": 5,
-                "changes": 5,
-                "blob_url": None,
-            },
-        ]
-
-        upsert_pr_changes(conn, "o/r", 42, "def5678", "base9999", files)
-
-        insert_params = cursor.execute.call_args_list[0][0][1]
-        assert insert_params[4] == "deleted.py"  # path (after repo, issue_no, head_sha, base_sha)
-        assert insert_params[5] == "removed"     # status
-        assert insert_params[9] is None          # blob_url
-
-
-# ── get_pr_head_sha ──
-
-
-class TestGetPrHeadSha:
-    """get_pr_head_sha の振る舞い。"""
-
-    def test_returns_sha_when_exists(self):
-        """保存済みの head_sha を返す（sentinel 行含む）。"""
-        conn = MagicMock()
-        cursor = MagicMock()
-        cursor.fetchone.return_value = ("abc1234",)
-        conn.cursor.return_value.__enter__.return_value = cursor
-
-        result = get_pr_head_sha(conn, "o/r", 42)
-
-        assert result == "abc1234"
-
-    def test_returns_none_when_no_rows(self):
-        """pr_changes に行がない場合は None を返す。"""
-        conn = MagicMock()
-        cursor = MagicMock()
-        cursor.fetchone.return_value = None
-        conn.cursor.return_value.__enter__.return_value = cursor
-
-        result = get_pr_head_sha(conn, "o/r", 42)
-
-        assert result is None
-
 
 # ── migrate_light / create_heavy_indexes / drop_heavy_indexes（issue #72）──
-
 
 class TestMigrateLight:
     """migrate_light: テーブル・btree 索引のみ作成し、重い索引は作らない。"""
@@ -289,7 +70,6 @@ class TestMigrateLight:
         assert "ALTER TABLE chunks" in joined
         assert "ADD COLUMN IF NOT EXISTS" in joined
 
-
 class TestCreateHeavyIndexes:
     """create_heavy_indexes: HNSW + pgroonga 索引を作成する。"""
 
@@ -314,7 +94,6 @@ class TestCreateHeavyIndexes:
         assert "hnsw" in joined_lower
         # pgroonga 索引（CREATE INDEX ... USING pgroonga）が含まれる
         assert "using pgroonga" in joined_lower
-
 
 class TestDropHeavyIndexes:
     """drop_heavy_indexes: 3 つの重量索引を DROP する。"""
@@ -344,9 +123,7 @@ class TestDropHeavyIndexes:
         assert "chunks_content_pgroonga" in joined
         assert "chunks_symbols_pgroonga" in joined
 
-
 # ── bulk_insert_chunks（issue #72）──
-
 
 class TestBulkInsertChunks:
     """bulk_insert_chunks: executemany によるバルク挿入。"""
@@ -446,9 +223,7 @@ class TestBulkInsertChunks:
         embedding_str = params[11]
         assert embedding_str == "[0.100000,0.200000,0.300000]"
 
-
 # ── record_sync_attempt / get_sync_runs (issue #187) ──
-
 
 class TestRecordSyncAttempt:
     """record_sync_attempt の振る舞い（issue #187: 試行の記録）。"""
@@ -503,7 +278,6 @@ class TestRecordSyncAttempt:
         params = cursor.execute.call_args[0][1]
         assert params == ("o/r", "")
 
-
 class TestGetSyncRuns:
     """get_sync_runs の振る舞い（issue #187: last_attempt_at/last_error/consecutive_failures）。"""
 
@@ -555,7 +329,6 @@ class TestGetSyncRuns:
         assert info["last_attempt_at"] == last_attempt_at.isoformat()
         assert info["last_error"] == "git fetch failed (exit 128)"
         assert info["consecutive_failures"] == 5
-
 
 class TestGetCodeChunks:
     """get_code_chunks: API reference reports data retrieval."""

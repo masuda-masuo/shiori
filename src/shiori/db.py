@@ -20,16 +20,12 @@ def connect(settings: Settings) -> psycopg.Connection:
     return psycopg.connect(settings.database_url, autocommit=False)
 
 
-#: Every table keyed by ``repo``.  ``forget_repo`` (drop one repo) and the
-#: rebuild TRUNCATE (drop them all) both read this list, so a table added to
-#: the schema cannot be remembered by one and forgotten by the other.  Before
-#: this existed, rebuild truncated only 4 of the 6 and left ``pr_changes`` /
-#: ``sync_runs`` behind.
+#: Tables keyed by ``repo``.  ``forget_repo`` (drop one repo) and rebuild
+#: (TRUNCATE all repos) both iterate this list.
 REPO_SCOPED_TABLES: tuple[str, ...] = (
     "chunks",
     "doc_files",
     "issue_items",
-    "pr_changes",
     "sync_state",
     "sync_runs",
     "repo_index_state",
@@ -141,22 +137,6 @@ CREATE TABLE IF NOT EXISTS issue_items (
     PRIMARY KEY (repo, issue_no, comment_id)
 );
 
--- PR change file map (metadata only. Issue #54)
--- Does not store content (full patch hunks); delegates to GitHub MCP.
--- Tracks force-push via head_sha; re-fetches when changed.
--- Preserves head_sha for 0-file PRs via sentinel row with path=''.
-CREATE TABLE IF NOT EXISTS pr_changes (
-    repo TEXT NOT NULL,
-    issue_no INTEGER NOT NULL,
-    head_sha TEXT,
-    path TEXT NOT NULL,
-    status TEXT,                  -- 'added' | 'modified' | 'removed' | 'renamed'
-    additions INTEGER,
-    deletions INTEGER,
-    changes INTEGER,
-    blob_url TEXT,                -- GitHub file blob URL
-    PRIMARY KEY (repo, issue_no, path)
-);
 
 CREATE TABLE IF NOT EXISTS chunks (
     id BIGSERIAL PRIMARY KEY,
@@ -241,12 +221,7 @@ def _run_alter_statements(conn: psycopg.Connection) -> None:
         cur.execute("ALTER TABLE sync_runs ADD COLUMN IF NOT EXISTS code_indexed INTEGER")
     conn.commit()
 
-    # 6. Add pr_changes.base_sha for PR diff support (issue #96)
-    with conn.cursor() as cur:
-        cur.execute("ALTER TABLE pr_changes ADD COLUMN IF NOT EXISTS base_sha TEXT")
-    conn.commit()
-
-    # 7. Sync attempt tracking (issue #187): finished_at can no longer be
+    # 6. Sync attempt tracking (issue #187): finished_at can no longer be
     # NOT NULL since a row may now exist for a repo that has only failed;
     # add last_attempt_at/last_error/consecutive_failures for status visibility.
     with conn.cursor() as cur:
@@ -504,123 +479,6 @@ def get_issue_item_count(conn: psycopg.Connection, repo: str) -> int:
         )
         row = cur.fetchone()
         return row[0] if row else 0
-
-
-def get_pr_changes(
-    conn: psycopg.Connection, repo: str, issue_no: int
-) -> tuple[list[dict], str | None, str | None]:
-    """Fetch PR change file map (issue #54).
-    
-    Returns (files, head_sha, base_sha). base_sha may be None for legacy rows.
-    """
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            SELECT path, status, additions, deletions, changes, blob_url, head_sha, base_sha
-            FROM pr_changes
-            WHERE repo = %s AND issue_no = %s
-            ORDER BY path
-            """,
-            (repo, issue_no),
-        )
-        rows = cur.fetchall()
-    head_sha = rows[0][6] if rows else None
-    base_sha = rows[0][7] if rows else None
-    files = [
-        {
-            "path": r[0],
-            "status": r[1],
-            "additions": r[2],
-            "deletions": r[3],
-            "changes": r[4],
-            "blob_url": r[5],
-        }
-        for r in rows
-        if r[0]  # Exclude sentinel rows with empty path
-    ]
-    return files, head_sha, base_sha
-
-
-def upsert_pr_changes(
-    conn: psycopg.Connection,
-    repo: str,
-    issue_no: int,
-    head_sha: str,
-    base_sha: str | None = None,
-    files: list[dict] | None = None,
-) -> None:
-    """Upsert PR change file map (issue #54, #269).
-
-    Uses INSERT ... ON CONFLICT DO UPDATE per file, then deletes only rows
-    whose path is no longer in the PR. The previous DELETE → INSERT approach
-    raised duplicate-key errors when the paginated file list contained the
-    same path twice (page drift while fetching) or when rows left behind by
-    an interrupted run collided with a fresh insert in another transaction.
-
-    base_sha is optional for backward compatibility with callers that don't provide it.
-    """
-    if files is None:
-        files = []
-    upsert_sql = """
-        INSERT INTO pr_changes (repo, issue_no, head_sha, base_sha, path, status,
-                                additions, deletions, changes, blob_url)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-        ON CONFLICT (repo, issue_no, path) DO UPDATE SET
-            head_sha = EXCLUDED.head_sha,
-            base_sha = EXCLUDED.base_sha,
-            status = EXCLUDED.status,
-            additions = EXCLUDED.additions,
-            deletions = EXCLUDED.deletions,
-            changes = EXCLUDED.changes,
-            blob_url = EXCLUDED.blob_url
-        """
-    with conn.cursor() as cur:
-        if files:
-            for f in files:
-                cur.execute(
-                    upsert_sql,
-                    (
-                        repo, issue_no, head_sha, base_sha,
-                        f["filename"],
-                        f.get("status"),
-                        f.get("additions"),
-                        f.get("deletions"),
-                        f.get("changes"),
-                        f.get("blob_url"),
-                    ),
-                )
-            # Remove files no longer in the PR (also drops a stale sentinel row)
-            cur.execute(
-                """
-                DELETE FROM pr_changes
-                WHERE repo = %s AND issue_no = %s AND path != ALL(%s)
-                """,
-                (repo, issue_no, [f["filename"] for f in files]),
-            )
-        else:
-            # Preserve head_sha even for PR with 0 files (sentinel row, path='')
-            cur.execute(
-                "DELETE FROM pr_changes WHERE repo = %s AND issue_no = %s AND path != ''",
-                (repo, issue_no),
-            )
-            cur.execute(
-                upsert_sql,
-                (repo, issue_no, head_sha, base_sha,
-                 "", None, None, None, None, None),
-            )
-
-
-def get_pr_head_sha(
-    conn: psycopg.Connection, repo: str, issue_no: int
-) -> str | None:
-    """Get stored PR head_sha for change detection (issue #54)."""
-    with conn.cursor() as cur:
-        cur.execute(
-            "SELECT head_sha FROM pr_changes WHERE repo = %s AND issue_no = %s LIMIT 1",
-            (repo, issue_no),
-        )
-        row = cur.fetchone()
-        return row[0] if row else None
 
 
 def vec_literal(vec) -> str:

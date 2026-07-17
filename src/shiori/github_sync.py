@@ -896,7 +896,10 @@ def sync_issues(
                         buffer=buffer,
                     )
                     n_indexed += 1
-                # Sync review submissions for PRs (dev repos only, or during bulk)
+                # Sync review submissions for PRs (only dev repos during diff sync;
+                # all repos during bulk/rebuild).  Skips ref repos on diff sync
+                # because per-PR sequential API calls block the issues cursor
+                # on large repos (e.g. opencode: 113K issues).
                 if kind == "pr" and (buffer is not None or repo in settings.dev_repos):
                     _sync_pr_reviews(client, conn, embedder, settings, repo, no, buffer=buffer)
             if buffer is None:
