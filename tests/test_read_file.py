@@ -200,6 +200,7 @@ class TestStatusCodeAdded:
         assert "code_indexed" in repo_info
         assert repo_info["code_added"] == 3
         assert repo_info["code_indexed"] is True
+        assert repo_info["role"] == "ref"
 
     def test_code_added_default_when_no_sync_run(self):
         """同期記録がない場合のデフォルトに code_added が含まれる。"""
@@ -221,6 +222,7 @@ class TestStatusCodeAdded:
         assert "code_indexed" in repo_info
         assert repo_info["code_added"] is None
         assert repo_info["code_indexed"] is False
+        assert repo_info["role"] == "ref"
 
 
 class TestStatusTokenProvider:
