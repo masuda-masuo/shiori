@@ -16,7 +16,7 @@ import os
 import shutil
 import time
 
-from . import db
+from . import db, schema
 from .config import Settings, load_settings
 from .embedding import Embedder
 from .github_auth import build_token_provider
@@ -70,7 +70,7 @@ def run_forget(
 
         result: dict[str, dict[str, int]] = {}
         for repo in repos:
-            deleted = db.forget_repo(conn, repo)
+            deleted = schema.forget_repo(conn, repo)
             conn.commit()
             result[repo] = deleted
             log.info(
@@ -132,9 +132,9 @@ def run_ingest(
     # --- Schema prep: migrate_light is idempotent, safe outside lock ---
     if is_bulk:
         log.info("bulk path detected (rebuild=%s), using light schema + deferred indexes", rebuild)
-        db.migrate_light(conn, settings)
+        schema.migrate_light(conn, settings)
     else:
-        db.migrate(conn, settings)
+        schema.migrate(conn, settings)
 
     # --- Cross-process mutex: advisory lock ---
     # Prevent concurrent execution with serve auto-sync and MCP ingest at DB level.
@@ -155,9 +155,9 @@ def run_ingest(
         if is_bulk:
             if rebuild:
                 log.warning("rebuild: discarding existing index and sync cursors")
-                db.truncate_all_repos(conn)
+                schema.truncate_all_repos(conn)
                 conn.commit()
-            db.drop_heavy_indexes(conn)
+            schema.drop_heavy_indexes(conn)
 
         embedder = Embedder()
 
@@ -255,7 +255,7 @@ def run_ingest(
         # --- Bulk path: create heavy indexes in batch ---
         if is_bulk:
             t0 = time.monotonic()
-            db.create_heavy_indexes(conn)
+            schema.create_heavy_indexes(conn)
             t_idx = time.monotonic() - t0
             log.info("heavy indexes created (%.1fs)", t_idx)
 
