@@ -14,8 +14,8 @@ from shiori.mcp_server import report
 def _report_setup(mock_subprocess: bool = True):
     with contextlib.ExitStack() as stack:
         stack.enter_context(patch("shiori.mcp_server._resolve_repo", return_value="o/r"))
-        stack.enter_context(patch("shiori.mcp_server.os.path.isdir", return_value=True))
-        stack.enter_context(patch("shiori.mcp_server.os.path.realpath", side_effect=lambda p: p))
+        stack.enter_context(patch("os.path.isdir", return_value=True))
+        stack.enter_context(patch("os.path.realpath", side_effect=lambda p: p))
         if mock_subprocess:
             yield stack.enter_context(patch("shiori.report.subprocess.run"))
         else:
@@ -405,7 +405,7 @@ class TestApiReference:
 
         with _report_setup(mock_subprocess=False):
             with (
-                patch("shiori.report._conn"),
+                patch("shiori.mcp_server._conn"),
                 patch("shiori.report.db.get_code_chunks", return_value=dummy_chunks) as mock_get,
             ):
                 result = report(template="api_reference", prog_lang="python", path="src/")
@@ -454,7 +454,7 @@ class TestApiReference:
 
         with _report_setup(mock_subprocess=False):
             with (
-                patch("shiori.report._conn"),
+                patch("shiori.mcp_server._conn"),
                 patch("shiori.report.db.get_code_chunks", return_value=dummy_chunks),
             ):
                 result = report(template="api_reference", max_chars=80)
@@ -478,7 +478,7 @@ class TestApiReference:
 
         with _report_setup(mock_subprocess=False):
             with (
-                patch("shiori.report._conn"),
+                patch("shiori.mcp_server._conn"),
                 patch("shiori.report.db.get_code_chunks", return_value=dummy_chunks),
             ):
                 result = report(template="api_reference", prog_lang="python", path="src/")
@@ -490,7 +490,7 @@ class TestApiReference:
         """api_reference returns empty string and truncated=False when no chunks are returned."""
         with _report_setup(mock_subprocess=False):
             with (
-                patch("shiori.report._conn"),
+                patch("shiori.mcp_server._conn"),
                 patch("shiori.report.db.get_code_chunks", return_value=[]),
             ):
                 result = report(template="api_reference", prog_lang="python", path="src/")

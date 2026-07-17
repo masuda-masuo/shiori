@@ -11,19 +11,12 @@ import json
 import logging
 import os
 import subprocess
-from typing import Any
+from typing import Any, Callable
 
 from . import db
-from .config import Settings, load_settings
+from .config import load_settings
 
 log = logging.getLogger(__name__)
-
-settings: Settings = load_settings()
-
-
-def _conn():
-    return db.connect(settings)
-
 
 _REPORT_TEMPLATES: dict[str, str] = {
     "stats": "Language statistics via tokei (files / code / comments / blanks).",
@@ -171,11 +164,18 @@ def _extract_python_api_from_file(file_path: str, base_path: str) -> list[dict]:
 
 
 def _api_reference_data(
+    base: str,
     target_repo: str,
     path_prefix: str | None = None,
     prog_lang: str | None = None,
+    conn_factory: Callable[[], Any] | None = None,
 ) -> dict[str, Any]:
     """Fetch and structure API reference data from code chunks (issue #156).
+
+    *base* is a resolved absolute path (via os.path.realpath) to the
+    repository clone root.  *conn_factory* is a callable that returns a
+    database context manager (when None, a new connection is created via
+    db.connect(load_settings())).
 
     Returns dict with "entries" (list of dicts with path/line/end_line/
     content/prog_lang) and "columns" metadata.
@@ -183,8 +183,6 @@ def _api_reference_data(
     rendered to Markdown via _api_reference_to_markdown() or consumed
     directly by dashboards.
     """
-    base = os.path.realpath(settings.repo_dir(target_repo))
-
     search_dir = os.path.join(base, path_prefix) if path_prefix else base
     py_files = []
     if os.path.isdir(search_dir):
@@ -201,7 +199,11 @@ def _api_reference_data(
             entries.extend(_extract_python_api_from_file(py_file, base))
 
     if not entries:
-        with _conn() as conn:
+        if conn_factory is not None:
+            _conn = conn_factory()
+        else:
+            _conn = db.connect(load_settings())
+        with _conn as conn:
             chunks = db.get_code_chunks(
                 conn,
                 repo=target_repo,
@@ -289,14 +291,18 @@ def _api_reference_to_markdown(
 
 
 def _report_api_reference(
+    base: str,
     target_repo: str,
     path_prefix: str | None = None,
     prog_lang: str | None = None,
     max_chars: int = 50000,
+    conn_factory: Callable[[], Any] | None = None,
 ) -> dict[str, Any]:
     """Generate API reference report (issue #156)."""
     data = _api_reference_data(
-        target_repo, path_prefix=path_prefix, prog_lang=prog_lang,
+        base, target_repo,
+        path_prefix=path_prefix, prog_lang=prog_lang,
+        conn_factory=conn_factory,
     )
     return _api_reference_to_markdown(data, max_chars=max_chars)
 

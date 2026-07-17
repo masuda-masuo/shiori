@@ -1130,10 +1130,12 @@ def report(
 
     elif template == "api_reference":
         result = _report_api_reference(
+            base=base,
             target_repo=target,
             path_prefix=path,
             prog_lang=prog_lang,
             max_chars=max_chars,
+            conn_factory=_conn,
         )
         return {
             "repo": target,
