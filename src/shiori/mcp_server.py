@@ -7,7 +7,6 @@ from __future__ import annotations
 import contextlib
 import logging
 import os
-import re
 import subprocess
 import threading
 from typing import Any, Iterator, Literal
@@ -45,6 +44,7 @@ from .pipeline import (
     settings,
     _trigger_phase2,
 )
+from .links import merge_outbound_refs
 from .walk_utils import (
     _match_extension,
     _walk_code_files,
@@ -1254,52 +1254,6 @@ def _build_warnings(
 
     return warnings
 
-
-# Type precedence for cross-reference merging (closes > duplicate > refs > mention)
-_TYPE_PRECEDENCE = {"closes": 0, "duplicate": 1, "refs": 2, "mention": 3}
-
-# Patterns for issue reference classification (issue #97)
-_CLOSES_RE = re.compile(
-    r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+(?:#([0-9]+)|https://github\.com/[\w.-]+/[\w.-]+/(?:issues|pull)/([0-9]+))",
-    re.IGNORECASE,
-)
-_DUPLICATE_RE = re.compile(
-    r"\bduplicate\s+(?:of\s+)?(?:#([0-9]+)|https://github\.com/[\w.-]+/[\w.-]+/(?:issues|pull)/([0-9]+))",
-    re.IGNORECASE,
-)
-_REFS_RE = re.compile(
-    r"\b(?:refs?|see|related(?:\s+to)?)\s+(?:#([0-9]+)|https://github\.com/[\w.-]+/[\w.-]+/(?:issues|pull)/([0-9]+))",
-    re.IGNORECASE,
-)
-_MENTION_RE = re.compile(
-    r"(?<!\w)#([0-9]+)"
-)
-
-
-def _extract_refs(text: str | None) -> list[dict]:
-    """Extract classified cross-references from body text (issue #97)."""
-    if not text:
-        return []
-    seen: dict[int, str] = {}
-    for m in _CLOSES_RE.finditer(text):
-        n = int(m.group(1) or m.group(2))
-        if n not in seen:
-            seen[n] = "closes"
-    for m in _DUPLICATE_RE.finditer(text):
-        n = int(m.group(1) or m.group(2))
-        if n not in seen:
-            seen[n] = "duplicate"
-    for m in _REFS_RE.finditer(text):
-        n = int(m.group(1) or m.group(2))
-        if n not in seen:
-            seen[n] = "refs"
-    for m in _MENTION_RE.finditer(text):
-        n = int(m.group(1))
-        if n not in seen:
-            seen[n] = "mention"
-    return [{"issue_no": no, "type": typ} for no, typ in seen.items()]
-
-
 @mcp.tool(name="shiori_issue_links")
 def issue_links(number: int, repo: str | None = None) -> dict[str, Any]:
     """Return issue/PR cross-references (inbound/outbound) (issue #97).
@@ -1341,14 +1295,7 @@ def issue_links(number: int, repo: str | None = None) -> dict[str, Any]:
             pass
 
     # Extract outbound refs from all bodies
-    outbound_refs: dict[int, dict] = {}
-    for b in bodies:
-        for ref in _extract_refs(b["body"]):
-            n = ref["issue_no"]
-            if n == number:
-                continue
-            if n not in outbound_refs or _TYPE_PRECEDENCE.get(ref["type"], 99) < _TYPE_PRECEDENCE.get(outbound_refs[n]["type"], 99):
-                outbound_refs[n] = ref
+    outbound_refs = merge_outbound_refs(bodies, number)
 
     # Look up referenced issue details
     outbound_nos = list(outbound_refs)
