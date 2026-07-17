@@ -77,7 +77,7 @@ class TestChunkBuffer:
         embedder = MagicMock()
         embedder.embed_passages.return_value = [[0.1, 0.2], [0.3, 0.4]]
 
-        with patch("shiori.github_sync.bulk_insert_chunks") as mock_bulk:
+        with patch("shiori.chunk_buffer.bulk_insert_chunks") as mock_bulk:
             buf = ChunkBuffer(conn, embedder, batch_size=500)
 
             buf.add(**self._chunk_kwargs(content="chunk1"))
@@ -99,7 +99,7 @@ class TestChunkBuffer:
         embedder = MagicMock()
         embedder.embed_passages.return_value = [[0.1, 0.2], [0.3, 0.4]]
 
-        with patch("shiori.github_sync.bulk_insert_chunks"):
+        with patch("shiori.chunk_buffer.bulk_insert_chunks"):
             buf = ChunkBuffer(conn, embedder, batch_size=2)
 
             buf.add(**self._chunk_kwargs(content="a"))
@@ -133,7 +133,7 @@ class TestChunkBuffer:
             [0.1, 0.2], [0.3, 0.4], [0.5, 0.6],
         ]
 
-        with patch("shiori.github_sync.bulk_insert_chunks"):
+        with patch("shiori.chunk_buffer.bulk_insert_chunks"):
             buf = ChunkBuffer(conn, embedder, batch_size=500)
 
             for i in range(3):
@@ -246,7 +246,7 @@ class TestPropagateIssueState:
 class TestGit:
     """_git safe.directory injection logic (issue #48)."""
 
-    @patch("shiori.github_sync.subprocess.run")
+    @patch("shiori.git_utils.subprocess.run")
     def test_safe_directory_added_when_cwd_given(self, mock_run):
         """Ensures -c safe.directory=<cwd> is passed when cwd is set."""
         mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
@@ -254,7 +254,7 @@ class TestGit:
         called_cmd = mock_run.call_args[0][0]
         assert called_cmd[:3] == ["git", "-c", "safe.directory=/data/repos/foo"]
 
-    @patch("shiori.github_sync.subprocess.run")
+    @patch("shiori.git_utils.subprocess.run")
     def test_no_safe_directory_when_cwd_none(self, mock_run):
         """safe.directory is not injected when cwd=None (clone etc)."""
         mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
@@ -363,10 +363,10 @@ class TestAuthedUrl:
 class TestGitFetchRef:
     """_git_fetch_ref / _git_delete_ref: PR head 取得の共通プリミティブ。"""
 
-    @patch("shiori.github_sync._git")
+    @patch("shiori.git_utils._git")
     def test_auto_generates_tmp_ref(self, mock_git):
         """tmp_ref 未指定時は refs/shiori/tmp-{uuid} を自動生成する。"""
-        with patch("shiori.github_sync.uuid.uuid4") as mock_uuid:
+        with patch("shiori.git_utils.uuid.uuid4") as mock_uuid:
             mock_uuid.return_value.hex = "deadbeef1234"
             result = _git_fetch_ref("pull/42/head", cwd="/data/repos/o/r")
 
@@ -377,7 +377,7 @@ class TestGitFetchRef:
             "fetch", "origin", "pull/42/head:refs/shiori/tmp-deadbeef1234", "--depth=1",
         ]
 
-    @patch("shiori.github_sync._git")
+    @patch("shiori.git_utils._git")
     def test_uses_custom_tmp_ref(self, mock_git):
         """tmp_ref 指定時はその値を使う。"""
         result = _git_fetch_ref(
@@ -392,7 +392,7 @@ class TestGitFetchRef:
             "fetch", "origin", "pull/42/head:refs/shiori/my-temp", "--depth=1",
         ]
 
-    @patch("shiori.github_sync._git")
+    @patch("shiori.git_utils._git")
     def test_forwards_provider_auth(self, mock_git):
         fake_remote = "https://github.com/o/r.git"
         fake_authed = "https://x-access-token:tok@github.com/o/r.git"
@@ -400,7 +400,7 @@ class TestGitFetchRef:
         provider = MagicMock()
         provider.get_token.return_value = "tok"
 
-        with patch("shiori.github_sync.uuid.uuid4") as mock_uuid:
+        with patch("shiori.git_utils.uuid.uuid4") as mock_uuid:
             mock_uuid.return_value.hex = "abc"
             _git_fetch_ref("pull/1/head", cwd="/r", provider=provider)
 
@@ -413,9 +413,9 @@ class TestGitFetchRef:
         assert mock_git.call_args_list[3][0][0] == ["remote", "set-url", "origin", fake_remote]
         provider.get_token.assert_called_once()
 
-    @patch("shiori.github_sync._git")
+    @patch("shiori.git_utils._git")
     def test_no_auth_when_provider_none(self, mock_git):
-        with patch("shiori.github_sync.uuid.uuid4") as mock_uuid:
+        with patch("shiori.git_utils.uuid.uuid4") as mock_uuid:
             mock_uuid.return_value.hex = "abc"
             _git_fetch_ref("pull/1/head", cwd="/r", provider=None)
 
@@ -423,7 +423,7 @@ class TestGitFetchRef:
         called_args = mock_git.call_args[0][0]
         assert called_args[0] == "fetch"
 
-    @patch("shiori.github_sync._git")
+    @patch("shiori.git_utils._git")
     def test_fetch_failure_propagated(self, mock_git):
         """git fetch の失敗はそのまま伝播する。"""
         mock_git.side_effect = RuntimeError("fetch failed")
@@ -431,7 +431,7 @@ class TestGitFetchRef:
         with pytest.raises(RuntimeError, match="fetch failed"):
             _git_fetch_ref("pull/999/head", cwd="/r")
 
-    @patch("shiori.github_sync._git")
+    @patch("shiori.git_utils._git")
     def test_delete_ref_exists(self, mock_git):
         """_git_delete_ref は update-ref -d を呼ぶ。"""
         _git_delete_ref("refs/shiori/tmp-abc", cwd="/r")
@@ -441,7 +441,7 @@ class TestGitFetchRef:
             cwd="/r",
         )
 
-    @patch("shiori.github_sync._git")
+    @patch("shiori.git_utils._git")
     def test_delete_ref_nonexistent_ignored(self, mock_git):
         """Silently ignores RuntimeError when deleting a non-existent ref."""
         mock_git.side_effect = RuntimeError("fatal: ...")
@@ -496,10 +496,10 @@ class TestSyncPrReviews:
         ])
 
         with (
-            patch("shiori.github_sync._upsert_issue_item") as mock_upsert,
-            patch("shiori.github_sync._should_index", return_value=True),
-            patch("shiori.github_sync._issue_title_state_kind", return_value=("Title", "open", "pr")),
-            patch("shiori.github_sync._index_item"),
+            patch("shiori.sync_issues._upsert_issue_item") as mock_upsert,
+            patch("shiori.sync_issues._should_index", return_value=True),
+            patch("shiori.sync_issues._issue_title_state_kind", return_value=("Title", "open", "pr")),
+            patch("shiori.sync_issues._index_item"),
         ):
             _sync_pr_reviews(client, conn, embedder, settings, "o/r", 42)
 
@@ -526,10 +526,10 @@ class TestSyncPrReviews:
         ])
 
         with (
-            patch("shiori.github_sync._upsert_issue_item"),
-            patch("shiori.github_sync._should_index", return_value=True),
-            patch("shiori.github_sync._issue_title_state_kind", return_value=("T", "open", "pr")),
-            patch("shiori.github_sync._index_item") as mock_index,
+            patch("shiori.sync_issues._upsert_issue_item"),
+            patch("shiori.sync_issues._should_index", return_value=True),
+            patch("shiori.sync_issues._issue_title_state_kind", return_value=("T", "open", "pr")),
+            patch("shiori.sync_issues._index_item") as mock_index,
         ):
             _sync_pr_reviews(client, conn, embedder, settings, "o/r", 42)
 
@@ -547,8 +547,8 @@ class TestSyncPrReviews:
         self._setup_api_pages(client, [])
 
         with (
-            patch("shiori.github_sync._upsert_issue_item") as mock_upsert,
-            patch("shiori.github_sync._index_item") as mock_index,
+            patch("shiori.sync_issues._upsert_issue_item") as mock_upsert,
+            patch("shiori.sync_issues._index_item") as mock_index,
         ):
             _sync_pr_reviews(client, conn, embedder, settings, "o/r", 42)
 
@@ -566,8 +566,8 @@ class TestSyncPrReviews:
         client.get = _raise
 
         with (
-            patch("shiori.github_sync._upsert_issue_item") as mock_upsert,
-            patch("shiori.github_sync._index_item") as mock_index,
+            patch("shiori.sync_issues._upsert_issue_item") as mock_upsert,
+            patch("shiori.sync_issues._index_item") as mock_index,
         ):
             _sync_pr_reviews(client, conn, embedder, settings, "o/r", 42)
 
@@ -587,9 +587,9 @@ class TestSyncPrReviews:
         ])
 
         with (
-            patch("shiori.github_sync._upsert_issue_item") as mock_upsert,
-            patch("shiori.github_sync._should_index", return_value=False),
-            patch("shiori.github_sync._index_item") as mock_index,
+            patch("shiori.sync_issues._upsert_issue_item") as mock_upsert,
+            patch("shiori.sync_issues._should_index", return_value=False),
+            patch("shiori.sync_issues._index_item") as mock_index,
         ):
             _sync_pr_reviews(client, conn, embedder, settings, "o/r", 42)
 
@@ -609,10 +609,10 @@ class TestSyncPrReviews:
         ])
 
         with (
-            patch("shiori.github_sync._upsert_issue_item"),
-            patch("shiori.github_sync._should_index", return_value=True),
-            patch("shiori.github_sync._issue_title_state_kind", return_value=("T", "open", "pr")),
-            patch("shiori.github_sync._index_item") as mock_index,
+            patch("shiori.sync_issues._upsert_issue_item"),
+            patch("shiori.sync_issues._should_index", return_value=True),
+            patch("shiori.sync_issues._issue_title_state_kind", return_value=("T", "open", "pr")),
+            patch("shiori.sync_issues._index_item") as mock_index,
         ):
             _sync_pr_reviews(client, conn, embedder, settings, "o/r", 42)
 
@@ -629,9 +629,9 @@ class TestSyncPrReviews:
         ])
 
         with (
-            patch("shiori.github_sync._upsert_issue_item") as mock_upsert,
-            patch("shiori.github_sync._should_index") as mock_should,
-            patch("shiori.github_sync._index_item") as mock_index,
+            patch("shiori.sync_issues._upsert_issue_item") as mock_upsert,
+            patch("shiori.sync_issues._should_index") as mock_should,
+            patch("shiori.sync_issues._index_item") as mock_index,
         ):
             _sync_pr_reviews(client, conn, embedder, settings, "o/r", 42)
 
@@ -652,9 +652,9 @@ class TestSyncPrReviews:
         ])
 
         with (
-            patch("shiori.github_sync._upsert_issue_item") as mock_upsert,
-            patch("shiori.github_sync._should_index") as mock_should,
-            patch("shiori.github_sync._index_item") as mock_index,
+            patch("shiori.sync_issues._upsert_issue_item") as mock_upsert,
+            patch("shiori.sync_issues._should_index") as mock_should,
+            patch("shiori.sync_issues._index_item") as mock_index,
         ):
             _sync_pr_reviews(client, conn, embedder, settings, "o/r", 42)
 
@@ -678,10 +678,10 @@ class TestSyncPrReviews:
         buffer = MagicMock()
 
         with (
-            patch("shiori.github_sync._upsert_issue_item"),
-            patch("shiori.github_sync._should_index", return_value=True),
-            patch("shiori.github_sync._issue_title_state_kind", return_value=("T", "open", "pr")),
-            patch("shiori.github_sync._index_item") as mock_index,
+            patch("shiori.sync_issues._upsert_issue_item"),
+            patch("shiori.sync_issues._should_index", return_value=True),
+            patch("shiori.sync_issues._issue_title_state_kind", return_value=("T", "open", "pr")),
+            patch("shiori.sync_issues._index_item") as mock_index,
         ):
             _sync_pr_reviews(client, conn, embedder, settings, "o/r", 42, buffer=buffer)
 
@@ -703,10 +703,10 @@ class TestSyncPrReviews:
         ])
 
         with (
-            patch("shiori.github_sync._upsert_issue_item") as mock_upsert,
-            patch("shiori.github_sync._should_index", return_value=True),
-            patch("shiori.github_sync._issue_title_state_kind", return_value=("T", "open", "pr")),
-            patch("shiori.github_sync._index_item"),
+            patch("shiori.sync_issues._upsert_issue_item") as mock_upsert,
+            patch("shiori.sync_issues._should_index", return_value=True),
+            patch("shiori.sync_issues._issue_title_state_kind", return_value=("T", "open", "pr")),
+            patch("shiori.sync_issues._index_item"),
         ):
             _sync_pr_reviews(client, conn, embedder, settings, "o/r", 42)
 
@@ -856,9 +856,9 @@ class TestSyncIssuesCursor:
         provider = MagicMock()
 
         with (
-            patch("shiori.github_sync._api_pages_gen", return_value=iter([[]])),
-            patch("shiori.github_sync.get_cursor", return_value=None),
-            patch("shiori.github_sync.set_cursor") as mock_set,
+            patch("shiori.sync_issues._api_pages_gen", return_value=iter([[]])),
+            patch("shiori.sync_issues.get_cursor", return_value=None),
+            patch("shiori.sync_issues.set_cursor") as mock_set,
         ):
             n = sync_issues(settings, conn, embedder, "o/r", provider)
 
@@ -884,9 +884,9 @@ class TestSyncIssuesCursor:
             return existing
 
         with (
-            patch("shiori.github_sync._api_pages_gen", return_value=iter([[]])),
-            patch("shiori.github_sync.get_cursor", side_effect=get_cursor_side),
-            patch("shiori.github_sync.set_cursor") as mock_set,
+            patch("shiori.sync_issues._api_pages_gen", return_value=iter([[]])),
+            patch("shiori.sync_issues.get_cursor", side_effect=get_cursor_side),
+            patch("shiori.sync_issues.set_cursor") as mock_set,
         ):
             n = sync_issues(settings, conn, embedder, "o/r", provider)
 
@@ -912,12 +912,12 @@ class TestSyncIssuesCursor:
         }]
 
         with (
-            patch("shiori.github_sync._api_pages_gen", return_value=iter([page])),
-            patch("shiori.github_sync.get_cursor", return_value=None),
-            patch("shiori.github_sync._upsert_issue_item"),
-            patch("shiori.github_sync._propagate_issue_state"),
-            patch("shiori.github_sync._should_index", return_value=False),
-            patch("shiori.github_sync.set_cursor") as mock_set,
+            patch("shiori.sync_issues._api_pages_gen", return_value=iter([page])),
+            patch("shiori.sync_issues.get_cursor", return_value=None),
+            patch("shiori.sync_issues._upsert_issue_item"),
+            patch("shiori.sync_issues._propagate_issue_state"),
+            patch("shiori.sync_issues._should_index", return_value=False),
+            patch("shiori.sync_issues.set_cursor") as mock_set,
         ):
             n = sync_issues(settings, conn, embedder, "o/r", provider)
 
@@ -949,13 +949,13 @@ class TestSyncIssuesPrReviewGuard:
             "updated_at": "2024-01-02T00:00:00Z",
         }]
 
-    @patch("shiori.github_sync.get_cursor", return_value=None)
-    @patch("shiori.github_sync._api_pages_gen")
-    @patch("shiori.github_sync._upsert_issue_item")
-    @patch("shiori.github_sync._propagate_issue_state")
-    @patch("shiori.github_sync._should_index", return_value=False)
-    @patch("shiori.github_sync._sync_pr_reviews")
-    @patch("shiori.github_sync.set_cursor")
+    @patch("shiori.sync_issues.get_cursor", return_value=None)
+    @patch("shiori.sync_issues._api_pages_gen")
+    @patch("shiori.sync_issues._upsert_issue_item")
+    @patch("shiori.sync_issues._propagate_issue_state")
+    @patch("shiori.sync_issues._should_index", return_value=False)
+    @patch("shiori.sync_issues._sync_pr_reviews")
+    @patch("shiori.sync_issues.set_cursor")
     def test_dev_repo_calls_reviews(
         self, mock_set, mock_reviews, mock_should,
         mock_prop, mock_upsert, mock_pages, mock_cursor,
@@ -967,13 +967,13 @@ class TestSyncIssuesPrReviewGuard:
         sync_issues(settings, MagicMock(), MagicMock(), "o/r", MagicMock(), buffer=None)
         mock_reviews.assert_called_once()
 
-    @patch("shiori.github_sync.get_cursor", return_value=None)
-    @patch("shiori.github_sync._api_pages_gen")
-    @patch("shiori.github_sync._upsert_issue_item")
-    @patch("shiori.github_sync._propagate_issue_state")
-    @patch("shiori.github_sync._should_index", return_value=False)
-    @patch("shiori.github_sync._sync_pr_reviews")
-    @patch("shiori.github_sync.set_cursor")
+    @patch("shiori.sync_issues.get_cursor", return_value=None)
+    @patch("shiori.sync_issues._api_pages_gen")
+    @patch("shiori.sync_issues._upsert_issue_item")
+    @patch("shiori.sync_issues._propagate_issue_state")
+    @patch("shiori.sync_issues._should_index", return_value=False)
+    @patch("shiori.sync_issues._sync_pr_reviews")
+    @patch("shiori.sync_issues.set_cursor")
     def test_ref_repo_skips_reviews_on_diff_sync(
         self, mock_set, mock_reviews, mock_should,
         mock_prop, mock_upsert, mock_pages, mock_cursor,
@@ -985,13 +985,13 @@ class TestSyncIssuesPrReviewGuard:
         sync_issues(settings, MagicMock(), MagicMock(), "o/r", MagicMock(), buffer=None)
         mock_reviews.assert_not_called()
 
-    @patch("shiori.github_sync.get_cursor", return_value=None)
-    @patch("shiori.github_sync._api_pages_gen")
-    @patch("shiori.github_sync._upsert_issue_item")
-    @patch("shiori.github_sync._propagate_issue_state")
-    @patch("shiori.github_sync._should_index", return_value=False)
-    @patch("shiori.github_sync._sync_pr_reviews")
-    @patch("shiori.github_sync.set_cursor")
+    @patch("shiori.sync_issues.get_cursor", return_value=None)
+    @patch("shiori.sync_issues._api_pages_gen")
+    @patch("shiori.sync_issues._upsert_issue_item")
+    @patch("shiori.sync_issues._propagate_issue_state")
+    @patch("shiori.sync_issues._should_index", return_value=False)
+    @patch("shiori.sync_issues._sync_pr_reviews")
+    @patch("shiori.sync_issues.set_cursor")
     def test_ref_repo_calls_reviews_on_bulk(
         self, mock_set, mock_reviews, mock_should,
         mock_prop, mock_upsert, mock_pages, mock_cursor,
