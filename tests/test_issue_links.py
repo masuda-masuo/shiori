@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from shiori.mcp_server import _extract_refs
+from shiori.links import _extract_refs
 
 
 class TestExtractRefs:
