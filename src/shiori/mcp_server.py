@@ -8,12 +8,9 @@ import contextlib
 import logging
 import os
 import subprocess
-import threading
-from typing import Any, Iterator, Literal
+from typing import Any, Literal
 
 import httpx
-
-from mcp.server.fastmcp import FastMCP
 
 from . import db, search, schema
 from .dashboard import register_dashboard
@@ -33,7 +30,6 @@ from .github_sync import (
     _git,
     _git_delete_ref,
     _git_fetch_ref,
-    _GitHubAuth,
     _is_bot,
 )
 from .pipeline import (
@@ -49,213 +45,20 @@ from .walk_utils import (
     _match_extension,
     _walk_code_files,
 )
+from .tools.registry import mcp
+from .tools.common import (
+    _get_token_provider,  # noqa: F401 — re-export for tests
+    _github_client,
+    _infer_repo_from_cwd,  # noqa: F401 — re-export for tests
+    _validate_repo_name,  # noqa: F401 — re-export for tests
+    _resolve_repo,
+    _resolve_repo_filter,
+    _resolve_repos,
+    _make_filters,
+)
 
 log = logging.getLogger(__name__)
 
-# Cached token provider (built once, reused across _github_client calls)
-_token_provider: Any | None = None
-_token_provider_lock = threading.Lock()
-
-
-def _get_token_provider():
-    global _token_provider
-    with _token_provider_lock:
-        if _token_provider is None:
-            _token_provider = build_token_provider(settings)
-    return _token_provider
-
-
-@contextlib.contextmanager
-def _github_client() -> Iterator[httpx.Client]:
-    provider = _get_token_provider()
-    headers = {
-        "Accept": "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-    }
-    with httpx.Client(headers=headers, auth=_GitHubAuth(provider), timeout=30.0) as client:
-        yield client
-
-
-def _infer_repo_from_cwd() -> str | None:
-    """Infer repo from git remote of current working directory."""
-    try:
-        result = subprocess.run(  # noqa: S603, S607
-            ["git", "remote", "get-url", "origin"],  # noqa: S607
-            capture_output=True, text=True, timeout=5,
-        )
-        if result.returncode != 0:
-            return None
-        remote_url = result.stdout.strip()
-        if "github.com" not in remote_url:
-            return None
-        path_part = remote_url.split("github.com")[-1].lstrip("/:")
-        candidate = path_part.replace(".git", "").strip()
-        if candidate.count("/") == 1:
-            return candidate if candidate in settings.repos else None
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-        pass
-    return None
-
-
-def _validate_repo_name(repo: str) -> str:
-    """Validate/resolve an explicit ``repo`` argument (issue #189).
-
-    Before this, any non-empty ``repo`` string was passed through
-    unchanged, so an unresolvable repo name and a resolvable-but-not-yet-
-    indexed repo both surfaced downstream as the *same* "not indexed"
-    error -- which points the caller at a useless ``ingest`` retry when
-    the real problem is the argument itself.  This separates the two:
-
-    - Exact ``"owner/name"`` match in ``settings.repos`` -> returned as-is.
-    - A short name (no ``/``) that uniquely matches one configured repo's
-      ``name`` component -> resolved to the full ``"owner/name"`` form
-      (e.g. ``"shiori"`` -> ``"masuda-masuo/shiori"``).
-    - A short name matching more than one configured repo -> ``ValueError``
-      listing the ambiguous candidates.
-    - Anything else (unresolvable full name or short name) -> ``ValueError``
-      with the full indexed-repo list, so callers can tell "unknown repo"
-      apart from "known repo, not indexed yet".
-
-    When ``SHIORI_REPOS`` is unset (``settings.repos`` empty) there is
-    nothing configured to validate against, so *repo* is returned
-    unchanged (matches pre-#189 behavior for that case).
-    """
-    if not settings.repos:
-        return repo
-    if repo in settings.repos:
-        return repo
-    if "/" not in repo:
-        matches = [r for r in settings.repos if r.split("/", 1)[-1] == repo]
-        if len(matches) == 1:
-            return matches[0]
-        if len(matches) > 1:
-            raise ValueError(
-                f'ambiguous repo "{repo}". Candidates: {", ".join(matches)}. '
-                'Specify the full "owner/repo" form.'
-            )
-    raise ValueError(
-        f'unknown repo "{repo}". Indexed repos: {", ".join(settings.repos)}'
-    )
-
-
-def _resolve_repo(repo: str | None) -> str:
-    if repo:
-        return _validate_repo_name(repo)
-    if not settings.repos:
-        raise ValueError("SHIORI_REPOS not set")
-    inferred = _infer_repo_from_cwd()
-    if inferred:
-        return inferred
-    log.info(
-        "repo not specified and could not be inferred from cwd; "
-        "falling back to %s (configured: %s)",
-        settings.repos[0],
-        ", ".join(settings.repos),
-    )
-    return settings.repos[0]
-
-
-def _resolve_repo_filter(repo: str | None) -> str | None:
-    """Resolve an optional ``repo`` *search filter* (issue #189).
-
-    Unlike :func:`_resolve_repo`, ``None`` here means "no filter -- search
-    across every configured repo", not "fall back to the default repo",
-    so ``None`` passes through unchanged.  A given value is still
-    validated / short-name-resolved via :func:`_validate_repo_name`.
-    """
-    if repo is None:
-        return None
-    return _validate_repo_name(repo)
-
-
-def _resolve_repos(repo: str | None) -> list[str]:
-    """Resolve repo parameter to a list of target repos.
-
-    repo="*" returns all configured repos (cross-repo search).
-    repo="owner/name" returns that single repo.
-    repo=None returns the default single repo via _resolve_repo (backward compat).
-    """
-    if repo == "*":
-        if not settings.repos:
-            raise ValueError("SHIORI_REPOS not set")
-        return list(settings.repos)
-    return [_resolve_repo(repo)]
-
-
-def _make_filters(
-    source_type: str | None,
-    language: str | None,
-    state: str | None,
-    repo: str | None,
-    path_prefix: str | None,
-    updated_after: str | None,
-    prog_lang: str | None = None,
-    kind: str | None = None,
-) -> dict:
-    return {
-        "source_type": source_type,
-        "language": language,
-        "state": state,
-        "repo": repo,
-        "path_prefix": path_prefix,
-        "updated_after": updated_after,
-        "prog_lang": prog_lang,
-        "kind": kind,
-    }
-
-
-mcp = FastMCP(
-    "shiori",
-    host=settings.mcp_host,
-    port=settings.mcp_port,
-    instructions=(
-        "Project-knowledge search MCP: one unified, cross-lingual (ja/en) index over GitHub "
-        "repository knowledge — Markdown docs, source code, and issue/PR discussions — searchable "
-        "in a single query and traversable across sources (issue -> fix PR -> changed files -> docs). "
-        "Not a RAG server — shiori returns pointers + snippets and never generates answers; "
-        "you decide what to fetch. "
-        "First search with shiori_search to get pointers + snippets, then fetch "
-        "only the needed range via shiori_read_file / shiori_read_issue. "
-        "For exact match of proper nouns, API names, error codes, function names, use shiori_keyword_search. "
-        "Check index freshness with shiori_status. "
-        "Code files can be discovered via shiori_list_tree and read via shiori_read_file "
-        "(supports path, start_line, end_line). "
-        "shiori_list_tree supports filtering by source_type='doc'/'code' and extension='.py'. "
-        "Code can be searched via shiori_search / shiori_keyword_search "
-        "(filter by source_type='code' and prog_lang filter). "
-        "PR change file maps are available via shiori_pr_changes. "
-        "PR head file content can be read transparently via shiori_read_pr_file (issue #81). "
-        "PR diffs via shiori_pr_diff (unified diff, optionally scoped to one path; issue #96). "
-        "PR review comments (with path/line) via shiori_pr_review_comments. "
-        "Issue/PR cross-references (closes/duplicate/refs/mention, inbound+outbound) "
-        "via shiori_issue_links (issue #97) — useful for duplicate checks and tracing fixes. "
-        "\n"
-        "■ Repo roles (shiori_status shows role per repo)\n"
-        "Each repo is either dev or ref:\n"
-        "- dev (SHIORI_DEV_REPOS): code IS indexed. shiori_search(source_type='code') finds code chunks.\n"
-        "- ref (not in SHIORI_DEV_REPOS): code is clone-only. Use shiori_grep for code; shiori_search still finds issues/PRs/docs.\n"
-        "shiori_list_tree(source_type='code') works for both (walks clone on disk).\n"
-        "\n"
-        "■ Two-store model (information sources)\n"
-        "shiori has 2 independent data sources:\n"
-        "1. Index (Postgres/pgvector/pgroonga)\n"
-        "   - shiori_search / shiori_keyword_search: embedding + full-text search\n"
-        "   - shiori_read_issue: issue/PR threads (indexed only)\n"
-        "   - shiori_list_tree (source_type='doc'): indexed doc_files table\n"
-        "   - shiori_pr_changes: PR change file maps (indexed metadata)\n"
-        "   - Freshness depends on pull-type sync (#236)\n"
-        "2. Clone (disk, pinned to main branch)\n"
-        "   - shiori_read_file: read real files directly (no index needed, works if clone exists)\n"
-        "   - shiori_read_pr_file: get PR head files via git (non-destructive to working tree)\n"
-        "   - shiori_list_tree (source_type='code'): physically existing code files via os.walk\n"
-        "   - Clone is refreshed on-demand (Phase 1: git fetch + reset --hard; #236)\n"
-        "   - shiori_read_pr_file fetches PR head via git fetch starting from the clone\n"
-        "3. Clone grep (ripgrep)\n"
-        "   - shiori_grep: line-level search in clone files via ripgrep\n"
-        "   - Use after shiori_search/keyword_search to narrow down matches to specific lines\n"
-        "   - Supports regex, fixed-strings, and context lines"
-    ),
-)
 
 
 @mcp.tool(name="shiori_search")
