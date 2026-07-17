@@ -1,7 +1,8 @@
 """Sync pipeline: Phase 1 (clone refresh) + Phase 2 (re-index) orchestration.
 
 Extracted from mcp_server.py (issue #281).
-Shared between MCP server and CLI/compose ingest (ingest.py).
+Provides the sync orchestration layer consumed by mcp_server.py; designed
+for eventual sharing with ingest.py.
 
 Process mutual exclusion (issue #6): threading + PostgreSQL advisory lock prevents
 concurrent execution with serve auto-sync or MCP ingest.
@@ -66,8 +67,8 @@ def _record_pre_loop_sync_failure(targets: list[str], error: str) -> None:
     Opens its own short-lived connection since the caller may not have one
     yet at this point in _do_sync(). Swallows its own errors -- if the DB
     itself is unreachable, this is a no-op and the caller's original
-    exception still propagates unchanged (that case is instead covered by
-    the module-level _auto_sync_last_error state set by _auto_sync_loop).
+    exception still propagates unchanged (the unreachable-case is instead
+    covered by _auto_sync_last_error in mcp_server.py).
     """
     try:
         with _conn() as conn:
@@ -203,14 +204,15 @@ def _drain_pending() -> None:
                 _phase2_in_flight.discard(next_repo)
             _drain_pending()
 
-    t = threading.Thread(target=_next_run, daemon=True)
     try:
+        t = threading.Thread(target=_next_run, daemon=True)
         t.start()
     except Exception:
         with _phase2_lock:
             _phase2_in_flight.discard(next_repo)
+            _phase2_pending.add(next_repo)
         _phase2_semaphore.release()
-        raise
+        log.exception("Phase 2 thread creation failed for %s", next_repo)
 
 
 def _do_sync(
