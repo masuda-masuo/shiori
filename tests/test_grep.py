@@ -370,6 +370,7 @@ class TestGrepSearch:
     def test_skipped_repos_in_response(self):
         """skipped_repos lists repos without a clone."""
         with (
+            patch("shiori.mcp_server._ensure_phase1"),
             patch("shiori.mcp_server._resolve_repos", return_value=["o/r1", "o/r2"]),
             patch("shiori.mcp_server.settings") as mock_settings,
             patch("shiori.mcp_server.os.path.isdir", side_effect=[False, True]),
