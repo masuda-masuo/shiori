@@ -682,6 +682,12 @@ mcp = FastMCP(
         "Issue/PR cross-references (closes/duplicate/refs/mention, inbound+outbound) "
         "via shiori_issue_links (issue #97) — useful for duplicate checks and tracing fixes. "
         "\n"
+        "■ Repo roles (shiori_status shows role per repo)\n"
+        "Each repo is either dev or ref:\n"
+        "- dev (SHIORI_DEV_REPOS): code IS indexed. shiori_search(source_type='code') finds code chunks.\n"
+        "- ref (not in SHIORI_DEV_REPOS): code is clone-only. Use shiori_grep for code; shiori_search still finds issues/PRs/docs.\n"
+        "shiori_list_tree(source_type='code') works for both (walks clone on disk).\n"
+        "\n"
         "■ Two-store model (information sources)\n"
         "shiori has 2 independent data sources:\n"
         "1. Index (Postgres/pgvector/pgroonga)\n"
@@ -2423,9 +2429,11 @@ def issue_links(number: int, repo: str | None = None) -> dict[str, Any]:
 def status() -> dict[str, Any]:
     """Index freshness and health. Per-repo: clone_head, indexed_head, index_stale,
     last_synced_at, age_seconds, route, counts, items, cursor, warnings,
-    last_attempt_at, last_error, consecutive_failures, last_sync_error, role.
+    last_attempt_at, last_error, consecutive_failures, last_sync_error, role,
+    code_indexed.
     role='dev' means code is indexed (shiori_search finds code);
     role='ref' means clone-only (use shiori_grep for code).
+    code_indexed is the dynamic state (whether code chunks exist in DB).
     Also reports token_provider: the auth provider actually selected by
     build_token_provider() ("app" | "static" | "token_command" | "anonymous"
     | "error"), not just what the config *intends*.
@@ -2484,6 +2492,7 @@ def status() -> dict[str, Any]:
             info["items_in_db"] = items_in_db
             info["cursors"] = cursors
             info["role"] = "dev" if repo in settings.dev_repos else "ref"
+            info["code_indexed"] = chunk_counts.get("code", 0) > 0
             info["token_provider_error"] = token_provider_error
             warnings = _build_warnings(info, chunk_counts, items_in_db, cursors)
             info.pop("token_provider_error", None)
