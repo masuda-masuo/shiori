@@ -5,7 +5,6 @@ from __future__ import annotations
 import threading
 from unittest.mock import MagicMock, patch
 
-from shiori import mcp_server
 from shiori import pipeline as sync_pipeline
 from shiori.mcp_server import (
     _ensure_phase1,
@@ -30,6 +29,92 @@ class TestEnsurePhase1:
             mock_build.return_value = MagicMock()
             result = _ensure_phase1("o/r")
         assert result == "abc123"
+
+    def test_debounce_skips_within_interval(self):
+        """Second call within debounce window skips without calling refresh_clone."""
+        with (
+            patch("shiori.pipeline.build_token_provider") as mock_build,
+            patch("shiori.refresh.refresh_clone", return_value="abc123") as mock_refresh,
+            patch("shiori.pipeline._conn"),
+            patch("shiori.pipeline.db.upsert_clone_head"),
+            patch("shiori.pipeline.settings") as mock_settings,
+        ):
+            mock_build.return_value = MagicMock()
+            mock_settings.sync_interval_seconds = 10
+            sync_pipeline._phase1_last_fetch.pop("o/r", None)
+            result1 = _ensure_phase1("o/r")
+            assert result1 == "abc123"
+            assert mock_refresh.call_count == 1
+            result2 = _ensure_phase1("o/r")
+            assert result2 is None
+            assert mock_refresh.call_count == 1
+
+    def test_single_flight_serializes_same_repo(self):
+        """Concurrent calls for the same repo serialize behind per-repo lock."""
+        refresh_calls = []
+        sync_pipeline._phase1_last_fetch.pop("o/r", None)
+
+        def fake_refresh(repo, provider, settings):
+            refresh_calls.append(repo)
+            return "abc123"
+
+        def call_phase1():
+            with (
+                patch("shiori.pipeline.build_token_provider") as mock_build,
+                patch("shiori.refresh.refresh_clone", side_effect=fake_refresh),
+                patch("shiori.pipeline._conn"),
+                patch("shiori.pipeline.db.upsert_clone_head"),
+                patch("shiori.pipeline.settings") as mock_settings,
+            ):
+                mock_build.return_value = MagicMock()
+                mock_settings.sync_interval_seconds = 60
+                _ensure_phase1("o/r")
+
+        threads = [threading.Thread(target=call_phase1) for _ in range(3)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert len(refresh_calls) == 1
+
+    def test_different_repos_can_run_in_parallel(self):
+        """Phase 1 for different repos can execute concurrently."""
+        for repo in ("o/r1", "o/r2"):
+            sync_pipeline._phase1_last_fetch.pop(repo, None)
+
+        def call_phase1(repo):
+            with (
+                patch("shiori.pipeline.build_token_provider") as mock_build,
+                patch("shiori.refresh.refresh_clone", return_value="abc123"),
+                patch("shiori.pipeline._conn"),
+                patch("shiori.pipeline.db.upsert_clone_head"),
+                patch("shiori.pipeline.settings") as mock_settings,
+            ):
+                mock_build.return_value = MagicMock()
+                mock_settings.sync_interval_seconds = 0
+                _ensure_phase1(repo)
+
+        t1 = threading.Thread(target=call_phase1, args=("o/r1",))
+        t2 = threading.Thread(target=call_phase1, args=("o/r2",))
+        t1.start()
+        t2.start()
+        t1.join()
+        t2.join()
+
+    def test_returns_none_on_failure(self):
+        with (
+            patch("shiori.pipeline.build_token_provider") as mock_build,
+            patch("shiori.refresh.refresh_clone",
+                  side_effect=RuntimeError("git fetch failed")),
+            patch("shiori.pipeline._conn"),
+            patch("shiori.pipeline.settings") as mock_settings,
+        ):
+            mock_build.return_value = MagicMock()
+            mock_settings.sync_interval_seconds = 0
+            sync_pipeline._phase1_last_fetch.pop("o/r", None)
+            result = _ensure_phase1("o/r")
+        assert result is None
+
 
 # ── _trigger_phase2: single-flight no-op ──
 
