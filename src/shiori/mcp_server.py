@@ -2423,7 +2423,9 @@ def issue_links(number: int, repo: str | None = None) -> dict[str, Any]:
 def status() -> dict[str, Any]:
     """Index freshness and health. Per-repo: clone_head, indexed_head, index_stale,
     last_synced_at, age_seconds, route, counts, items, cursor, warnings,
-    last_attempt_at, last_error, consecutive_failures, last_sync_error.
+    last_attempt_at, last_error, consecutive_failures, last_sync_error, role.
+    role='dev' means code is indexed (shiori_search finds code);
+    role='ref' means clone-only (use shiori_grep for code).
     Also reports token_provider: the auth provider actually selected by
     build_token_provider() ("app" | "static" | "token_command" | "anonymous"
     | "error"), not just what the config *intends*.
@@ -2481,6 +2483,7 @@ def status() -> dict[str, Any]:
             info["code_chunks"] = chunk_counts.get("code", 0)
             info["items_in_db"] = items_in_db
             info["cursors"] = cursors
+            info["role"] = "dev" if repo in settings.dev_repos else "ref"
             info["token_provider_error"] = token_provider_error
             warnings = _build_warnings(info, chunk_counts, items_in_db, cursors)
             info.pop("token_provider_error", None)
