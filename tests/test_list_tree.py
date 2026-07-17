@@ -16,9 +16,11 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from shiori.mcp_server import (
+    list_tree,
+)
+from shiori.walk_utils import (
     _match_extension,
     _walk_code_files,
-    list_tree,
 )
 
 
