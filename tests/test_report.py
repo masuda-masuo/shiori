@@ -19,7 +19,7 @@ class TestReport:
             patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
             patch("shiori.mcp_server.os.path.isdir", return_value=True),
             patch("shiori.mcp_server.os.path.realpath", side_effect=lambda p: p),
-            patch("shiori.mcp_server.subprocess.run") as mock_run,
+            patch("shiori.report.subprocess.run") as mock_run,
         ):
             mock_result = MagicMock()
             mock_result.stdout = tokei_out
@@ -46,7 +46,7 @@ class TestReport:
             patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
             patch("shiori.mcp_server.os.path.isdir", return_value=True),
             patch("shiori.mcp_server.os.path.realpath", side_effect=lambda p: p),
-            patch("shiori.mcp_server.subprocess.run") as mock_run,
+            patch("shiori.report.subprocess.run") as mock_run,
         ):
             mock_result = MagicMock()
             mock_result.stdout = tokei_out
@@ -77,7 +77,7 @@ class TestReport:
             patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
             patch("shiori.mcp_server.os.path.isdir", return_value=True),
             patch("shiori.mcp_server.os.path.realpath", side_effect=lambda p: p),
-            patch("shiori.mcp_server.subprocess.run", side_effect=FileNotFoundError),
+            patch("shiori.report.subprocess.run", side_effect=FileNotFoundError),
         ):
             with pytest.raises(RuntimeError, match="tokei is not installed"):
                 report(template="stats")
@@ -94,7 +94,7 @@ class TestReport:
             patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
             patch("shiori.mcp_server.os.path.isdir", return_value=True),
             patch("shiori.mcp_server.os.path.realpath", side_effect=lambda p: p),
-            patch("shiori.mcp_server.subprocess.run") as mock_run,
+            patch("shiori.report.subprocess.run") as mock_run,
         ):
             mock_result = MagicMock()
             mock_result.stdout = tokei_out
@@ -116,7 +116,7 @@ class TestReport:
             patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
             patch("shiori.mcp_server.os.path.isdir", return_value=True),
             patch("shiori.mcp_server.os.path.realpath", side_effect=lambda p: p),
-            patch("shiori.mcp_server.subprocess.run") as mock_run,
+            patch("shiori.report.subprocess.run") as mock_run,
         ):
             mock_result = MagicMock()
             mock_result.stdout = tokei_out
@@ -149,7 +149,7 @@ class TestSymbolIndex:
             patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
             patch("shiori.mcp_server.os.path.isdir", return_value=True),
             patch("shiori.mcp_server.os.path.realpath", side_effect=lambda p: p),
-            patch("shiori.mcp_server.subprocess.run") as mock_run,
+            patch("shiori.report.subprocess.run") as mock_run,
         ):
             mock_result = MagicMock()
             mock_result.stdout = NDJSON_SYMBOLS
@@ -174,7 +174,7 @@ class TestSymbolIndex:
             patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
             patch("shiori.mcp_server.os.path.isdir", return_value=True),
             patch("shiori.mcp_server.os.path.realpath", side_effect=lambda p: p),
-            patch("shiori.mcp_server.subprocess.run") as mock_run,
+            patch("shiori.report.subprocess.run") as mock_run,
         ):
             mock_result = MagicMock()
             mock_result.stdout = NDJSON_SYMBOLS
@@ -195,7 +195,7 @@ class TestSymbolIndex:
             patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
             patch("shiori.mcp_server.os.path.isdir", return_value=True),
             patch("shiori.mcp_server.os.path.realpath", side_effect=lambda p: p),
-            patch("shiori.mcp_server.subprocess.run") as mock_run,
+            patch("shiori.report.subprocess.run") as mock_run,
         ):
             mock_result = MagicMock()
             mock_result.stdout = NDJSON_SYMBOLS
@@ -221,7 +221,7 @@ class TestSymbolIndex:
             patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
             patch("shiori.mcp_server.os.path.isdir", return_value=True),
             patch("shiori.mcp_server.os.path.realpath", side_effect=lambda p: p),
-            patch("shiori.mcp_server.subprocess.run") as mock_run,
+            patch("shiori.report.subprocess.run") as mock_run,
         ):
             mock_result = MagicMock()
             mock_result.stdout = ndjson
@@ -244,7 +244,7 @@ class TestSymbolIndex:
             patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
             patch("shiori.mcp_server.os.path.isdir", return_value=True),
             patch("shiori.mcp_server.os.path.realpath", side_effect=lambda p: p),
-            patch("shiori.mcp_server.subprocess.run") as mock_run,
+            patch("shiori.report.subprocess.run") as mock_run,
         ):
             mock_result = MagicMock()
             mock_result.stdout = lines
@@ -263,7 +263,7 @@ class TestSymbolIndex:
             patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
             patch("shiori.mcp_server.os.path.isdir", return_value=True),
             patch("shiori.mcp_server.os.path.realpath", side_effect=lambda p: p),
-            patch("shiori.mcp_server.subprocess.run", side_effect=FileNotFoundError),
+            patch("shiori.report.subprocess.run", side_effect=FileNotFoundError),
         ):
             with pytest.raises(RuntimeError, match="universal-ctags is not installed"):
                 report(template="symbol_index")
@@ -274,7 +274,7 @@ class TestSymbolIndex:
             patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
             patch("shiori.mcp_server.os.path.isdir", return_value=True),
             patch("shiori.mcp_server.os.path.realpath", side_effect=lambda p: p),
-            patch("shiori.mcp_server.subprocess.run") as mock_run,
+            patch("shiori.report.subprocess.run") as mock_run,
         ):
             mock_result = MagicMock()
             mock_result.stdout = ""
@@ -308,7 +308,7 @@ class TestModuleTree:
             patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
             patch("shiori.mcp_server.os.path.isdir", return_value=True),
             patch("shiori.mcp_server.os.path.realpath", side_effect=lambda p: p),
-            patch("shiori.mcp_server.subprocess.run") as mock_run,
+            patch("shiori.report.subprocess.run") as mock_run,
         ):
             mock_result = MagicMock()
             mock_result.stdout = NDJSON_MODULE_TREE
@@ -336,7 +336,7 @@ class TestModuleTree:
             patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
             patch("shiori.mcp_server.os.path.isdir", return_value=True),
             patch("shiori.mcp_server.os.path.realpath", side_effect=lambda p: p),
-            patch("shiori.mcp_server.subprocess.run") as mock_run,
+            patch("shiori.report.subprocess.run") as mock_run,
         ):
             mock_result = MagicMock()
             mock_result.stdout = NDJSON_MODULE_TREE
@@ -364,7 +364,7 @@ class TestModuleTree:
             patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
             patch("shiori.mcp_server.os.path.isdir", return_value=True),
             patch("shiori.mcp_server.os.path.realpath", side_effect=lambda p: p),
-            patch("shiori.mcp_server.subprocess.run") as mock_run,
+            patch("shiori.report.subprocess.run") as mock_run,
         ):
             mock_result = MagicMock()
             mock_result.stdout = ndjson
@@ -389,7 +389,7 @@ class TestModuleTree:
             patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
             patch("shiori.mcp_server.os.path.isdir", return_value=True),
             patch("shiori.mcp_server.os.path.realpath", side_effect=lambda p: p),
-            patch("shiori.mcp_server.subprocess.run") as mock_run,
+            patch("shiori.report.subprocess.run") as mock_run,
         ):
             mock_result = MagicMock()
             mock_result.stdout = ""
@@ -410,7 +410,7 @@ class TestModuleTree:
             patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
             patch("shiori.mcp_server.os.path.isdir", return_value=True),
             patch("shiori.mcp_server.os.path.realpath", side_effect=lambda p: p),
-            patch("shiori.mcp_server.subprocess.run") as mock_run,
+            patch("shiori.report.subprocess.run") as mock_run,
         ):
             mock_result = MagicMock()
             mock_result.stdout = ""
@@ -429,7 +429,7 @@ class TestModuleTree:
             patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
             patch("shiori.mcp_server.os.path.isdir", return_value=True),
             patch("shiori.mcp_server.os.path.realpath", side_effect=lambda p: p),
-            patch("shiori.mcp_server.subprocess.run", side_effect=FileNotFoundError),
+            patch("shiori.report.subprocess.run", side_effect=FileNotFoundError),
         ):
             with pytest.raises(RuntimeError, match="universal-ctags is not installed"):
                 report(template="module_tree")
@@ -440,7 +440,7 @@ class TestModuleTree:
             patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
             patch("shiori.mcp_server.os.path.isdir", return_value=True),
             patch("shiori.mcp_server.os.path.realpath", side_effect=lambda p: p),
-            patch("shiori.mcp_server.subprocess.run") as mock_run,
+            patch("shiori.report.subprocess.run") as mock_run,
         ):
             mock_result = MagicMock()
             mock_result.stdout = ""
@@ -490,8 +490,8 @@ class TestApiReference:
             patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
             patch("shiori.mcp_server.os.path.isdir", return_value=True),
             patch("shiori.mcp_server.os.path.realpath", side_effect=lambda p: p),
-            patch("shiori.mcp_server._conn"),
-            patch("shiori.mcp_server.db.get_code_chunks", return_value=dummy_chunks) as mock_get,
+            patch("shiori.report._conn"),
+            patch("shiori.report.db.get_code_chunks", return_value=dummy_chunks) as mock_get,
         ):
             result = report(template="api_reference", prog_lang="python", path="src/")
 
@@ -541,8 +541,8 @@ class TestApiReference:
             patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
             patch("shiori.mcp_server.os.path.isdir", return_value=True),
             patch("shiori.mcp_server.os.path.realpath", side_effect=lambda p: p),
-            patch("shiori.mcp_server._conn"),
-            patch("shiori.mcp_server.db.get_code_chunks", return_value=dummy_chunks),
+            patch("shiori.report._conn"),
+            patch("shiori.report.db.get_code_chunks", return_value=dummy_chunks),
         ):
             result = report(template="api_reference", max_chars=80)
 
@@ -567,8 +567,8 @@ class TestApiReference:
             patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
             patch("shiori.mcp_server.os.path.isdir", return_value=True),
             patch("shiori.mcp_server.os.path.realpath", side_effect=lambda p: p),
-            patch("shiori.mcp_server._conn"),
-            patch("shiori.mcp_server.db.get_code_chunks", return_value=dummy_chunks),
+            patch("shiori.report._conn"),
+            patch("shiori.report.db.get_code_chunks", return_value=dummy_chunks),
         ):
             result = report(template="api_reference", prog_lang="python", path="src/")
 
@@ -581,8 +581,8 @@ class TestApiReference:
             patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
             patch("shiori.mcp_server.os.path.isdir", return_value=True),
             patch("shiori.mcp_server.os.path.realpath", side_effect=lambda p: p),
-            patch("shiori.mcp_server._conn"),
-            patch("shiori.mcp_server.db.get_code_chunks", return_value=[]),
+            patch("shiori.report._conn"),
+            patch("shiori.report.db.get_code_chunks", return_value=[]),
         ):
             result = report(template="api_reference", prog_lang="python", path="src/")
 
