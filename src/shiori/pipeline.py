@@ -285,6 +285,7 @@ def _do_sync(
                             buffer=buffer if is_bulk else None,
                         )
                         if is_bulk:
+                            assert buffer is not None
                             buffer.flush()
                             conn.commit()
                         n_code = sync_code(
@@ -292,6 +293,7 @@ def _do_sync(
                             buffer=buffer if is_bulk else None,
                         )
                         if is_bulk:
+                            assert buffer is not None
                             buffer.flush()
                             conn.commit()
                         finished_at = db.record_sync_run(
