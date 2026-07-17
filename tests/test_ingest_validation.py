@@ -108,7 +108,7 @@ class TestIngestRebuildGuard:
     def test_rebuild_true_blocked_by_default(self):
         """rebuild=True raises ValueError when allow_rebuild=False (default)."""
         with (
-            patch("shiori.pipeline.settings") as mock_settings,
+            patch("shiori.mcp_server.settings") as mock_settings,
             patch("shiori.mcp_server._do_sync") as mock_do_sync,
         ):
             mock_settings.allow_rebuild = False
@@ -123,7 +123,7 @@ class TestIngestRebuildGuard:
     def test_rebuild_true_allowed_when_env_set(self):
         """allow_rebuild=True では rebuild=True が許可される。"""
         with (
-            patch("shiori.pipeline.settings") as mock_settings,
+            patch("shiori.mcp_server.settings") as mock_settings,
             patch("shiori.mcp_server._do_sync") as mock_do_sync,
         ):
             mock_settings.allow_rebuild = True
@@ -139,7 +139,7 @@ class TestIngestRebuildGuard:
     def test_rebuild_false_always_allowed(self):
         """rebuild=False は allow_rebuild の値に関わらず許可される。"""
         with (
-            patch("shiori.pipeline.settings") as mock_settings,
+            patch("shiori.mcp_server.settings") as mock_settings,
             patch("shiori.mcp_server._do_sync") as mock_do_sync,
         ):
             mock_settings.allow_rebuild = False
@@ -155,7 +155,7 @@ class TestIngestRebuildGuard:
     def test_rebuild_false_with_repo_none(self):
         """rebuild=False, repo=None も許可される。"""
         with (
-            patch("shiori.pipeline.settings") as mock_settings,
+            patch("shiori.mcp_server.settings") as mock_settings,
             patch("shiori.mcp_server._do_sync") as mock_do_sync,
         ):
             mock_settings.allow_rebuild = False
@@ -171,7 +171,7 @@ class TestIngestRebuildGuard:
     def test_error_message_mentions_env_var(self):
         """エラーメッセージが環境変数名と CLI 代替手段を示している。"""
         with (
-            patch("shiori.pipeline.settings") as mock_settings,
+            patch("shiori.mcp_server.settings") as mock_settings,
             patch("shiori.mcp_server._do_sync"),
         ):
             mock_settings.allow_rebuild = False

@@ -43,7 +43,6 @@ from .pipeline import (
     _ensure_phase1,
     _get_embedder,
     settings,
-    _sync_lock,
     _trigger_phase2,
 )
 from .walk_utils import (
