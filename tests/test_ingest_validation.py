@@ -24,8 +24,8 @@ class TestDoSyncAllowlist:
     def test_valid_repo_passes_validation(self):
         """repo in settings.repos passes validation (failure after lock does not raise ValueError)."""
         with (
-            patch("shiori.mcp_server.settings") as mock_settings,
-            patch("shiori.mcp_server._sync_lock") as mock_lock,
+            patch("shiori.pipeline.settings") as mock_settings,
+            patch("shiori.pipeline._sync_lock") as mock_lock,
         ):
             mock_settings.repos = ["owner/repo", "owner2/repo2"]
             mock_lock.acquire.return_value = False  # lock acquisition failed → skipped
@@ -36,7 +36,7 @@ class TestDoSyncAllowlist:
 
     def test_invalid_repo_raises_value_error(self):
         """repo not in settings.repos raises ValueError."""
-        with patch("shiori.mcp_server.settings") as mock_settings:
+        with patch("shiori.pipeline.settings") as mock_settings:
             mock_settings.repos = ["owner/repo"]
 
             with pytest.raises(ValueError, match="SHIORI_REPOS"):
@@ -44,7 +44,7 @@ class TestDoSyncAllowlist:
 
     def test_partially_invalid_raises(self):
         """Raises ValueError even if only some repos are invalid."""
-        with patch("shiori.mcp_server.settings") as mock_settings:
+        with patch("shiori.pipeline.settings") as mock_settings:
             mock_settings.repos = ["owner/repo"]
 
             with pytest.raises(ValueError, match="SHIORI_REPOS"):
@@ -53,8 +53,8 @@ class TestDoSyncAllowlist:
     def test_repos_none_skips_validation(self):
         """repos=None skips validation (uses settings.repos)."""
         with (
-            patch("shiori.mcp_server.settings") as mock_settings,
-            patch("shiori.mcp_server._sync_lock") as mock_lock,
+            patch("shiori.pipeline.settings") as mock_settings,
+            patch("shiori.pipeline._sync_lock") as mock_lock,
         ):
             mock_settings.repos = ["owner/repo"]
             mock_lock.acquire.return_value = False
@@ -64,7 +64,7 @@ class TestDoSyncAllowlist:
 
     def test_error_message_includes_invalid_repo(self):
         """エラーメッセージに無効な repo 名が含まれる。"""
-        with patch("shiori.mcp_server.settings") as mock_settings:
+        with patch("shiori.pipeline.settings") as mock_settings:
             mock_settings.repos = ["owner/repo"]
 
             with pytest.raises(ValueError, match="evil/repo"):
@@ -72,7 +72,7 @@ class TestDoSyncAllowlist:
 
     def test_multiple_invalid_in_error_message(self):
         """複数の無効な repo がエラーメッセージに含まれる。"""
-        with patch("shiori.mcp_server.settings") as mock_settings:
+        with patch("shiori.pipeline.settings") as mock_settings:
             mock_settings.repos = ["owner/repo"]
 
             with pytest.raises(ValueError) as exc_info:
@@ -84,8 +84,8 @@ class TestDoSyncAllowlist:
     def test_empty_repos_list_is_valid(self):
         """空リストは settings.repos の部分集合なので検証通過。"""
         with (
-            patch("shiori.mcp_server.settings") as mock_settings,
-            patch("shiori.mcp_server._sync_lock") as mock_lock,
+            patch("shiori.pipeline.settings") as mock_settings,
+            patch("shiori.pipeline._sync_lock") as mock_lock,
         ):
             mock_settings.repos = ["owner/repo"]
             mock_lock.acquire.return_value = False
@@ -108,7 +108,7 @@ class TestIngestRebuildGuard:
     def test_rebuild_true_blocked_by_default(self):
         """rebuild=True raises ValueError when allow_rebuild=False (default)."""
         with (
-            patch("shiori.mcp_server.settings") as mock_settings,
+            patch("shiori.pipeline.settings") as mock_settings,
             patch("shiori.mcp_server._do_sync") as mock_do_sync,
         ):
             mock_settings.allow_rebuild = False
@@ -123,7 +123,7 @@ class TestIngestRebuildGuard:
     def test_rebuild_true_allowed_when_env_set(self):
         """allow_rebuild=True では rebuild=True が許可される。"""
         with (
-            patch("shiori.mcp_server.settings") as mock_settings,
+            patch("shiori.pipeline.settings") as mock_settings,
             patch("shiori.mcp_server._do_sync") as mock_do_sync,
         ):
             mock_settings.allow_rebuild = True
@@ -139,7 +139,7 @@ class TestIngestRebuildGuard:
     def test_rebuild_false_always_allowed(self):
         """rebuild=False は allow_rebuild の値に関わらず許可される。"""
         with (
-            patch("shiori.mcp_server.settings") as mock_settings,
+            patch("shiori.pipeline.settings") as mock_settings,
             patch("shiori.mcp_server._do_sync") as mock_do_sync,
         ):
             mock_settings.allow_rebuild = False
@@ -155,7 +155,7 @@ class TestIngestRebuildGuard:
     def test_rebuild_false_with_repo_none(self):
         """rebuild=False, repo=None も許可される。"""
         with (
-            patch("shiori.mcp_server.settings") as mock_settings,
+            patch("shiori.pipeline.settings") as mock_settings,
             patch("shiori.mcp_server._do_sync") as mock_do_sync,
         ):
             mock_settings.allow_rebuild = False
@@ -171,7 +171,7 @@ class TestIngestRebuildGuard:
     def test_error_message_mentions_env_var(self):
         """エラーメッセージが環境変数名と CLI 代替手段を示している。"""
         with (
-            patch("shiori.mcp_server.settings") as mock_settings,
+            patch("shiori.pipeline.settings") as mock_settings,
             patch("shiori.mcp_server._do_sync"),
         ):
             mock_settings.allow_rebuild = False
@@ -326,16 +326,16 @@ class TestDoSyncPreLoopFailureRecording:
         mock_conn = self._mock_conn_cm()
 
         with (
-            patch("shiori.mcp_server.settings") as mock_settings,
-            patch("shiori.mcp_server._sync_lock") as mock_lock,
-            patch("shiori.mcp_server.build_token_provider", return_value=MagicMock()),
+            patch("shiori.pipeline.settings") as mock_settings,
+            patch("shiori.pipeline._sync_lock") as mock_lock,
+            patch("shiori.pipeline.build_token_provider", return_value=MagicMock()),
             patch(
-                "shiori.mcp_server._get_embedder",
+                "shiori.pipeline._get_embedder",
                 side_effect=ModuleNotFoundError(
                     "No module named 'sentence_transformers'"
                 ),
             ),
-            patch("shiori.mcp_server._conn", return_value=mock_conn),
+            patch("shiori.pipeline._conn", return_value=mock_conn),
             patch("shiori.mcp_server.db.record_sync_attempt") as mock_record_attempt,
         ):
             mock_settings.repos = ["owner/repo1", "owner/repo2"]
@@ -363,13 +363,13 @@ class TestDoSyncPreLoopFailureRecording:
         mock_conn = self._mock_conn_cm()
 
         with (
-            patch("shiori.mcp_server.settings") as mock_settings,
-            patch("shiori.mcp_server._sync_lock") as mock_lock,
+            patch("shiori.pipeline.settings") as mock_settings,
+            patch("shiori.pipeline._sync_lock") as mock_lock,
             patch(
-                "shiori.mcp_server.build_token_provider",
+                "shiori.pipeline.build_token_provider",
                 side_effect=ValueError("GitHub App configuration is incomplete"),
             ),
-            patch("shiori.mcp_server._conn", return_value=mock_conn),
+            patch("shiori.pipeline._conn", return_value=mock_conn),
             patch("shiori.mcp_server.db.record_sync_attempt") as mock_record_attempt,
         ):
             mock_settings.repos = ["owner/repo"]
@@ -390,13 +390,13 @@ class TestDoSyncPreLoopFailureRecording:
         mock_conn = self._mock_conn_cm()
 
         with (
-            patch("shiori.mcp_server.settings") as mock_settings,
-            patch("shiori.mcp_server._sync_lock") as mock_lock,
+            patch("shiori.pipeline.settings") as mock_settings,
+            patch("shiori.pipeline._sync_lock") as mock_lock,
             patch(
-                "shiori.mcp_server.build_token_provider",
+                "shiori.pipeline.build_token_provider",
                 side_effect=ValueError("boom"),
             ),
-            patch("shiori.mcp_server._conn", return_value=mock_conn),
+            patch("shiori.pipeline._conn", return_value=mock_conn),
             patch("shiori.mcp_server.db.record_sync_attempt"),
         ):
             mock_settings.repos = ["owner/repo"]
@@ -410,14 +410,14 @@ class TestDoSyncPreLoopFailureRecording:
     def test_pre_loop_recording_failure_does_not_mask_original_exception(self):
         """記録用の _conn() 自体が失敗しても、元の例外がそのまま伝播する(DB不達ケース)。"""
         with (
-            patch("shiori.mcp_server.settings") as mock_settings,
-            patch("shiori.mcp_server._sync_lock") as mock_lock,
+            patch("shiori.pipeline.settings") as mock_settings,
+            patch("shiori.pipeline._sync_lock") as mock_lock,
             patch(
-                "shiori.mcp_server.build_token_provider",
+                "shiori.pipeline.build_token_provider",
                 side_effect=ValueError("original failure"),
             ),
             patch(
-                "shiori.mcp_server._conn",
+                "shiori.pipeline._conn",
                 side_effect=RuntimeError("database unreachable"),
             ),
         ):
@@ -464,12 +464,12 @@ class TestDoSyncMidStageFailureRecording:
         mock_conn = self._mock_conn_cm()
 
         with (
-            patch("shiori.mcp_server.settings") as mock_settings,
-            patch("shiori.mcp_server._sync_lock") as mock_lock,
-            patch("shiori.mcp_server.build_token_provider", return_value=MagicMock()),
-            patch("shiori.mcp_server._get_embedder", return_value=MagicMock()),
-            patch("shiori.mcp_server._conn", return_value=mock_conn) as mock_conn_factory,
-            patch("shiori.mcp_server._is_bulk_path", return_value=False),
+            patch("shiori.pipeline.settings") as mock_settings,
+            patch("shiori.pipeline._sync_lock") as mock_lock,
+            patch("shiori.pipeline.build_token_provider", return_value=MagicMock()),
+            patch("shiori.pipeline._get_embedder", return_value=MagicMock()),
+            patch("shiori.pipeline._conn", return_value=mock_conn) as mock_conn_factory,
+            patch("shiori.pipeline._is_bulk_path", return_value=False),
             patch(
                 "shiori.mcp_server.db.migrate",
                 side_effect=RuntimeError("migrate failed"),
@@ -506,12 +506,12 @@ class TestDoSyncMidStageFailureRecording:
         )
 
         with (
-            patch("shiori.mcp_server.settings") as mock_settings,
-            patch("shiori.mcp_server._sync_lock") as mock_lock,
-            patch("shiori.mcp_server.build_token_provider", return_value=MagicMock()),
-            patch("shiori.mcp_server._get_embedder", return_value=MagicMock()),
-            patch("shiori.mcp_server._conn", return_value=mock_conn),
-            patch("shiori.mcp_server._is_bulk_path", return_value=False),
+            patch("shiori.pipeline.settings") as mock_settings,
+            patch("shiori.pipeline._sync_lock") as mock_lock,
+            patch("shiori.pipeline.build_token_provider", return_value=MagicMock()),
+            patch("shiori.pipeline._get_embedder", return_value=MagicMock()),
+            patch("shiori.pipeline._conn", return_value=mock_conn),
+            patch("shiori.pipeline._is_bulk_path", return_value=False),
             patch("shiori.mcp_server.db.migrate"),
             patch("shiori.mcp_server.db.record_sync_attempt") as mock_record_attempt,
         ):
@@ -531,13 +531,13 @@ class TestDoSyncMidStageFailureRecording:
         mock_conn = self._mock_conn_cm()
 
         with (
-            patch("shiori.mcp_server.settings") as mock_settings,
-            patch("shiori.mcp_server._sync_lock") as mock_lock,
-            patch("shiori.mcp_server.build_token_provider", return_value=MagicMock()),
-            patch("shiori.mcp_server._get_embedder", return_value=MagicMock()),
-            patch("shiori.mcp_server._conn", return_value=mock_conn),
+            patch("shiori.pipeline.settings") as mock_settings,
+            patch("shiori.pipeline._sync_lock") as mock_lock,
+            patch("shiori.pipeline.build_token_provider", return_value=MagicMock()),
+            patch("shiori.pipeline._get_embedder", return_value=MagicMock()),
+            patch("shiori.pipeline._conn", return_value=mock_conn),
             patch(
-                "shiori.mcp_server._is_bulk_path",
+                "shiori.pipeline._is_bulk_path",
                 side_effect=RuntimeError("bulk detection failed"),
             ),
             patch("shiori.mcp_server.db.record_sync_attempt") as mock_record_attempt,
@@ -557,12 +557,12 @@ class TestDoSyncMidStageFailureRecording:
         mock_conn = self._mock_conn_cm()
 
         with (
-            patch("shiori.mcp_server.settings") as mock_settings,
-            patch("shiori.mcp_server._sync_lock") as mock_lock,
-            patch("shiori.mcp_server.build_token_provider", return_value=MagicMock()),
-            patch("shiori.mcp_server._get_embedder", return_value=MagicMock()),
-            patch("shiori.mcp_server._conn", return_value=mock_conn),
-            patch("shiori.mcp_server._is_bulk_path", return_value=False),
+            patch("shiori.pipeline.settings") as mock_settings,
+            patch("shiori.pipeline._sync_lock") as mock_lock,
+            patch("shiori.pipeline.build_token_provider", return_value=MagicMock()),
+            patch("shiori.pipeline._get_embedder", return_value=MagicMock()),
+            patch("shiori.pipeline._conn", return_value=mock_conn),
+            patch("shiori.pipeline._is_bulk_path", return_value=False),
             patch(
                 "shiori.mcp_server.db.migrate",
                 side_effect=RuntimeError("migrate failed"),
@@ -613,16 +613,16 @@ class TestDoSyncPerRepoContinueOnFailure:
             return 1
 
         with (
-            patch("shiori.mcp_server.settings") as mock_settings,
-            patch("shiori.mcp_server._sync_lock") as mock_lock,
-            patch("shiori.mcp_server.build_token_provider", return_value=MagicMock()),
-            patch("shiori.mcp_server._get_embedder", return_value=MagicMock()),
-            patch("shiori.mcp_server._conn", return_value=mock_conn),
-            patch("shiori.mcp_server._is_bulk_path", return_value=False),
+            patch("shiori.pipeline.settings") as mock_settings,
+            patch("shiori.pipeline._sync_lock") as mock_lock,
+            patch("shiori.pipeline.build_token_provider", return_value=MagicMock()),
+            patch("shiori.pipeline._get_embedder", return_value=MagicMock()),
+            patch("shiori.pipeline._conn", return_value=mock_conn),
+            patch("shiori.pipeline._is_bulk_path", return_value=False),
             patch("shiori.mcp_server.db.migrate"),
-            patch("shiori.mcp_server.sync_docs", side_effect=fake_sync_docs),
-            patch("shiori.mcp_server.sync_issues", return_value=2),
-            patch("shiori.mcp_server.sync_code", return_value=3),
+            patch("shiori.pipeline.sync_docs", side_effect=fake_sync_docs),
+            patch("shiori.pipeline.sync_issues", return_value=2),
+            patch("shiori.pipeline.sync_code", return_value=3),
             patch(
                 "shiori.mcp_server.db.record_sync_run",
                 return_value=MagicMock(isoformat=lambda: "2026-01-01T00:00:00+00:00"),
@@ -651,16 +651,16 @@ class TestDoSyncPerRepoContinueOnFailure:
         mock_conn = self._mock_conn_cm()
 
         with (
-            patch("shiori.mcp_server.settings") as mock_settings,
-            patch("shiori.mcp_server._sync_lock") as mock_lock,
-            patch("shiori.mcp_server.build_token_provider", return_value=MagicMock()),
-            patch("shiori.mcp_server._get_embedder", return_value=MagicMock()),
-            patch("shiori.mcp_server._conn", return_value=mock_conn),
-            patch("shiori.mcp_server._is_bulk_path", return_value=False),
+            patch("shiori.pipeline.settings") as mock_settings,
+            patch("shiori.pipeline._sync_lock") as mock_lock,
+            patch("shiori.pipeline.build_token_provider", return_value=MagicMock()),
+            patch("shiori.pipeline._get_embedder", return_value=MagicMock()),
+            patch("shiori.pipeline._conn", return_value=mock_conn),
+            patch("shiori.pipeline._is_bulk_path", return_value=False),
             patch("shiori.mcp_server.db.migrate"),
-            patch("shiori.mcp_server.sync_docs", return_value=1),
-            patch("shiori.mcp_server.sync_issues", return_value=2),
-            patch("shiori.mcp_server.sync_code", return_value=3),
+            patch("shiori.pipeline.sync_docs", return_value=1),
+            patch("shiori.pipeline.sync_issues", return_value=2),
+            patch("shiori.pipeline.sync_code", return_value=3),
             patch(
                 "shiori.mcp_server.db.record_sync_run",
                 return_value=MagicMock(isoformat=lambda: "2026-01-01T00:00:00+00:00"),
@@ -688,18 +688,18 @@ class TestDoSyncPerRepoContinueOnFailure:
             return 1
 
         with (
-            patch("shiori.mcp_server.settings") as mock_settings,
-            patch("shiori.mcp_server._sync_lock") as mock_lock,
-            patch("shiori.mcp_server.build_token_provider", return_value=MagicMock()),
-            patch("shiori.mcp_server._get_embedder", return_value=MagicMock()),
-            patch("shiori.mcp_server._conn", return_value=mock_conn),
-            patch("shiori.mcp_server._is_bulk_path", return_value=True),
+            patch("shiori.pipeline.settings") as mock_settings,
+            patch("shiori.pipeline._sync_lock") as mock_lock,
+            patch("shiori.pipeline.build_token_provider", return_value=MagicMock()),
+            patch("shiori.pipeline._get_embedder", return_value=MagicMock()),
+            patch("shiori.pipeline._conn", return_value=mock_conn),
+            patch("shiori.pipeline._is_bulk_path", return_value=True),
             patch("shiori.mcp_server.db.migrate_light"),
             patch("shiori.mcp_server.db.drop_heavy_indexes"),
-            patch("shiori.mcp_server.ChunkBuffer", return_value=MagicMock()),
-            patch("shiori.mcp_server.sync_docs", side_effect=fake_sync_docs),
-            patch("shiori.mcp_server.sync_issues", return_value=2),
-            patch("shiori.mcp_server.sync_code", return_value=3),
+            patch("shiori.pipeline.ChunkBuffer", return_value=MagicMock()),
+            patch("shiori.pipeline.sync_docs", side_effect=fake_sync_docs),
+            patch("shiori.pipeline.sync_issues", return_value=2),
+            patch("shiori.pipeline.sync_code", return_value=3),
             patch("shiori.mcp_server.db.record_sync_attempt") as mock_record_attempt,
         ):
             mock_settings.repos = ["owner/repo1", "owner/repo2"]
@@ -865,19 +865,19 @@ class TestDoSyncOperationalErrorHandling:
             return 1
 
         with (
-            patch("shiori.mcp_server.settings") as mock_settings,
-            patch("shiori.mcp_server._sync_lock") as mock_lock,
-            patch("shiori.mcp_server.build_token_provider", return_value=MagicMock()),
-            patch("shiori.mcp_server._get_embedder", return_value=MagicMock()),
-            patch("shiori.mcp_server._conn", return_value=mock_conn),
-            patch("shiori.mcp_server._is_bulk_path", return_value=False),
+            patch("shiori.pipeline.settings") as mock_settings,
+            patch("shiori.pipeline._sync_lock") as mock_lock,
+            patch("shiori.pipeline.build_token_provider", return_value=MagicMock()),
+            patch("shiori.pipeline._get_embedder", return_value=MagicMock()),
+            patch("shiori.pipeline._conn", return_value=mock_conn),
+            patch("shiori.pipeline._is_bulk_path", return_value=False),
             patch("shiori.mcp_server.db.migrate"),
             patch(
-                "shiori.mcp_server.sync_docs",
+                "shiori.pipeline.sync_docs",
                 side_effect=fake_sync_docs,
             ),
-            patch("shiori.mcp_server.sync_issues", return_value=2),
-            patch("shiori.mcp_server.sync_code", return_value=3),
+            patch("shiori.pipeline.sync_issues", return_value=2),
+            patch("shiori.pipeline.sync_code", return_value=3),
             patch("shiori.mcp_server.db.record_sync_attempt") as mock_record_attempt,
         ):
             mock_settings.repos = ["owner/repo1", "owner/repo2"]
@@ -921,19 +921,19 @@ class TestDoSyncOperationalErrorHandling:
             return 1
 
         with (
-            patch("shiori.mcp_server.settings") as mock_settings,
-            patch("shiori.mcp_server._sync_lock") as mock_lock,
-            patch("shiori.mcp_server.build_token_provider", return_value=MagicMock()),
-            patch("shiori.mcp_server._get_embedder", return_value=MagicMock()),
-            patch("shiori.mcp_server._conn", side_effect=fake_conn),
-            patch("shiori.mcp_server._is_bulk_path", return_value=False),
+            patch("shiori.pipeline.settings") as mock_settings,
+            patch("shiori.pipeline._sync_lock") as mock_lock,
+            patch("shiori.pipeline.build_token_provider", return_value=MagicMock()),
+            patch("shiori.pipeline._get_embedder", return_value=MagicMock()),
+            patch("shiori.pipeline._conn", side_effect=fake_conn),
+            patch("shiori.pipeline._is_bulk_path", return_value=False),
             patch("shiori.mcp_server.db.migrate"),
             patch(
-                "shiori.mcp_server.sync_docs",
+                "shiori.pipeline.sync_docs",
                 side_effect=fake_sync_docs,
             ),
-            patch("shiori.mcp_server.sync_issues", return_value=2),
-            patch("shiori.mcp_server.sync_code", return_value=3),
+            patch("shiori.pipeline.sync_issues", return_value=2),
+            patch("shiori.pipeline.sync_code", return_value=3),
             patch(
                 "shiori.mcp_server.db.record_sync_attempt",
                 side_effect=fake_record_attempt,
