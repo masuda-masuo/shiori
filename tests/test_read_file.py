@@ -124,14 +124,14 @@ class TestStatusCodeChunks:
     def test_code_chunks_present(self):
         """status() のレスポンスに code_chunks フィールドが含まれる。"""
         with (
-            patch("shiori.mcp_server._conn"),
-            patch("shiori.mcp_server.settings") as mock_settings,
-            patch("shiori.mcp_server.db.get_sync_runs", return_value={}),
-            patch("shiori.mcp_server.db.get_all_repo_index_state", return_value={}),
-            patch("shiori.mcp_server.db.get_chunk_counts",
+            patch("shiori.tools.status._conn"),
+            patch("shiori.tools.status.settings") as mock_settings,
+            patch("shiori.tools.status.db.get_sync_runs", return_value={}),
+            patch("shiori.tools.status.db.get_all_repo_index_state", return_value={}),
+            patch("shiori.tools.status.db.get_chunk_counts",
                   return_value={"doc": 10, "issue": 20, "code": 1290}),
-            patch("shiori.mcp_server.db.get_issue_item_count", return_value=0),
-            patch("shiori.mcp_server.db.get_cursors", return_value={}),
+            patch("shiori.tools.status.db.get_issue_item_count", return_value=0),
+            patch("shiori.tools.status.db.get_cursors", return_value={}),
         ):
             mock_settings.repos = ["o/r"]
             mock_settings.sync_interval_seconds = 300
@@ -144,14 +144,14 @@ class TestStatusCodeChunks:
     def test_code_chunks_zero_when_no_code_chunks(self):
         """コードチャンクが存在しない場合、code_chunks は 0。"""
         with (
-            patch("shiori.mcp_server._conn"),
-            patch("shiori.mcp_server.settings") as mock_settings,
-            patch("shiori.mcp_server.db.get_sync_runs", return_value={}),
-            patch("shiori.mcp_server.db.get_all_repo_index_state", return_value={}),
-            patch("shiori.mcp_server.db.get_chunk_counts",
+            patch("shiori.tools.status._conn"),
+            patch("shiori.tools.status.settings") as mock_settings,
+            patch("shiori.tools.status.db.get_sync_runs", return_value={}),
+            patch("shiori.tools.status.db.get_all_repo_index_state", return_value={}),
+            patch("shiori.tools.status.db.get_chunk_counts",
                   return_value={"doc": 5}),
-            patch("shiori.mcp_server.db.get_issue_item_count", return_value=0),
-            patch("shiori.mcp_server.db.get_cursors", return_value={}),
+            patch("shiori.tools.status.db.get_issue_item_count", return_value=0),
+            patch("shiori.tools.status.db.get_cursors", return_value={}),
         ):
             mock_settings.repos = ["o/r"]
             mock_settings.sync_interval_seconds = 300
@@ -170,9 +170,9 @@ class TestStatusCodeAdded:
 
         now = datetime.now(timezone.utc)
         with (
-            patch("shiori.mcp_server._conn"),
-            patch("shiori.mcp_server.settings") as mock_settings,
-            patch("shiori.mcp_server.db.get_all_repo_index_state", return_value={}),
+            patch("shiori.tools.status._conn"),
+            patch("shiori.tools.status.settings") as mock_settings,
+            patch("shiori.tools.status.db.get_all_repo_index_state", return_value={}),
             patch(
                 "shiori.mcp_server.db.get_sync_runs",
                 return_value={
@@ -186,10 +186,10 @@ class TestStatusCodeAdded:
                     }
                 },
             ),
-            patch("shiori.mcp_server.db.get_chunk_counts",
+            patch("shiori.tools.status.db.get_chunk_counts",
                   return_value={"doc": 10, "issue": 20, "code": 1290}),
-            patch("shiori.mcp_server.db.get_issue_item_count", return_value=0),
-            patch("shiori.mcp_server.db.get_cursors", return_value={}),
+            patch("shiori.tools.status.db.get_issue_item_count", return_value=0),
+            patch("shiori.tools.status.db.get_cursors", return_value={}),
         ):
             mock_settings.repos = ["o/r"]
             mock_settings.dev_repos = {"o/r"}
@@ -206,13 +206,13 @@ class TestStatusCodeAdded:
     def test_code_added_default_when_no_sync_run(self):
         """同期記録がない場合のデフォルトに code_added が含まれる。"""
         with (
-            patch("shiori.mcp_server._conn"),
-            patch("shiori.mcp_server.settings") as mock_settings,
-            patch("shiori.mcp_server.db.get_sync_runs", return_value={}),
-            patch("shiori.mcp_server.db.get_all_repo_index_state", return_value={}),
-            patch("shiori.mcp_server.db.get_chunk_counts", return_value={}),
-            patch("shiori.mcp_server.db.get_issue_item_count", return_value=0),
-            patch("shiori.mcp_server.db.get_cursors", return_value={}),
+            patch("shiori.tools.status._conn"),
+            patch("shiori.tools.status.settings") as mock_settings,
+            patch("shiori.tools.status.db.get_sync_runs", return_value={}),
+            patch("shiori.tools.status.db.get_all_repo_index_state", return_value={}),
+            patch("shiori.tools.status.db.get_chunk_counts", return_value={}),
+            patch("shiori.tools.status.db.get_issue_item_count", return_value=0),
+            patch("shiori.tools.status.db.get_cursors", return_value={}),
         ):
             mock_settings.repos = ["o/r"]
             mock_settings.dev_repos = set()
@@ -234,14 +234,14 @@ class TestStatusTokenProvider:
         mock_provider = MagicMock()
         mock_provider.name = provider_name
         with (
-            patch("shiori.mcp_server._conn"),
-            patch("shiori.mcp_server.settings") as mock_settings,
-            patch("shiori.mcp_server.db.get_sync_runs", return_value={}),
-            patch("shiori.mcp_server.db.get_chunk_counts", return_value={}),
-            patch("shiori.mcp_server.db.get_issue_item_count", return_value=0),
-            patch("shiori.mcp_server.db.get_cursors", return_value={}),
-            patch("shiori.mcp_server.build_token_provider", return_value=mock_provider),
-            patch("shiori.mcp_server.db.get_all_repo_index_state", return_value={}),
+            patch("shiori.tools.status._conn"),
+            patch("shiori.tools.status.settings") as mock_settings,
+            patch("shiori.tools.status.db.get_sync_runs", return_value={}),
+            patch("shiori.tools.status.db.get_chunk_counts", return_value={}),
+            patch("shiori.tools.status.db.get_issue_item_count", return_value=0),
+            patch("shiori.tools.status.db.get_cursors", return_value={}),
+            patch("shiori.tools.status.build_token_provider", return_value=mock_provider),
+            patch("shiori.tools.status.db.get_all_repo_index_state", return_value={}),
         ):
             mock_settings.repos = ["o/r"]
             mock_settings.sync_interval_seconds = 0
@@ -269,13 +269,13 @@ class TestStatusTokenProviderError:
 
     def _run_status(self, build_token_provider_side_effect):
         with (
-            patch("shiori.mcp_server._conn"),
-            patch("shiori.mcp_server.settings") as mock_settings,
-            patch("shiori.mcp_server.db.get_sync_runs", return_value={}),
-            patch("shiori.mcp_server.db.get_chunk_counts", return_value={}),
-            patch("shiori.mcp_server.db.get_issue_item_count", return_value=0),
-            patch("shiori.mcp_server.db.get_cursors", return_value={}),
-            patch("shiori.mcp_server.db.get_all_repo_index_state", return_value={}),
+            patch("shiori.tools.status._conn"),
+            patch("shiori.tools.status.settings") as mock_settings,
+            patch("shiori.tools.status.db.get_sync_runs", return_value={}),
+            patch("shiori.tools.status.db.get_chunk_counts", return_value={}),
+            patch("shiori.tools.status.db.get_issue_item_count", return_value=0),
+            patch("shiori.tools.status.db.get_cursors", return_value={}),
+            patch("shiori.tools.status.db.get_all_repo_index_state", return_value={}),
             patch(
                 "shiori.mcp_server.build_token_provider",
                 side_effect=build_token_provider_side_effect,
@@ -303,14 +303,14 @@ class TestStatusTokenProviderError:
         mock_provider = MagicMock()
         mock_provider.name = "token_socket"
         with (
-            patch("shiori.mcp_server._conn"),
-            patch("shiori.mcp_server.settings") as mock_settings,
-            patch("shiori.mcp_server.db.get_sync_runs", return_value={}),
-            patch("shiori.mcp_server.db.get_chunk_counts", return_value={}),
-            patch("shiori.mcp_server.db.get_issue_item_count", return_value=0),
-            patch("shiori.mcp_server.db.get_cursors", return_value={}),
-            patch("shiori.mcp_server.db.get_all_repo_index_state", return_value={}),
-            patch("shiori.mcp_server.build_token_provider", return_value=mock_provider),
+            patch("shiori.tools.status._conn"),
+            patch("shiori.tools.status.settings") as mock_settings,
+            patch("shiori.tools.status.db.get_sync_runs", return_value={}),
+            patch("shiori.tools.status.db.get_chunk_counts", return_value={}),
+            patch("shiori.tools.status.db.get_issue_item_count", return_value=0),
+            patch("shiori.tools.status.db.get_cursors", return_value={}),
+            patch("shiori.tools.status.db.get_all_repo_index_state", return_value={}),
+            patch("shiori.tools.status.build_token_provider", return_value=mock_provider),
         ):
             mock_settings.repos = ["o/r"]
             mock_settings.sync_interval_seconds = 0
