@@ -10,9 +10,9 @@ import pytest
 from shiori import pipeline as sync_pipeline
 from shiori.mcp_server import (
     _ensure_phase1,
-    _trigger_phase2,
     status,
 )
+from shiori.pipeline import _trigger_phase2
 
 
 @pytest.fixture(autouse=True)
@@ -234,14 +234,14 @@ class TestCrossRepoSearchPhase1:
             called.append(("phase2", repo))
 
         with (
-            patch("shiori.mcp_server._conn"),
-            patch("shiori.mcp_server._get_embedder") as mock_emb,
+            patch("shiori.tools.search._conn"),
+            patch("shiori.tools.search._get_embedder") as mock_emb,
             patch("shiori.mcp_server.settings") as mock_settings,
-            patch("shiori.mcp_server.search.semantic_search", return_value=[]),
-            patch("shiori.mcp_server._resolve_repo_filter", return_value=None),
-            patch("shiori.mcp_server._resolve_repos", return_value=["r1", "r2", "r3"]),
-            patch("shiori.mcp_server._ensure_phase1", side_effect=fake_phase1),
-            patch("shiori.mcp_server._trigger_phase2", side_effect=fake_phase2),
+            patch("shiori.tools.search.search.semantic_search", return_value=[]),
+            patch("shiori.tools.search._resolve_repo_filter", return_value=None),
+            patch("shiori.tools.search._resolve_repos", return_value=["r1", "r2", "r3"]),
+            patch("shiori.tools.search._ensure_phase1", side_effect=fake_phase1),
+            patch("shiori.tools.search._trigger_phase2", side_effect=fake_phase2),
         ):
             mock_emb.return_value = MagicMock()
             mock_settings.repos = ["r1", "r2", "r3"]
@@ -261,14 +261,14 @@ class TestCrossRepoSearchPhase1:
             called.append(("phase2", repo))
 
         with (
-            patch("shiori.mcp_server._conn"),
-            patch("shiori.mcp_server._get_embedder") as mock_emb,
+            patch("shiori.tools.search._conn"),
+            patch("shiori.tools.search._get_embedder") as mock_emb,
             patch("shiori.mcp_server.settings") as mock_settings,
-            patch("shiori.mcp_server.search.semantic_search", return_value=[]),
-            patch("shiori.mcp_server._resolve_repo_filter", return_value="o/r"),
-            patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
-            patch("shiori.mcp_server._ensure_phase1", side_effect=fake_phase1),
-            patch("shiori.mcp_server._trigger_phase2", side_effect=fake_phase2),
+            patch("shiori.tools.search.search.semantic_search", return_value=[]),
+            patch("shiori.tools.search._resolve_repo_filter", return_value="o/r"),
+            patch("shiori.tools.search._resolve_repo", return_value="o/r"),
+            patch("shiori.tools.search._ensure_phase1", side_effect=fake_phase1),
+            patch("shiori.tools.search._trigger_phase2", side_effect=fake_phase2),
         ):
             mock_emb.return_value = MagicMock()
             mock_settings.repos = ["r1", "r2", "r3"]

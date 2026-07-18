@@ -64,42 +64,42 @@ class TestInferRepoFromCwd:
 
     def test_ssh_url(self, monkeypatch):
         """SSH remote URL is parsed correctly."""
-        with patch("shiori.mcp_server.subprocess.run", side_effect=self._fake_run(
+        with patch("shiori.tools.common.subprocess.run", side_effect=self._fake_run(
             "git@github.com:owner/repo.git\n"
         )):
             assert _infer_repo_from_cwd() == "owner/repo"
 
     def test_https_url_with_git(self, monkeypatch):
         """HTTPS remote URL with .git suffix is parsed correctly."""
-        with patch("shiori.mcp_server.subprocess.run", side_effect=self._fake_run(
+        with patch("shiori.tools.common.subprocess.run", side_effect=self._fake_run(
             "https://github.com/owner/repo.git\n"
         )):
             assert _infer_repo_from_cwd() == "owner/repo"
 
     def test_https_url_without_git(self, monkeypatch):
         """HTTPS remote URL without .git suffix is parsed correctly."""
-        with patch("shiori.mcp_server.subprocess.run", side_effect=self._fake_run(
+        with patch("shiori.tools.common.subprocess.run", side_effect=self._fake_run(
             "https://github.com/owner/repo\n"
         )):
             assert _infer_repo_from_cwd() == "owner/repo"
 
     def test_not_github_remote(self, monkeypatch):
         """Non-GitHub remote returns None."""
-        with patch("shiori.mcp_server.subprocess.run", side_effect=self._fake_run(
+        with patch("shiori.tools.common.subprocess.run", side_effect=self._fake_run(
             "git@gitlab.com:owner/repo.git\n"
         )):
             assert _infer_repo_from_cwd() is None
 
     def test_not_in_repos(self, monkeypatch):
         """Remote that doesn't match any configured repo returns None."""
-        with patch("shiori.mcp_server.subprocess.run", side_effect=self._fake_run(
+        with patch("shiori.tools.common.subprocess.run", side_effect=self._fake_run(
             "https://github.com/other/repo.git\n"
         )):
             assert _infer_repo_from_cwd() is None
 
     def test_git_not_found(self, monkeypatch):
         """FileNotFoundError (git not installed) returns None gracefully."""
-        with patch("shiori.mcp_server.subprocess.run", side_effect=FileNotFoundError):
+        with patch("shiori.tools.common.subprocess.run", side_effect=FileNotFoundError):
             assert _infer_repo_from_cwd() is None
 
 

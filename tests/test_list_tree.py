@@ -238,9 +238,9 @@ class TestListTreeSourceTypeValidation:
         コードファイル収集部分でエラーになってもよい。
         """
         with (
-            patch("shiori.mcp_server.settings") as mock_settings,
+            patch("shiori.tools.list_tree.settings") as mock_settings,
             patch("shiori.tools.common.settings", mock_settings),
-            patch("shiori.mcp_server._conn"),
+            patch("shiori.tools.list_tree._conn"),
         ):
             mock_settings.repos = ["test/repo"]
             list_tree(source_type=source_type)
@@ -260,9 +260,9 @@ class TestListTreeSourceTypeValidation:
     def test_invalid_raises(self):
         """Invalid source_type raises ValueError"""
         with (
-            patch("shiori.mcp_server.settings") as mock_settings,
+            patch("shiori.tools.list_tree.settings") as mock_settings,
             patch("shiori.tools.common.settings", mock_settings),
-            patch("shiori.mcp_server._conn"),
+            patch("shiori.tools.list_tree._conn"),
             pytest.raises(ValueError, match="Invalid source_type"),
         ):
             list_tree(source_type="issue")
@@ -270,9 +270,9 @@ class TestListTreeSourceTypeValidation:
     def test_empty_string_raises(self):
         """Empty string is also invalid"""
         with (
-            patch("shiori.mcp_server.settings") as mock_settings,
+            patch("shiori.tools.list_tree.settings") as mock_settings,
             patch("shiori.tools.common.settings", mock_settings),
-            patch("shiori.mcp_server._conn"),
+            patch("shiori.tools.list_tree._conn"),
             pytest.raises(ValueError, match="Invalid source_type"),
         ):
             list_tree(source_type="")
@@ -280,9 +280,9 @@ class TestListTreeSourceTypeValidation:
     def test_random_string_raises(self):
         """Arbitrary string is also invalid"""
         with (
-            patch("shiori.mcp_server.settings") as mock_settings,
+            patch("shiori.tools.list_tree.settings") as mock_settings,
             patch("shiori.tools.common.settings", mock_settings),
-            patch("shiori.mcp_server._conn"),
+            patch("shiori.tools.list_tree._conn"),
             pytest.raises(ValueError, match="Invalid source_type"),
         ):
             list_tree(source_type="xyz")
@@ -347,11 +347,11 @@ class TestListTreeEndToEnd:
 
         if mock_walk_return is not None:
             with (
-                patch("shiori.mcp_server.settings") as mock_settings,
+                patch("shiori.tools.list_tree.settings") as mock_settings,
                 patch("shiori.tools.common.settings", mock_settings),
-                patch("shiori.mcp_server._conn", side_effect=_fake_conn),
+                patch("shiori.tools.list_tree._conn", side_effect=_fake_conn),
                 patch(
-                    "shiori.mcp_server._walk_code_files",
+                    "shiori.tools.list_tree._walk_code_files",
                     return_value=mock_walk_return,
                 ),
             ):
@@ -360,9 +360,9 @@ class TestListTreeEndToEnd:
                 return list_tree(source_type=source_type, extension=extension)
         else:
             with (
-                patch("shiori.mcp_server.settings") as mock_settings,
+                patch("shiori.tools.list_tree.settings") as mock_settings,
                 patch("shiori.tools.common.settings", mock_settings),
-                patch("shiori.mcp_server._conn", side_effect=_fake_conn),
+                patch("shiori.tools.list_tree._conn", side_effect=_fake_conn),
             ):
                 mock_settings.repos = ["test/repo"]
                 mock_settings.repo_dir.return_value = tmp

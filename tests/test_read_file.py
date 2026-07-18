@@ -5,11 +5,11 @@ from __future__ import annotations
 from unittest.mock import MagicMock, mock_open, patch
 
 from shiori.mcp_server import (
-    _LARGE_FILE_THRESHOLD,
     read_file,
     read_pr_file,
     status,
 )
+from shiori.tools.read import _LARGE_FILE_THRESHOLD
 
 
 class TestReadFileLargeFileHint:
@@ -18,10 +18,10 @@ class TestReadFileLargeFileHint:
     def _run_read_file(self, content: str, **kwargs):
         """read_file をモック環境で実行するヘルパー。"""
         with (
-            patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
-            patch("shiori.mcp_server.settings") as mock_settings,
-            patch("shiori.mcp_server.os.path.realpath", side_effect=lambda p: p),
-            patch("shiori.mcp_server.os.path.isfile", return_value=True),
+            patch("shiori.tools.read._resolve_repo", return_value="o/r"),
+            patch("shiori.tools.read.settings") as mock_settings,
+            patch("shiori.tools.read.os.path.realpath", side_effect=lambda p: p),
+            patch("shiori.tools.read.os.path.isfile", return_value=True),
             patch("builtins.open", mock_open(read_data=content)),
         ):
             mock_settings.repo_dir.return_value = "/data/repos"
@@ -69,14 +69,14 @@ class TestReadPrFileLargeFileHint:
     def _run_read_pr_file(self, content: str, **kwargs):
         """read_pr_file をモック環境で実行するヘルパー。"""
         with (
-            patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
-            patch("shiori.mcp_server.settings") as mock_settings,
-            patch("shiori.mcp_server.os.path.isdir", return_value=True),
-            patch("shiori.mcp_server.os.path.realpath", side_effect=lambda p: p),
-            patch("shiori.mcp_server.build_token_provider") as mock_build,
-            patch("shiori.mcp_server._git_fetch_ref", return_value="refs/shiori/tmp-pr"),
-            patch("shiori.mcp_server._git_delete_ref"),
-            patch("shiori.mcp_server._git", return_value=content),
+            patch("shiori.tools.read._resolve_repo", return_value="o/r"),
+            patch("shiori.tools.read.settings") as mock_settings,
+            patch("shiori.tools.read.os.path.isdir", return_value=True),
+            patch("shiori.tools.read.os.path.realpath", side_effect=lambda p: p),
+            patch("shiori.tools.read.build_token_provider") as mock_build,
+            patch("shiori.tools.read._git_fetch_ref", return_value="refs/shiori/tmp-pr"),
+            patch("shiori.tools.read._git_delete_ref"),
+            patch("shiori.tools.read._git", return_value=content),
         ):
             mock_build.return_value = MagicMock()
             mock_settings.repo_dir.return_value = "/data/repos"

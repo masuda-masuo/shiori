@@ -28,21 +28,21 @@ class TestPrChangesIncludeDiff:
         name_status = "M\tsrc/a.py\nA\tsrc/b.py"
         numstat = "5\t2\tsrc/a.py\n10\t0\tsrc/b.py"
         with (
-            patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
-            patch("shiori.mcp_server.build_token_provider") as mock_build,
-            patch("shiori.mcp_server._git_fetch_ref",
+            patch("shiori.tools.pr._resolve_repo", return_value="o/r"),
+            patch("shiori.tools.pr.build_token_provider") as mock_build,
+            patch("shiori.tools.pr._git_fetch_ref",
                   side_effect=["refs/shiori/tmp-head", "refs/shiori/tmp-base"]),
-            patch("shiori.mcp_server._git_delete_ref"),
-            patch("shiori.mcp_server._git",
+            patch("shiori.tools.pr._git_delete_ref"),
+            patch("shiori.tools.pr._git",
                   side_effect=[
                       "headsha123",
                       "basesha456",
                       name_status,
                       numstat,
                   ]),
-            patch("shiori.mcp_server.settings") as mock_settings,
-            patch("shiori.mcp_server.os.path.isdir") as mock_isdir,
-            patch("shiori.mcp_server.os.path.realpath") as mock_realpath,
+            patch("shiori.tools.pr.settings") as mock_settings,
+            patch("shiori.tools.pr.os.path.isdir") as mock_isdir,
+            patch("shiori.tools.pr.os.path.realpath") as mock_realpath,
         ):
             self._setup_basic_mocks(
                 mock_settings, mock_isdir, mock_realpath, mock_build,
@@ -67,12 +67,12 @@ class TestPrChangesIncludeDiff:
         diff_text = "diff --git a/src/a.py b/src/a.py\n@@ -1,3 +1,4 @@\n+new line"
         stat_text = " src/a.py | 1 +\n 1 file changed, 1 insertion(+)"
         with (
-            patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
-            patch("shiori.mcp_server.build_token_provider") as mock_build,
-            patch("shiori.mcp_server._git_fetch_ref",
+            patch("shiori.tools.pr._resolve_repo", return_value="o/r"),
+            patch("shiori.tools.pr.build_token_provider") as mock_build,
+            patch("shiori.tools.pr._git_fetch_ref",
                   side_effect=["refs/shiori/tmp-head", "refs/shiori/tmp-base"]),
-            patch("shiori.mcp_server._git_delete_ref"),
-            patch("shiori.mcp_server._git",
+            patch("shiori.tools.pr._git_delete_ref"),
+            patch("shiori.tools.pr._git",
                   side_effect=[
                       "headsha123",
                       "basesha456",
@@ -81,9 +81,9 @@ class TestPrChangesIncludeDiff:
                       diff_text,
                       stat_text,
                   ]),
-            patch("shiori.mcp_server.settings") as mock_settings,
-            patch("shiori.mcp_server.os.path.isdir") as mock_isdir,
-            patch("shiori.mcp_server.os.path.realpath") as mock_realpath,
+            patch("shiori.tools.pr.settings") as mock_settings,
+            patch("shiori.tools.pr.os.path.isdir") as mock_isdir,
+            patch("shiori.tools.pr.os.path.realpath") as mock_realpath,
         ):
             self._setup_basic_mocks(
                 mock_settings, mock_isdir, mock_realpath, mock_build,
@@ -104,10 +104,10 @@ class TestPrChangesIncludeDiff:
     def test_include_diff_true_raises_when_clone_missing(self):
         """FileNotFoundError when clone is missing."""
         with (
-            patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
-            patch("shiori.mcp_server.settings") as mock_settings,
-            patch("shiori.mcp_server.os.path.isdir", return_value=False),
-            patch("shiori.mcp_server.os.path.realpath",
+            patch("shiori.tools.pr._resolve_repo", return_value="o/r"),
+            patch("shiori.tools.pr.settings") as mock_settings,
+            patch("shiori.tools.pr.os.path.isdir", return_value=False),
+            patch("shiori.tools.pr.os.path.realpath",
                   return_value="/data/repos/o/r"),
         ):
             mock_settings.repo_dir.return_value = "/data/repos/o/r"
@@ -117,20 +117,20 @@ class TestPrChangesIncludeDiff:
     def test_include_diff_true_cleans_up_tmp_ref_on_error(self):
         """エラー時に両方の tmp ref が cleanup される。"""
         with (
-            patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
-            patch("shiori.mcp_server.build_token_provider") as mock_build,
-            patch("shiori.mcp_server._git_fetch_ref",
+            patch("shiori.tools.pr._resolve_repo", return_value="o/r"),
+            patch("shiori.tools.pr.build_token_provider") as mock_build,
+            patch("shiori.tools.pr._git_fetch_ref",
                   side_effect=["refs/shiori/tmp-head", "refs/shiori/tmp-base"]),
-            patch("shiori.mcp_server._git_delete_ref") as mock_git_delete,
-            patch("shiori.mcp_server._git",
+            patch("shiori.tools.pr._git_delete_ref") as mock_git_delete,
+            patch("shiori.tools.pr._git",
                   side_effect=[
                       "headsha123",
                       "basesha456",
                       RuntimeError("git diff failed"),
                   ]),
-            patch("shiori.mcp_server.settings") as mock_settings,
-            patch("shiori.mcp_server.os.path.isdir") as mock_isdir,
-            patch("shiori.mcp_server.os.path.realpath") as mock_realpath,
+            patch("shiori.tools.pr.settings") as mock_settings,
+            patch("shiori.tools.pr.os.path.isdir") as mock_isdir,
+            patch("shiori.tools.pr.os.path.realpath") as mock_realpath,
         ):
             self._setup_basic_mocks(
                 mock_settings, mock_isdir, mock_realpath, mock_build,
@@ -150,12 +150,12 @@ class TestPrChangesIncludeDiff:
         diff_text = "diff --git a/src/a.py b/src/a.py\n@@ -1,3 +1,4 @@\n+new line"
         stat_text = " src/a.py | 1 +\n 1 file changed, 1 insertion(+)"
         with (
-            patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
-            patch("shiori.mcp_server.build_token_provider") as mock_build,
-            patch("shiori.mcp_server._git_fetch_ref",
+            patch("shiori.tools.pr._resolve_repo", return_value="o/r"),
+            patch("shiori.tools.pr.build_token_provider") as mock_build,
+            patch("shiori.tools.pr._git_fetch_ref",
                   side_effect=["refs/shiori/tmp-head", "refs/shiori/tmp-base"]) as mock_git_fetch,
-            patch("shiori.mcp_server._git_delete_ref"),
-            patch("shiori.mcp_server._git",
+            patch("shiori.tools.pr._git_delete_ref"),
+            patch("shiori.tools.pr._git",
                   side_effect=[
                       "headsha123",
                       "basesha456",
@@ -164,9 +164,9 @@ class TestPrChangesIncludeDiff:
                       diff_text,
                       stat_text,
                   ]),
-            patch("shiori.mcp_server.settings") as mock_settings,
-            patch("shiori.mcp_server.os.path.isdir") as mock_isdir,
-            patch("shiori.mcp_server.os.path.realpath") as mock_realpath,
+            patch("shiori.tools.pr.settings") as mock_settings,
+            patch("shiori.tools.pr.os.path.isdir") as mock_isdir,
+            patch("shiori.tools.pr.os.path.realpath") as mock_realpath,
         ):
             self._setup_basic_mocks(
                 mock_settings, mock_isdir, mock_realpath, mock_build,
@@ -189,21 +189,21 @@ class TestPrChangesIncludeDiff:
         name_status = "R100\tsrc/old.py\tsrc/new.py"
         numstat = "0\t0\tsrc/old.py\tsrc/new.py"
         with (
-            patch("shiori.mcp_server._resolve_repo", return_value="o/r"),
-            patch("shiori.mcp_server.build_token_provider") as mock_build,
-            patch("shiori.mcp_server._git_fetch_ref",
+            patch("shiori.tools.pr._resolve_repo", return_value="o/r"),
+            patch("shiori.tools.pr.build_token_provider") as mock_build,
+            patch("shiori.tools.pr._git_fetch_ref",
                   side_effect=["refs/shiori/tmp-head", "refs/shiori/tmp-base"]),
-            patch("shiori.mcp_server._git_delete_ref"),
-            patch("shiori.mcp_server._git",
+            patch("shiori.tools.pr._git_delete_ref"),
+            patch("shiori.tools.pr._git",
                   side_effect=[
                       "headsha123",
                       "basesha456",
                       name_status,
                       numstat,
                   ]),
-            patch("shiori.mcp_server.settings") as mock_settings,
-            patch("shiori.mcp_server.os.path.isdir") as mock_isdir,
-            patch("shiori.mcp_server.os.path.realpath") as mock_realpath,
+            patch("shiori.tools.pr.settings") as mock_settings,
+            patch("shiori.tools.pr.os.path.isdir") as mock_isdir,
+            patch("shiori.tools.pr.os.path.realpath") as mock_realpath,
         ):
             self._setup_basic_mocks(
                 mock_settings, mock_isdir, mock_realpath, mock_build,
