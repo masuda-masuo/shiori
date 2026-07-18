@@ -164,8 +164,8 @@ class TestStatusIndexStale:
 
     def _run_status(self, index_state=None, sync_runs=None):
         with (
-            patch("shiori.mcp_server._conn"),
-            patch("shiori.mcp_server.settings") as mock_settings,
+            patch("shiori.tools.status._conn"),
+            patch("shiori.tools.status.settings") as mock_settings,
             patch("shiori.mcp_server.db.get_sync_runs",
                   return_value=sync_runs or {}),
             patch("shiori.mcp_server.db.get_all_repo_index_state",
@@ -236,7 +236,7 @@ class TestCrossRepoSearchPhase1:
         with (
             patch("shiori.tools.search._conn"),
             patch("shiori.tools.search._get_embedder") as mock_emb,
-            patch("shiori.mcp_server.settings") as mock_settings,
+            patch("shiori.tools.status.settings") as mock_settings,
             patch("shiori.tools.search.search.semantic_search", return_value=[]),
             patch("shiori.tools.search._resolve_repo_filter", return_value=None),
             patch("shiori.tools.search._resolve_repos", return_value=["r1", "r2", "r3"]),
@@ -263,7 +263,7 @@ class TestCrossRepoSearchPhase1:
         with (
             patch("shiori.tools.search._conn"),
             patch("shiori.tools.search._get_embedder") as mock_emb,
-            patch("shiori.mcp_server.settings") as mock_settings,
+            patch("shiori.tools.status.settings") as mock_settings,
             patch("shiori.tools.search.search.semantic_search", return_value=[]),
             patch("shiori.tools.search._resolve_repo_filter", return_value="o/r"),
             patch("shiori.tools.search._resolve_repo", return_value="o/r"),
