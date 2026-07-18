@@ -7,6 +7,11 @@ Process mutual exclusion (issue #6): PostgreSQL advisory lock prevents concurren
 Freshness tracking (issue #22 / #33): Records completion to sync_runs per repo. Route via SHIORI_INGEST_ROUTE (default 'cli').
 
 Security (issue #63): Validates repo against SHIORI_REPOS allowlist.
+
+Subcommand split (issue #306):
+- run_fetch: API fetch + git pull only, populates issue_items/doc_files on disk
+- run_index: read issue_items / doc_files, chunk + embed, write to chunks
+- run_ingest (alias for run): fetch + index, backward compatible
 """
 
 from __future__ import annotations
@@ -20,7 +25,14 @@ from . import db, schema
 from .config import Settings, load_settings
 from .embedding import Embedder
 from .github_auth import build_token_provider
-from .github_sync import ChunkBuffer, sync_code, sync_docs, sync_issues
+from .github_sync import (
+    ChunkBuffer,
+    fetch_docs,
+    fetch_issues,
+    index_code,
+    index_docs,
+    index_issues,
+)
 
 log = logging.getLogger(__name__)
 
@@ -100,11 +112,256 @@ def run_forget(
         conn.close()
 
 
+# ── Common helpers for fetch/index/run ───────────────────────────────────
+
+
+def _acquire_lock(conn) -> bool:
+    """Acquire PostgreSQL advisory lock. Returns True if acquired."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT pg_try_advisory_lock(%s)", (SYNC_LOCK_KEY,))
+        row = cur.fetchone()
+        return row[0] if row is not None else False
+
+
+def _release_lock(conn) -> None:
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT pg_advisory_unlock(%s)", (SYNC_LOCK_KEY,))
+    except Exception:
+        pass
+
+
+def _validate_repos(repos: list[str] | None, settings: Settings) -> list[str]:
+    """Validate repos against SHIORI_REPOS allowlist (issue #63)."""
+    if repos is not None:
+        allowed = set(settings.repos)
+        invalid = sorted(set(repos) - allowed)
+        if invalid:
+            raise SystemExit(
+                f"Specified repos not in SHIORI_REPOS: "
+                f"{', '.join(invalid)}"
+            )
+    targets = repos or settings.repos
+    if not targets:
+        raise SystemExit("SHIORI_REPOS not set (e.g. SHIORI_REPOS=owner/name)")
+    return targets
+
+
+def _route() -> str:
+    return os.environ.get("SHIORI_INGEST_ROUTE", "cli")
+
+
+# ── run_fetch: API/git only, no chunk/embed ──────────────────────────────
+
+
+def run_fetch(
+    settings: Settings | None = None,
+    repos: list[str] | None = None,
+) -> None:
+    """Fetch phase: API fetch + git pull only.
+
+    Populates issue_items from GitHub API and ensures git clones are up to
+    date.  Does NOT write to chunks.
+    """
+    settings = settings or load_settings()
+    targets = _validate_repos(repos, settings)
+    provider = build_token_provider(settings)
+
+    conn = db.connect(settings)
+    schema.migrate(conn, settings)
+
+    if not _acquire_lock(conn):
+        log.info("skipped: sync already running in another process")
+        conn.close()
+        return
+
+    t_total = time.monotonic()
+    try:
+        for repo in targets:
+            log.info("=== fetch %s ===", repo)
+            t0 = time.monotonic()
+
+            # Fetch docs (git pull)
+            try:
+                head = fetch_docs(settings, conn, repo, provider)
+                if head:
+                    log.info("fetch docs: clone refreshed at %s (%.1fs)",
+                             head[:8], time.monotonic() - t0)
+                else:
+                    log.warning("fetch docs: clone refresh failed for %s", repo)
+            except Exception as exc:
+                conn.rollback()
+                db.record_sync_attempt(conn, repo, success=False, error=str(exc))
+                log.exception("fetch docs failed for %s", repo)
+                raise
+
+            # Fetch issues/PRs/comments/reviews (API only)
+            try:
+                t0 = time.monotonic()
+                n_fetched = fetch_issues(settings, conn, repo, provider)
+                log.info("fetch issues: %d items fetched (%.1fs)", n_fetched, time.monotonic() - t0)
+            except Exception as exc:
+                conn.rollback()
+                db.record_sync_attempt(conn, repo, success=False, error=str(exc))
+                log.exception("fetch issues failed for %s", repo)
+                raise
+
+        t_total_elapsed = time.monotonic() - t_total
+        log.info("total fetch time: %.1fs", t_total_elapsed)
+    finally:
+        _release_lock(conn)
+        conn.close()
+
+
+# ── run_index: read issue_items/doc_files, chunk + embed ─────────────────
+
+
+def run_index(
+    settings: Settings | None = None,
+    repos: list[str] | None = None,
+    rebuild: bool = False,
+) -> None:
+    """Index phase: read from issue_items / doc_files, chunk + embed, write to chunks.
+
+    Idempotent: running this multiple times against the same data produces
+    the same chunks.
+    """
+    settings = settings or load_settings()
+    targets = _validate_repos(repos, settings)
+    route = _route()
+
+    conn = db.connect(settings)
+    is_bulk = _is_bulk_path(conn, rebuild)
+
+    if is_bulk:
+        log.info("bulk path detected (rebuild=%s), using light schema + deferred indexes", rebuild)
+        schema.migrate_light(conn, settings)
+    else:
+        schema.migrate(conn, settings)
+
+    if not _acquire_lock(conn):
+        log.info("skipped: sync already running in another process")
+        conn.close()
+        return
+
+    t_total = time.monotonic()
+    try:
+        if is_bulk:
+            if rebuild:
+                log.warning("rebuild: discarding existing index and sync cursors")
+                schema.truncate_all_repos(conn)
+                conn.commit()
+            schema.drop_heavy_indexes(conn)
+
+        embedder = Embedder()
+        buffer: ChunkBuffer | None = None
+        if is_bulk:
+            buffer = ChunkBuffer(conn, embedder, batch_size=_BULK_BUFFER_SIZE)
+
+        failed_repos: dict[str, str] = {}
+
+        for repo in targets:
+            log.info("=== index %s ===", repo)
+            try:
+                # Index docs
+                t0 = time.monotonic()
+                n_docs = index_docs(
+                    settings, conn, embedder, repo,
+                    buffer=buffer if is_bulk else None,
+                )
+                if is_bulk and buffer is not None:
+                    n_flushed = buffer.flush()
+                    conn.commit()
+                    log.info("docs flushed: %d chunks", n_flushed)
+                t_docs = time.monotonic() - t0
+                log.info("index docs: %d files updated (%.1fs)", n_docs, t_docs)
+
+                # Index issues/PRs
+                t0 = time.monotonic()
+                n_items = index_issues(
+                    settings, conn, embedder, repo,
+                    buffer=buffer if is_bulk else None,
+                )
+                if is_bulk and buffer is not None:
+                    n_flushed = buffer.flush()
+                    conn.commit()
+                    log.info("issues flushed: %d chunks", n_flushed)
+                t_issues = time.monotonic() - t0
+                log.info("index issues: %d items indexed (%.1fs)", n_items, t_issues)
+
+                # Index code
+                t0 = time.monotonic()
+                n_code = index_code(
+                    settings, conn, embedder, repo,
+                    buffer=buffer if is_bulk else None,
+                )
+                if is_bulk and buffer is not None:
+                    n_flushed = buffer.flush()
+                    conn.commit()
+                    log.info("code flushed: %d chunks", n_flushed)
+                t_code = time.monotonic() - t0
+                log.info("index code: %d files updated (%.1fs)", n_code, t_code)
+
+                # Record success
+                finished_at = db.record_sync_run(
+                    conn, repo, route, n_docs, n_items, n_code
+                )
+                db.record_sync_attempt(conn, repo, success=True)
+                synced_ts = finished_at.isoformat() if finished_at is not None else "?"
+                log.info("indexed at %s (route=%s)", synced_ts, route)
+            except Exception as exc:
+                conn.rollback()
+                db.record_sync_attempt(conn, repo, success=False, error=str(exc))
+                if is_bulk:
+                    raise
+                failed_repos[repo] = str(exc)
+                log.exception(
+                    "index failed for %s (route=%s), continuing with remaining repos",
+                    repo, route,
+                )
+
+        # --- Bulk path: create heavy indexes in batch ---
+        if is_bulk:
+            t0 = time.monotonic()
+            schema.create_heavy_indexes(conn)
+            t_idx = time.monotonic() - t0
+            log.info("heavy indexes created (%.1fs)", t_idx)
+
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT source_type, count(*) FROM chunks GROUP BY 1 ORDER BY 1"
+            )
+            for st, n in cur.fetchall():
+                log.info("chunks[%s] = %d", st, n)
+
+        t_total_elapsed = time.monotonic() - t_total
+        log.info("total index time: %.1fs", t_total_elapsed)
+
+        if failed_repos:
+            detail = "; ".join(f"{r}: {e}" for r, e in failed_repos.items())
+            raise RuntimeError(
+                f"index failed for {len(failed_repos)}/{len(targets)} repo(s): {detail}"
+            )
+
+    finally:
+        _release_lock(conn)
+        conn.close()
+
+
+# ── run_ingest (combined fetch + index) — backward compatible ────────────
+
+
 def run_ingest(
     settings: Settings | None = None,
     repos: list[str] | None = None,
     rebuild: bool = False,
 ) -> None:
+    """Combined fetch + index (legacy ingest behavior).
+
+    Equivalent to calling run_fetch then run_index sequentially.
+    Backward-compatible: ``shiori ingest`` (no subcommand) and
+    ``shiori ingest run`` both call this function.
+    """
     settings = settings or load_settings()
 
     # Allowlist validation: ensure specified repo is in settings.repos (issue #63)
@@ -167,85 +424,77 @@ def run_ingest(
 
         failed_repos: dict[str, str] = {}
         for repo in targets:
-            log.info("=== %s ===", repo)
+            log.info("=== %s === (fetch + index)", repo)
 
             try:
-                # docs phase
+                # --- Fetch phase ---
+                # docs: git pull
                 t0 = time.monotonic()
-                n_docs = sync_docs(
-                    settings, conn, embedder, repo, provider,
+                fetch_docs(settings, conn, repo, provider)
+                t_fetch_docs = time.monotonic() - t0
+                log.info("fetch docs: %.1fs", t_fetch_docs)
+
+                # issues: API
+                t0 = time.monotonic()
+                fetch_issues(settings, conn, repo, provider)
+                t_fetch_issues = time.monotonic() - t0
+                log.info("fetch issues: %.1fs", t_fetch_issues)
+
+                # --- Index phase ---
+                # docs: walk + chunk + embed
+                t0 = time.monotonic()
+                n_docs = index_docs(
+                    settings, conn, embedder, repo,
                     buffer=buffer if is_bulk else None,
                 )
                 if is_bulk:
                     assert buffer is not None
                     n_flushed = buffer.flush()
-                    conn.commit()  # Commit metadata (doc_files, set_cursor)
+                    conn.commit()
                     log.info("docs flushed: %d chunks", n_flushed)
                 t_docs = time.monotonic() - t0
-                log.info("docs: %d files updated (%.1fs)", n_docs, t_docs)
+                log.info("index docs: %d files updated (%.1fs)", n_docs, t_docs)
 
-                # issues phase
+                # issues: read issue_items + chunk + embed
                 t0 = time.monotonic()
-                n_items = sync_issues(
-                    settings, conn, embedder, repo, provider,
+                n_items = index_issues(
+                    settings, conn, embedder, repo,
                     buffer=buffer if is_bulk else None,
                 )
                 if is_bulk:
                     assert buffer is not None
                     n_flushed = buffer.flush()
-                    conn.commit()  # Commit metadata (issue_items, set_cursor)
+                    conn.commit()
                     log.info("issues flushed: %d chunks", n_flushed)
                 t_issues = time.monotonic() - t0
-                log.info("issues/PR: %d items indexed (%.1fs)", n_items, t_issues)
+                log.info("index issues: %d items indexed (%.1fs)", n_items, t_issues)
 
-                # code phase
+                # code: walk + chunk + embed
                 t0 = time.monotonic()
-                n_code = sync_code(
-                    settings, conn, embedder, repo, provider,
+                n_code = index_code(
+                    settings, conn, embedder, repo,
                     buffer=buffer if is_bulk else None,
                 )
                 if is_bulk:
                     assert buffer is not None
                     n_flushed = buffer.flush()
-                    conn.commit()  # Commit metadata (doc_files, set_cursor)
+                    conn.commit()
                     log.info("code flushed: %d chunks", n_flushed)
                 t_code = time.monotonic() - t0
-                log.info("code: %d files updated (%.1fs)", n_code, t_code)
+                log.info("index code: %d files updated (%.1fs)", n_code, t_code)
 
                 finished_at = db.record_sync_run(
                     conn, repo, route, n_docs, n_items, n_code
                 )
-                # Record the successful attempt so shiori_status can report it and
-                # so a failure streak from a prior CLI/compose ingest run is
-                # cleared (issue #194 -- record_sync_run alone does not reset
-                # consecutive_failures, only record_sync_attempt(success=True)
-                # does; mirrors _do_sync in mcp_server.py, the MCP-tool ingest
-                # path this CLI/compose path duplicates).
                 db.record_sync_attempt(conn, repo, success=True)
                 synced_ts = finished_at.isoformat() if finished_at is not None else "?"
                 log.info("synced at %s (route=%s)", synced_ts, route)
             except Exception as exc:
-                # Record the failed attempt so shiori_status can surface it
-                # (issue #194, same as the _do_sync path in mcp_server.py) --
-                # without this, a repo whose CLI/compose ingest fails every time
-                # leaves no trace at all and the "consecutive failures" warning
-                # never fires for this route. record_sync_run / record_sync_attempt
-                # each commit on their own (db.py), so this rollback only discards
-                # *this* repo's own uncommitted work -- an earlier repo in this
-                # same loop already landed via its own commit (issue #199
-                # rollback-scope question).
+                # Record the failed attempt (issue #194)
                 conn.rollback()
                 db.record_sync_attempt(conn, repo, success=False, error=str(exc))
                 if is_bulk:
-                    # Bulk (initial full ingest) has no per-repo resume story, so
-                    # a partial failure still aborts the whole run immediately,
-                    # same as before (issue #199).
                     raise
-                # Diff sync (normal operation, mirrors _do_sync in
-                # mcp_server.py): one repo's failure must not block the rest
-                # (issue #199) -- record and move on, then raise an aggregate
-                # error (and thus a non-zero CLI exit) once every repo has had
-                # a chance to run.
                 failed_repos[repo] = str(exc)
                 log.exception(
                     "sync failed for %s (route=%s), continuing with remaining repos",

@@ -227,9 +227,11 @@ class TestRunIngestSyncAttemptRecording:
             patch("shiori.ingest._is_bulk_path", return_value=False),
             patch("shiori.ingest.build_token_provider", return_value=MagicMock()),
             patch("shiori.ingest.Embedder", return_value=MagicMock()),
-            patch("shiori.ingest.sync_docs", return_value=1),
-            patch("shiori.ingest.sync_issues", return_value=2),
-            patch("shiori.ingest.sync_code", return_value=3),
+            patch("shiori.ingest.fetch_docs", return_value="abc123"),
+            patch("shiori.ingest.index_docs", return_value=1),
+            patch("shiori.ingest.fetch_issues", return_value=5),
+            patch("shiori.ingest.index_issues", return_value=2),
+            patch("shiori.ingest.index_code", return_value=3),
             patch(
                 "shiori.ingest.db.record_sync_run",
                 return_value=MagicMock(isoformat=lambda: "2026-01-01T00:00:00+00:00"),
@@ -262,7 +264,7 @@ class TestRunIngestSyncAttemptRecording:
             patch("shiori.ingest._is_bulk_path", return_value=False),
             patch("shiori.ingest.build_token_provider", return_value=MagicMock()),
             patch("shiori.ingest.Embedder", return_value=MagicMock()),
-            patch("shiori.ingest.sync_docs", side_effect=RuntimeError("sync failed")),
+            patch("shiori.ingest.fetch_docs", side_effect=RuntimeError("sync failed")),
             patch("shiori.ingest.db.record_sync_attempt") as mock_record_attempt,
         ):
             with pytest.raises(RuntimeError, match="sync failed"):
@@ -274,7 +276,7 @@ class TestRunIngestSyncAttemptRecording:
         )
 
     def test_failure_in_second_phase_still_records_attempt(self):
-        """docs フェーズは成功し issues フェーズで失敗する場合でも記録される。"""
+        """docsフェーズは成功し issuesフェーズで失敗する場合でも記録される。"""
         from shiori.ingest import run_ingest
 
         mock_conn = self._mock_conn()
@@ -288,8 +290,10 @@ class TestRunIngestSyncAttemptRecording:
             patch("shiori.ingest._is_bulk_path", return_value=False),
             patch("shiori.ingest.build_token_provider", return_value=MagicMock()),
             patch("shiori.ingest.Embedder", return_value=MagicMock()),
-            patch("shiori.ingest.sync_docs", return_value=1),
-            patch("shiori.ingest.sync_issues", side_effect=RuntimeError("issues failed")),
+            patch("shiori.ingest.fetch_docs", return_value="abc123"),
+            patch("shiori.ingest.index_docs", return_value=1),
+            patch("shiori.ingest.fetch_issues", return_value=5),
+            patch("shiori.ingest.index_issues", side_effect=RuntimeError("issues failed")),
             patch("shiori.ingest.db.record_sync_attempt") as mock_record_attempt,
         ):
             with pytest.raises(RuntimeError, match="issues failed"):
@@ -741,10 +745,10 @@ class TestRunIngestPerRepoContinueOnFailure:
         mock_settings = MagicMock()
         mock_settings.repos = ["owner/repo1", "owner/repo2"]
 
-        def fake_sync_docs(settings, conn, embedder, repo, provider, buffer=None):
+        def fake_fetch_docs(settings, conn, repo, provider):
             if repo == "owner/repo1":
                 raise RuntimeError("boom")
-            return 1
+            return "abc123"
 
         with (
             patch("shiori.ingest.db.connect", return_value=mock_conn),
@@ -753,9 +757,11 @@ class TestRunIngestPerRepoContinueOnFailure:
             patch("shiori.ingest._is_bulk_path", return_value=False),
             patch("shiori.ingest.build_token_provider", return_value=MagicMock()),
             patch("shiori.ingest.Embedder", return_value=MagicMock()),
-            patch("shiori.ingest.sync_docs", side_effect=fake_sync_docs),
-            patch("shiori.ingest.sync_issues", return_value=2),
-            patch("shiori.ingest.sync_code", return_value=3),
+            patch("shiori.ingest.fetch_docs", side_effect=fake_fetch_docs),
+            patch("shiori.ingest.index_docs", return_value=1),
+            patch("shiori.ingest.fetch_issues", return_value=5),
+            patch("shiori.ingest.index_issues", return_value=2),
+            patch("shiori.ingest.index_code", return_value=3),
             patch(
                 "shiori.ingest.db.record_sync_run",
                 return_value=MagicMock(isoformat=lambda: "2026-01-01T00:00:00+00:00"),
@@ -786,9 +792,11 @@ class TestRunIngestPerRepoContinueOnFailure:
             patch("shiori.ingest._is_bulk_path", return_value=False),
             patch("shiori.ingest.build_token_provider", return_value=MagicMock()),
             patch("shiori.ingest.Embedder", return_value=MagicMock()),
-            patch("shiori.ingest.sync_docs", return_value=1),
-            patch("shiori.ingest.sync_issues", return_value=2),
-            patch("shiori.ingest.sync_code", return_value=3),
+            patch("shiori.ingest.fetch_docs", return_value="abc123"),
+            patch("shiori.ingest.index_docs", return_value=1),
+            patch("shiori.ingest.fetch_issues", return_value=5),
+            patch("shiori.ingest.index_issues", return_value=2),
+            patch("shiori.ingest.index_code", return_value=3),
             patch(
                 "shiori.ingest.db.record_sync_run",
                 return_value=MagicMock(isoformat=lambda: "2026-01-01T00:00:00+00:00"),
@@ -808,10 +816,10 @@ class TestRunIngestPerRepoContinueOnFailure:
         mock_settings = MagicMock()
         mock_settings.repos = ["owner/repo1", "owner/repo2"]
 
-        def fake_sync_docs(settings, conn, embedder, repo, provider, buffer=None):
+        def fake_fetch_docs(settings, conn, repo, provider):
             if repo == "owner/repo1":
                 raise RuntimeError("boom")
-            return 1
+            return "abc123"
 
         with (
             patch("shiori.ingest.db.connect", return_value=mock_conn),
@@ -822,9 +830,11 @@ class TestRunIngestPerRepoContinueOnFailure:
             patch("shiori.ingest.ChunkBuffer", return_value=MagicMock()),
             patch("shiori.ingest.build_token_provider", return_value=MagicMock()),
             patch("shiori.ingest.Embedder", return_value=MagicMock()),
-            patch("shiori.ingest.sync_docs", side_effect=fake_sync_docs),
-            patch("shiori.ingest.sync_issues", return_value=2),
-            patch("shiori.ingest.sync_code", return_value=3),
+            patch("shiori.ingest.fetch_docs", side_effect=fake_fetch_docs),
+            patch("shiori.ingest.fetch_issues", return_value=5),
+            patch("shiori.ingest.index_docs", return_value=1),
+            patch("shiori.ingest.index_issues", return_value=2),
+            patch("shiori.ingest.index_code", return_value=3),
             patch("shiori.ingest.db.record_sync_attempt") as mock_record_attempt,
         ):
             with pytest.raises(RuntimeError, match="boom"):

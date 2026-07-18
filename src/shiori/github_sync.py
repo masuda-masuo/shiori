@@ -10,6 +10,11 @@ Decisions:
 - Bulk path: ChunkBuffer batches across files, bulk-inserts chunks, coarsens commits (issue #72).
 - _git_fetch_ref / _git_delete_ref: PR head file primitives (issue #81).
 Auth via TokenProvider (detailed design/09); git via http.extraHeader; API via httpx Auth hook.
+
+Subcommand split (issue #306):
+- fetch_issues / fetch_docs: API / git only, no chunk/embed
+- index_issues / index_docs / index_code: read from issue_items/doc_files/filesystem, chunk+embed
+- sync_issues / sync_docs / sync_code: combined fetch+index (backward compat)
 '''
 
 from __future__ import annotations
@@ -17,8 +22,8 @@ from __future__ import annotations
 from .api_utils import API, _GitHubAuth, _api_pages, _api_pages_gen
 from .chunk_buffer import ChunkBuffer
 from .git_utils import _auth_args, _authed_url, _git, _git_delete_ref, _git_fetch_ref, _redact
-from .sync_code import sync_code
-from .sync_docs import sync_docs
+from .sync_code import sync_code, index_code
+from .sync_docs import sync_docs, fetch_docs, index_docs
 from .sync_issues import (
     _index_item,
     _issue_title_state_kind,
@@ -26,6 +31,8 @@ from .sync_issues import (
     _sync_pr_reviews,
     _upsert_issue_item,
     sync_issues,
+    fetch_issues,
+    index_issues,
 )
 from .sync_utils import _clean_text, _CONTROL_CHARS_RE, _is_bot, _should_index
 
@@ -34,6 +41,9 @@ __all__ = [  # re-export (ruff F401 avoidance)
     "_CONTROL_CHARS_RE", "_is_bot", "_should_index", "_clean_text",
     "_redact", "_git", "_auth_args", "_authed_url", "_git_fetch_ref", "_git_delete_ref",
     "sync_docs", "sync_code", "sync_issues",
+    "fetch_docs", "index_docs",
+    "fetch_issues", "index_issues",
+    "index_code",
     "_upsert_issue_item", "_issue_title_state_kind", "_propagate_issue_state",
     "_index_item", "_sync_pr_reviews",
 ]

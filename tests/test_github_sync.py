@@ -963,7 +963,8 @@ class TestSyncIssuesCursor:
 class TestSyncIssuesPrReviewGuard:
     """sync_issues の PR review 同期ガード条件のテスト（issue #289）。"""
 
-    def _page_with_pr(self) -> list[dict]:
+    @classmethod
+    def _page_with_pr(cls) -> list[dict]:
         return [{
             "number": 42,
             "pull_request": {},  # PR であることを示す
@@ -975,6 +976,13 @@ class TestSyncIssuesPrReviewGuard:
             "created_at": "2024-01-01T00:00:00Z",
             "updated_at": "2024-01-02T00:00:00Z",
         }]
+
+    def _mock_api_pages(self, *args, **kwargs):
+        """Return PR page for /issues endpoints, empty for comments endpoints."""
+        url = args[1] if len(args) >= 2 else ""
+        if "/issues/comments" in url or "/pulls/comments" in url:
+            return iter([[]])  # empty page
+        return iter([self._page_with_pr()])
 
     @patch("shiori.sync_issues.get_cursor", return_value=None)
     @patch("shiori.sync_issues._api_pages_gen")
@@ -990,7 +998,7 @@ class TestSyncIssuesPrReviewGuard:
         """dev repo の diff sync では _sync_pr_reviews が呼ばれる。"""
         settings = Settings()
         settings.dev_repos = {"o/r"}
-        mock_pages.return_value = iter([self._page_with_pr()])
+        mock_pages.side_effect = self._mock_api_pages
         sync_issues(settings, MagicMock(), MagicMock(), "o/r", MagicMock(), buffer=None)
         mock_reviews.assert_called_once()
 
@@ -1008,7 +1016,7 @@ class TestSyncIssuesPrReviewGuard:
         """ref repo の diff sync では _sync_pr_reviews は呼ばれない。"""
         settings = Settings()
         settings.dev_repos = ["other/repo"]  # o/r は dev ではない
-        mock_pages.return_value = iter([self._page_with_pr()])
+        mock_pages.side_effect = self._mock_api_pages
         sync_issues(settings, MagicMock(), MagicMock(), "o/r", MagicMock(), buffer=None)
         mock_reviews.assert_not_called()
 
@@ -1026,6 +1034,6 @@ class TestSyncIssuesPrReviewGuard:
         """ref repo でも bulk 時は _sync_pr_reviews が呼ばれる。"""
         settings = Settings()
         settings.dev_repos = ["other/repo"]
-        mock_pages.return_value = iter([self._page_with_pr()])
+        mock_pages.side_effect = self._mock_api_pages
         sync_issues(settings, MagicMock(), MagicMock(), "o/r", MagicMock(), buffer=MagicMock())
         mock_reviews.assert_called_once()
