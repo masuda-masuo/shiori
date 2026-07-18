@@ -424,11 +424,11 @@ def index_issues(
 
     # Collect issue body kinds and states for reference
     # issue_no -> (kind, state) from the body row (comment_id=0)
+    # r[2]=kind, r[6]=state (see SELECT column order above)
     issue_bodies: dict[int, tuple[str | None, str | None]] = {}
     for r in rows:
         if r[1] == 0:  # comment_id == 0 => body row
-            issue_bodies[r[0]] = (r[3] if r[3] else r[2],
-                                  r[6])  # title or kind as kind, state
+            issue_bodies[r[0]] = (r[2], r[6])  # kind, state from body row
 
     n_indexed = 0
     for r in rows:

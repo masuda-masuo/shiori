@@ -170,7 +170,8 @@ def run_fetch(
     conn = db.connect(settings)
     schema.migrate(conn, settings)
 
-    if not _acquire_lock(conn):
+    lock_acquired = _acquire_lock(conn)
+    if not lock_acquired:
         log.info("skipped: sync already running in another process")
         conn.close()
         return
@@ -209,7 +210,8 @@ def run_fetch(
         t_total_elapsed = time.monotonic() - t_total
         log.info("total fetch time: %.1fs", t_total_elapsed)
     finally:
-        _release_lock(conn)
+        if lock_acquired:
+            _release_lock(conn)
         conn.close()
 
 
@@ -239,7 +241,8 @@ def run_index(
     else:
         schema.migrate(conn, settings)
 
-    if not _acquire_lock(conn):
+    lock_acquired = _acquire_lock(conn)
+    if not lock_acquired:
         log.info("skipped: sync already running in another process")
         conn.close()
         return
@@ -344,7 +347,8 @@ def run_index(
             )
 
     finally:
-        _release_lock(conn)
+        if lock_acquired:
+            _release_lock(conn)
         conn.close()
 
 
