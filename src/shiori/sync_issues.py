@@ -224,6 +224,12 @@ def _sync_pr_reviews(
             )
 
 
+def _split_into_chunks(items: list[int], n: int) -> list[list[int]]:
+    """Split *items* into *n* roughly equal chunks."""
+    chunk_size = max(1, len(items) // max(1, n))
+    return [items[i:i + chunk_size] for i in range(0, len(items), chunk_size)]
+
+
 def _fetch_pr_reviews_parallel(
     settings: Settings,
     repo: str,
@@ -233,11 +239,12 @@ def _fetch_pr_reviews_parallel(
     """Fetch PR review submissions for multiple PRs in parallel.
 
     Uses ThreadPoolExecutor to parallelize per-PR API calls (issue #308).
-    Each thread creates its own httpx.Client and DB connection since neither
-    is thread-safe.
+    PRs are split into chunks (one per worker); each worker shares one
+    httpx.Client and one DB connection across its chunk to avoid per-PR
+    connection churn.
 
     Returns the number of PRs for which reviews were successfully fetched.
-    Failures are logged as warnings and do not abort the overall fetch.
+    Per-PR failures are logged as warnings and do not abort the overall fetch.
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -245,36 +252,39 @@ def _fetch_pr_reviews_parallel(
         "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
     }
+    n_workers = min(MAX_PR_REVIEW_WORKERS, max(1, len(pr_numbers)))
     n = 0
 
-    def _fetch_one(issue_no: int) -> bool:
+    def _worker(chunk: list[int]) -> int:
+        count = 0
         conn2 = db.connect(settings)
         try:
             with httpx.Client(headers=headers, auth=_GitHubAuth(provider), timeout=30.0) as cl:
-                _sync_pr_reviews(
-                    cl, conn2, embedder=None, settings=settings,
-                    repo=repo, issue_no=issue_no,
-                    do_index=False,
-                )
+                for no in chunk:
+                    try:
+                        _sync_pr_reviews(
+                            cl, conn2, embedder=None, settings=settings,
+                            repo=repo, issue_no=no,
+                            do_index=False,
+                        )
+                        count += 1
+                    except Exception as exc:
+                        log.warning(
+                            "PR #%d review fetch failed, continuing: %s", no, exc,
+                        )
             conn2.commit()
-            return True
-        except Exception:
-            conn2.rollback()
-            raise
         finally:
             conn2.close()
+        return count
 
-    with ThreadPoolExecutor(max_workers=MAX_PR_REVIEW_WORKERS) as executor:
-        futures = {executor.submit(_fetch_one, no): no for no in pr_numbers}
+    chunks = _split_into_chunks(pr_numbers, n_workers)
+    with ThreadPoolExecutor(max_workers=n_workers) as executor:
+        futures = {executor.submit(_worker, c): c[0] for c in chunks if c}
         for future in as_completed(futures):
             try:
-                if future.result():
-                    n += 1
+                n += future.result()
             except Exception as exc:
-                log.warning(
-                    "PR #%d review fetch failed, continuing: %s",
-                    futures[future], exc,
-                )
+                log.warning("PR review batch fetch failed: %s", exc)
     return n
 
 
