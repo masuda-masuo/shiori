@@ -4,8 +4,8 @@ import httpx
 from typing import Any
 
 from .registry import mcp
-from .common import _resolve_repo
-from ..pipeline import _github_client, _conn
+from .common import _resolve_repo, _github_client
+from ..pipeline import _conn
 from ..github_sync import API, _api_pages
 from ..links import merge_outbound_refs
 from .. import db

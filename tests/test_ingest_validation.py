@@ -336,7 +336,7 @@ class TestDoSyncPreLoopFailureRecording:
                 ),
             ),
             patch("shiori.pipeline._conn", return_value=mock_conn),
-            patch("shiori.mcp_server.db.record_sync_attempt") as mock_record_attempt,
+            patch("shiori.pipeline.db.record_sync_attempt") as mock_record_attempt,
         ):
             mock_settings.repos = ["owner/repo1", "owner/repo2"]
             mock_lock.acquire.return_value = True
@@ -370,7 +370,7 @@ class TestDoSyncPreLoopFailureRecording:
                 side_effect=ValueError("GitHub App configuration is incomplete"),
             ),
             patch("shiori.pipeline._conn", return_value=mock_conn),
-            patch("shiori.mcp_server.db.record_sync_attempt") as mock_record_attempt,
+            patch("shiori.pipeline.db.record_sync_attempt") as mock_record_attempt,
         ):
             mock_settings.repos = ["owner/repo"]
             mock_lock.acquire.return_value = True
@@ -397,7 +397,7 @@ class TestDoSyncPreLoopFailureRecording:
                 side_effect=ValueError("boom"),
             ),
             patch("shiori.pipeline._conn", return_value=mock_conn),
-            patch("shiori.mcp_server.db.record_sync_attempt"),
+            patch("shiori.pipeline.db.record_sync_attempt"),
         ):
             mock_settings.repos = ["owner/repo"]
             mock_lock.acquire.return_value = True
@@ -474,7 +474,7 @@ class TestDoSyncMidStageFailureRecording:
                 "shiori.pipeline.schema.migrate",
                 side_effect=RuntimeError("migrate failed"),
             ),
-            patch("shiori.mcp_server.db.record_sync_attempt") as mock_record_attempt,
+            patch("shiori.pipeline.db.record_sync_attempt") as mock_record_attempt,
         ):
             mock_settings.repos = ["owner/repo1", "owner/repo2"]
             mock_lock.acquire.return_value = True
@@ -513,7 +513,7 @@ class TestDoSyncMidStageFailureRecording:
             patch("shiori.pipeline._conn", return_value=mock_conn),
             patch("shiori.pipeline._is_bulk_path", return_value=False),
             patch("shiori.pipeline.schema.migrate"),
-            patch("shiori.mcp_server.db.record_sync_attempt") as mock_record_attempt,
+            patch("shiori.pipeline.db.record_sync_attempt") as mock_record_attempt,
         ):
             mock_settings.repos = ["owner/repo"]
             mock_lock.acquire.return_value = True
@@ -540,7 +540,7 @@ class TestDoSyncMidStageFailureRecording:
                 "shiori.pipeline._is_bulk_path",
                 side_effect=RuntimeError("bulk detection failed"),
             ),
-            patch("shiori.mcp_server.db.record_sync_attempt") as mock_record_attempt,
+            patch("shiori.pipeline.db.record_sync_attempt") as mock_record_attempt,
         ):
             mock_settings.repos = ["owner/repo"]
             mock_lock.acquire.return_value = True
@@ -567,7 +567,7 @@ class TestDoSyncMidStageFailureRecording:
                 "shiori.pipeline.schema.migrate",
                 side_effect=RuntimeError("migrate failed"),
             ),
-            patch("shiori.mcp_server.db.record_sync_attempt"),
+            patch("shiori.pipeline.db.record_sync_attempt"),
         ):
             mock_settings.repos = ["owner/repo"]
             mock_lock.acquire.return_value = True
@@ -627,7 +627,7 @@ class TestDoSyncPerRepoContinueOnFailure:
                 "shiori.mcp_server.db.record_sync_run",
                 return_value=MagicMock(isoformat=lambda: "2026-01-01T00:00:00+00:00"),
             ),
-            patch("shiori.mcp_server.db.record_sync_attempt") as mock_record_attempt,
+            patch("shiori.pipeline.db.record_sync_attempt") as mock_record_attempt,
         ):
             mock_settings.repos = ["owner/repo1", "owner/repo2"]
             mock_lock.acquire.return_value = True
@@ -665,7 +665,7 @@ class TestDoSyncPerRepoContinueOnFailure:
                 "shiori.mcp_server.db.record_sync_run",
                 return_value=MagicMock(isoformat=lambda: "2026-01-01T00:00:00+00:00"),
             ),
-            patch("shiori.mcp_server.db.record_sync_attempt") as mock_record_attempt,
+            patch("shiori.pipeline.db.record_sync_attempt") as mock_record_attempt,
         ):
             mock_settings.repos = ["owner/repo1", "owner/repo2"]
             mock_lock.acquire.return_value = True
@@ -700,7 +700,7 @@ class TestDoSyncPerRepoContinueOnFailure:
             patch("shiori.pipeline.sync_docs", side_effect=fake_sync_docs),
             patch("shiori.pipeline.sync_issues", return_value=2),
             patch("shiori.pipeline.sync_code", return_value=3),
-            patch("shiori.mcp_server.db.record_sync_attempt") as mock_record_attempt,
+            patch("shiori.pipeline.db.record_sync_attempt") as mock_record_attempt,
         ):
             mock_settings.repos = ["owner/repo1", "owner/repo2"]
             mock_lock.acquire.return_value = True
@@ -878,7 +878,7 @@ class TestDoSyncOperationalErrorHandling:
             ),
             patch("shiori.pipeline.sync_issues", return_value=2),
             patch("shiori.pipeline.sync_code", return_value=3),
-            patch("shiori.mcp_server.db.record_sync_attempt") as mock_record_attempt,
+            patch("shiori.pipeline.db.record_sync_attempt") as mock_record_attempt,
         ):
             mock_settings.repos = ["owner/repo1", "owner/repo2"]
             mock_lock.acquire.return_value = True

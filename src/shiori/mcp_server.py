@@ -5,18 +5,14 @@
 from __future__ import annotations
 
 import logging
-import os
 from typing import Any, Literal
 
 from . import schema
 from .dashboard import register_dashboard
-from .github_auth import build_token_provider
 from .pipeline import (
     _conn,
     _do_sync,
-    _ensure_phase1,
     _get_embedder,  # noqa: F401 — re-export for dashboard
-    _github_client,
     settings,
 )
 from .tools.registry import mcp
@@ -24,7 +20,7 @@ from .tools.common import (
     _get_token_provider,  # noqa: F401 — re-export for tests
     _validate_repo_name,  # noqa: F401 — re-export for tests
     _infer_repo_from_cwd,  # noqa: F401 — re-export for tests
-    _resolve_repo,
+    _resolve_repo,  # noqa: F401 — re-export for tests
     _resolve_repo_filter,  # noqa: F401 — re-export for dashboard
     _resolve_repos,  # noqa: F401 — re-export for tests
     _make_filters,  # noqa: F401 — re-export for tests
@@ -32,7 +28,7 @@ from .tools.common import (
 
 log = logging.getLogger(__name__)
 
-from .tools import (  # noqa: E402 — import registers @mcp.tool as side effect
+from .tools import (  # noqa: E402, F401 — import registers @mcp.tool as side effect
     search as _t_search, list_tree as _t_list_tree, read as _t_read,
     pr as _t_pr, grep as _t_grep, report as _t_report, links as _t_links,
     status as _t_status,
