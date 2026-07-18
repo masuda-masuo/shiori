@@ -23,7 +23,19 @@ Shiori is a local **Project Knowledge Search MCP** server that enables AI agents
 ## 3. System Architecture
 
 The pipeline flow is: **Sync/Ingest → Chunk → Embed → Index → Search → MCP Tools**.
-*   **Data Sources**: Two paths: Documents/code (pulled via Git) and Issues/PRs (downloaded via GitHub APIs).
+
+To ensure both privacy and ultra-fast context retrieval, Shiori is structured as a **3-Tier Data Architecture**:
+
+1.  **Tier 1: Database (PostgreSQL)**:
+    *   **Store**: Handles semantic vectors (`pgvector`), full-text tokens (`pgroonga`), and metadata.
+    *   **Role**: Resolves queries and returns "pointers" (coordinates like file path, line range, or issue ID) and small context snippets.
+2.  **Tier 2: Local Clones (Local Disk)**:
+    *   **Store**: Shallow checkouts of target repositories' `main` branches.
+    *   **Role**: Serves full-text file inspections locally via `shiori_read_file`. AI agents fetch code fragments only after finding coordinates in Tier 1.
+3.  **Tier 3: Egress & Live Integration (GitHub Live API / External MCPs)**:
+    *   **Store**: Relies on external, remote sources.
+    *   **Role**: Handles in-flight modifications (creating issues, posting comments, diffing pull request heads). Shiori remains a read-only local search engine, delegating write actions to standard GitHub MCPs.
+
 *   **Deployments**: Two containers: Database (PostgreSQL) and MCP server (managed via Docker Compose).
 
 ---
