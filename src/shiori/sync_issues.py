@@ -11,11 +11,14 @@ from .chunk_buffer import ChunkBuffer
 from .chunking import detect_language, split_issue_text
 from .config import Settings
 from .db import delete_chunks_by_key, get_cursor, insert_chunk, set_cursor
+from . import db
 from .embedding import Embedder
 from .github_auth import TokenProvider
 from .sync_utils import _clean_text, _is_bot, _should_index
 
 log = logging.getLogger(__name__)
+
+MAX_PR_REVIEW_WORKERS = 10
 
 
 def _upsert_issue_item(conn: psycopg.Connection, row: dict) -> None:
@@ -221,6 +224,60 @@ def _sync_pr_reviews(
             )
 
 
+def _fetch_pr_reviews_parallel(
+    settings: Settings,
+    repo: str,
+    provider: TokenProvider,
+    pr_numbers: list[int],
+) -> int:
+    """Fetch PR review submissions for multiple PRs in parallel.
+
+    Uses ThreadPoolExecutor to parallelize per-PR API calls (issue #308).
+    Each thread creates its own httpx.Client and DB connection since neither
+    is thread-safe.
+
+    Returns the number of PRs for which reviews were successfully fetched.
+    Failures are logged as warnings and do not abort the overall fetch.
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    n = 0
+
+    def _fetch_one(issue_no: int) -> bool:
+        conn2 = db.connect(settings)
+        try:
+            with httpx.Client(headers=headers, auth=_GitHubAuth(provider), timeout=30.0) as cl:
+                _sync_pr_reviews(
+                    cl, conn2, embedder=None, settings=settings,
+                    repo=repo, issue_no=issue_no,
+                    do_index=False,
+                )
+            conn2.commit()
+            return True
+        except Exception:
+            conn2.rollback()
+            raise
+        finally:
+            conn2.close()
+
+    with ThreadPoolExecutor(max_workers=MAX_PR_REVIEW_WORKERS) as executor:
+        futures = {executor.submit(_fetch_one, no): no for no in pr_numbers}
+        for future in as_completed(futures):
+            try:
+                if future.result():
+                    n += 1
+            except Exception as exc:
+                log.warning(
+                    "PR #%d review fetch failed, continuing: %s",
+                    futures[future], exc,
+                )
+    return n
+
+
 # ── Fetch (API only, no chunk/embed) ──────────────────────────────────────
 
 
@@ -363,7 +420,7 @@ def fetch_issues(
         if _skip_reviews is None:
             _skip_reviews = repo not in settings.dev_repos
         if not _skip_reviews:
-            # Re-read issues to find PRs (cursors already advanced above)
+            # Collect PR numbers (cursors already advanced above)
             pr_cursor = get_cursor(conn, repo, "issues")
             params_pr = {
                 "state": "all",
@@ -373,20 +430,17 @@ def fetch_issues(
             }
             if pr_cursor:
                 params_pr["since"] = pr_cursor
+            pr_numbers: list[int] = []
             for page in _api_pages_gen(client, f"{API}/repos/{repo}/issues", params_pr):
                 if not page:
                     break
                 for it in page:
-                    if "pull_request" not in it:
-                        continue
-                    no = it["number"]
-                    _sync_pr_reviews(
-                        client, conn, embedder=None, settings=settings,
-                        repo=repo, issue_no=no,
-                        do_index=False,  # fetch-only
-                    )
-                    n_fetched += 1
-                conn.commit()
+                    if "pull_request" in it:
+                        pr_numbers.append(it["number"])
+            if pr_numbers:
+                n_fetched += _fetch_pr_reviews_parallel(
+                    settings, repo, provider, pr_numbers,
+                )
 
     return n_fetched
 
