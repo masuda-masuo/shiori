@@ -166,13 +166,13 @@ class TestStatusIndexStale:
         with (
             patch("shiori.tools.status._conn"),
             patch("shiori.tools.status.settings") as mock_settings,
-            patch("shiori.mcp_server.db.get_sync_runs",
+            patch("shiori.tools.status.db.get_sync_runs",
                   return_value=sync_runs or {}),
-            patch("shiori.mcp_server.db.get_all_repo_index_state",
+            patch("shiori.tools.status.db.get_all_repo_index_state",
                   return_value=index_state or {}),
-            patch("shiori.mcp_server.db.get_chunk_counts", return_value={}),
-            patch("shiori.mcp_server.db.get_issue_item_count", return_value=0),
-            patch("shiori.mcp_server.db.get_cursors", return_value={}),
+            patch("shiori.tools.status.db.get_chunk_counts", return_value={}),
+            patch("shiori.tools.status.db.get_issue_item_count", return_value=0),
+            patch("shiori.tools.status.db.get_cursors", return_value={}),
         ):
             mock_settings.repos = ["o/r"]
             mock_settings.sync_interval_seconds = 10

@@ -12,6 +12,7 @@ from .dashboard import register_dashboard
 from .pipeline import (
     _conn,
     _do_sync,
+    _ensure_phase1,  # noqa: F401 — re-export for tests
     _get_embedder,  # noqa: F401 — re-export for dashboard
     settings,
 )
