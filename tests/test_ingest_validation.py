@@ -624,7 +624,7 @@ class TestDoSyncPerRepoContinueOnFailure:
             patch("shiori.pipeline.sync_issues", return_value=2),
             patch("shiori.pipeline.sync_code", return_value=3),
             patch(
-                "shiori.mcp_server.db.record_sync_run",
+                "shiori.pipeline.db.record_sync_run",
                 return_value=MagicMock(isoformat=lambda: "2026-01-01T00:00:00+00:00"),
             ),
             patch("shiori.pipeline.db.record_sync_attempt") as mock_record_attempt,
@@ -662,7 +662,7 @@ class TestDoSyncPerRepoContinueOnFailure:
             patch("shiori.pipeline.sync_issues", return_value=2),
             patch("shiori.pipeline.sync_code", return_value=3),
             patch(
-                "shiori.mcp_server.db.record_sync_run",
+                "shiori.pipeline.db.record_sync_run",
                 return_value=MagicMock(isoformat=lambda: "2026-01-01T00:00:00+00:00"),
             ),
             patch("shiori.pipeline.db.record_sync_attempt") as mock_record_attempt,
@@ -935,7 +935,7 @@ class TestDoSyncOperationalErrorHandling:
             patch("shiori.pipeline.sync_issues", return_value=2),
             patch("shiori.pipeline.sync_code", return_value=3),
             patch(
-                "shiori.mcp_server.db.record_sync_attempt",
+                "shiori.pipeline.db.record_sync_attempt",
                 side_effect=fake_record_attempt,
             ) as mock_record_attempt,
         ):
