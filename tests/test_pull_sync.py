@@ -236,7 +236,7 @@ class TestCrossRepoSearchPhase1:
         with (
             patch("shiori.tools.search._conn"),
             patch("shiori.tools.search._get_embedder") as mock_emb,
-            patch("shiori.pipeline.settings") as mock_settings,
+            patch("shiori.tools.search.settings") as mock_settings,
             patch("shiori.tools.search.search.semantic_search", return_value=[]),
             patch("shiori.tools.search._resolve_repo_filter", return_value=None),
             patch("shiori.tools.search._resolve_repos", return_value=["r1", "r2", "r3"]),
@@ -263,7 +263,7 @@ class TestCrossRepoSearchPhase1:
         with (
             patch("shiori.tools.search._conn"),
             patch("shiori.tools.search._get_embedder") as mock_emb,
-            patch("shiori.pipeline.settings") as mock_settings,
+            patch("shiori.tools.search.settings") as mock_settings,
             patch("shiori.tools.search.search.semantic_search", return_value=[]),
             patch("shiori.tools.search._resolve_repo_filter", return_value="o/r"),
             patch("shiori.tools.search._resolve_repo", return_value="o/r"),
