@@ -828,11 +828,14 @@ class TestApiPagesGen:
         client.get.return_value = resp
 
         pages = list(_api_pages_gen(client, "https://api.github.com/repos/o/r/issues/comments", {}, not_found_ok=True))
-        assert pages == [[]]
+        assert pages == []
 
     def test_not_found_ok_transport_error(self):
         client = MagicMock()
         client.get.side_effect = httpx.HTTPError("500")
+
+        with pytest.raises(httpx.HTTPError):
+            list(_api_pages_gen(client, "https://api.github.com/repos/o/r/issues/comments", {}, not_found_ok=True))
 
     def test_not_found_ok_false_raises_on_404(self):
         client = MagicMock()
@@ -908,7 +911,7 @@ class TestSyncIssuesCursor:
             return existing
 
         with (
-            patch("shiori.sync_issues._api_pages_gen", return_value=iter([[]])),
+            patch("shiori.sync_issues._api_pages_gen", side_effect=lambda *a, **kw: iter([[]])),
             patch("shiori.sync_issues.get_cursor", side_effect=get_cursor_side),
             patch("shiori.sync_issues.set_cursor") as mock_set,
         ):

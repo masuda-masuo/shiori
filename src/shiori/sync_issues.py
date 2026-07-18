@@ -305,7 +305,9 @@ def sync_issues(
         params = {"sort": "updated", "direction": "asc", "per_page": 100}
         if since:
             params["since"] = since
+        _any_issue_comments = False
         for page in _api_pages_gen(client, f"{API}/repos/{repo}/issues/comments", params, not_found_ok=True):
+            _any_issue_comments = True
             if not page:
                 break
             for c in page:
@@ -339,7 +341,7 @@ def sync_issues(
                 conn.commit()
             set_cursor(conn, repo, "issue_comments", page[-1]["updated_at"])
 
-        if get_cursor(conn, repo, "issue_comments") is None:
+        if not _any_issue_comments or get_cursor(conn, repo, "issue_comments") is None:
             set_cursor(conn, repo, "issue_comments", datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
 
         # --- PR review comments (with path/line/diff_hunk) ---
@@ -347,7 +349,9 @@ def sync_issues(
         params = {"sort": "updated", "direction": "asc", "per_page": 100}
         if since:
             params["since"] = since
+        _any_pr_review_comments = False
         for page in _api_pages_gen(client, f"{API}/repos/{repo}/pulls/comments", params, not_found_ok=True):
+            _any_pr_review_comments = True
             if not page:
                 break
             for c in page:
@@ -388,7 +392,7 @@ def sync_issues(
                 conn.commit()
             set_cursor(conn, repo, "pr_review_comments", page[-1]["updated_at"])
 
-        if get_cursor(conn, repo, "pr_review_comments") is None:
+        if not _any_pr_review_comments or get_cursor(conn, repo, "pr_review_comments") is None:
             set_cursor(conn, repo, "pr_review_comments", datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
 
     return n_indexed
