@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
-from shiori.mcp_server import _build_warnings, _stale_threshold_seconds
+from shiori.tools.status import _build_warnings, _stale_threshold_seconds
 
 
 # ── No warnings (normal)──
@@ -159,31 +159,31 @@ class TestStaleThresholdSeconds:
 
     def test_disabled_uses_fixed_24h(self):
         """auto sync 無効（sync_interval_seconds<=0）では固定24時間のまま。"""
-        with patch("shiori.mcp_server.settings") as mock_settings:
+        with patch("shiori.tools.status.settings") as mock_settings:
             mock_settings.sync_interval_seconds = 0
             assert _stale_threshold_seconds() == 86400
 
     def test_enabled_scales_with_interval(self):
         """interval=10（issueの実例）では threshold=300（floor）になる。"""
-        with patch("shiori.mcp_server.settings") as mock_settings:
+        with patch("shiori.tools.status.settings") as mock_settings:
             mock_settings.sync_interval_seconds = 10
             assert _stale_threshold_seconds() == 300
 
     def test_enabled_floor_applies_for_tiny_interval(self):
         """interval=1 のような極端に短い値でも floor 未満にはならない。"""
-        with patch("shiori.mcp_server.settings") as mock_settings:
+        with patch("shiori.tools.status.settings") as mock_settings:
             mock_settings.sync_interval_seconds = 1
             assert _stale_threshold_seconds() == 300
 
     def test_enabled_scales_above_floor_for_larger_interval(self):
         """interval が大きい場合は floor でなく interval*倍率が使われる。"""
-        with patch("shiori.mcp_server.settings") as mock_settings:
+        with patch("shiori.tools.status.settings") as mock_settings:
             mock_settings.sync_interval_seconds = 600
             assert _stale_threshold_seconds() == 18000  # 600 * 30
 
     def test_negative_interval_uses_fixed_24h(self):
         """負の値も無効扱いで固定24時間になる。"""
-        with patch("shiori.mcp_server.settings") as mock_settings:
+        with patch("shiori.tools.status.settings") as mock_settings:
             mock_settings.sync_interval_seconds = -1
             assert _stale_threshold_seconds() == 86400
 
@@ -194,7 +194,7 @@ class TestBuildWarningsIntervalDerivedThreshold:
     def test_warns_earlier_when_auto_sync_enabled_with_short_interval(self):
         """interval=10 なら 20 時間経過（issueの実例）でも stale 警告が出る。"""
         info = {"age_seconds": 72715}  # 20.2 hours, from the issue report
-        with patch("shiori.mcp_server.settings") as mock_settings:
+        with patch("shiori.tools.status.settings") as mock_settings:
             mock_settings.sync_interval_seconds = 10
             result = _build_warnings(info, {}, 0, {"docs": "x"})
         assert any("hours since last sync" in w for w in result)
@@ -202,7 +202,7 @@ class TestBuildWarningsIntervalDerivedThreshold:
     def test_no_warning_within_derived_threshold(self):
         """導出した閾値の内側では警告が出ない。"""
         info = {"age_seconds": 100}
-        with patch("shiori.mcp_server.settings") as mock_settings:
+        with patch("shiori.tools.status.settings") as mock_settings:
             mock_settings.sync_interval_seconds = 10  # threshold = 300
             result = _build_warnings(info, {}, 0, {"docs": "x"})
         assert not any("hours since last sync" in w for w in result)
