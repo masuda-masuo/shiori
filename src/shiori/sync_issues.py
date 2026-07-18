@@ -305,7 +305,7 @@ def sync_issues(
         params = {"sort": "updated", "direction": "asc", "per_page": 100}
         if since:
             params["since"] = since
-        for page in _api_pages_gen(client, f"{API}/repos/{repo}/issues/comments", params):
+        for page in _api_pages_gen(client, f"{API}/repos/{repo}/issues/comments", params, not_found_ok=True):
             if not page:
                 break
             for c in page:
@@ -347,7 +347,7 @@ def sync_issues(
         params = {"sort": "updated", "direction": "asc", "per_page": 100}
         if since:
             params["since"] = since
-        for page in _api_pages_gen(client, f"{API}/repos/{repo}/pulls/comments", params):
+        for page in _api_pages_gen(client, f"{API}/repos/{repo}/pulls/comments", params, not_found_ok=True):
             if not page:
                 break
             for c in page:

@@ -38,16 +38,25 @@ def _api_pages(client: httpx.Client, url: str, params: dict) -> list[dict]:
     return items
 
 
-def _api_pages_gen(client: httpx.Client, url: str, params: dict) -> Iterator[list[dict]]:
+def _api_pages_gen(
+    client: httpx.Client, url: str, params: dict,
+    not_found_ok: bool = False,
+) -> Iterator[list[dict]]:
     """Yield one page at a time via Link header.
     Page-at-a-time processing avoids idle-in-transaction timeout on large repos
     and enables per-page cursor updates for resume on interruption (issue #250).
+
+    When not_found_ok is True, a 404 response is treated as an empty result
+    (graceful skip for repos with Issues disabled, issue #291).
     """
     next_params: dict | None = params
     next_url: str | None = url
     while next_url:
         resp = client.get(next_url, params=next_params)
-        resp.raise_for_status()
-        yield resp.json()
-        next_url = resp.links.get("next", {}).get("url")
-        next_params = None
+        if not_found_ok and resp.status_code == 404:
+            next_url = None
+        else:
+            resp.raise_for_status()
+            yield resp.json()
+            next_url = resp.links.get("next", {}).get("url")
+            next_params = None
