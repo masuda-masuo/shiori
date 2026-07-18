@@ -22,7 +22,11 @@ from .config import Settings, load_settings
 from .embedding import Embedder
 from .github_auth import build_token_provider
 from .github_sync import ChunkBuffer, sync_code, sync_docs, sync_issues
-from .ingest import SYNC_LOCK_KEY, _BULK_BUFFER_SIZE
+from .ingest import (
+    _acquire_repo_lock,
+    _BULK_BUFFER_SIZE,
+    _release_repo_lock,
+)
 
 log = logging.getLogger(__name__)
 
@@ -255,11 +259,6 @@ def _do_sync(
                     schema.migrate_light(conn, settings)
                 else:
                     schema.migrate(conn, settings)
-
-                with conn.cursor() as cur:
-                    cur.execute("SELECT pg_try_advisory_lock(%s)", (SYNC_LOCK_KEY,))
-                    row = cur.fetchone()
-                    acquired = row[0] if row is not None else False
             except Exception as exc:
                 try:
                     conn.rollback()
@@ -268,9 +267,7 @@ def _do_sync(
                 for repo in targets:
                     db.record_sync_attempt(conn, repo, success=False, error=str(exc))
                 raise
-            if not acquired:
-                conn.close()
-                return {"status": "skipped", "reason": "sync already running in another process"}
+
             try:
                 if is_bulk:
                     if rebuild:
@@ -285,6 +282,16 @@ def _do_sync(
 
                 failed_repos: dict[str, str] = {}
                 for repo in targets:
+                    # Per-repo PG advisory lock (issue #307)
+                    try:
+                        lock_ok = _acquire_repo_lock(conn, repo)
+                    except Exception as exc:
+                        db.record_sync_attempt(conn, repo, success=False, error=str(exc))
+                        raise
+                    if not lock_ok:
+                        log.info("sync %s: skipped (sync already running for this repo)", repo)
+                        continue
+
                     try:
                         n_docs = sync_docs(
                             settings, conn, embedder, repo, provider,
@@ -361,6 +368,8 @@ def _do_sync(
                                 "reconnected DB connection after OperationalError "
                                 "during sync of %s", repo,
                             )
+                    finally:
+                        _release_repo_lock(conn, repo)
 
                 if is_bulk:
                     schema.create_heavy_indexes(conn)
@@ -373,11 +382,7 @@ def _do_sync(
                     )
 
             finally:
-                try:
-                    with conn.cursor() as cur:
-                        cur.execute("SELECT pg_advisory_unlock(%s)", (SYNC_LOCK_KEY,))
-                except psycopg.OperationalError:
-                    pass
+                pass  # per-repo locks already released in finally blocks above
         finally:
             conn.close()
         return result
