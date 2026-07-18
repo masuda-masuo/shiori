@@ -86,7 +86,7 @@ class TestReadIssueExcludeNoiseBots:
              "created_at": "2026-06-14T00:02:00Z", "html_url": "https://github.com/o/r/issues/42#issuecomment-2"},
         ]
 
-        with patch("shiori.mcp_server._github_client") as mock_gh:
+        with patch("shiori.tools.read._github_client") as mock_gh:
             client = MagicMock()
             mock_gh.return_value.__enter__.return_value = client
             client.get.side_effect = [
@@ -94,7 +94,7 @@ class TestReadIssueExcludeNoiseBots:
                 _mock_api_response(comments_data),
             ]
 
-            with patch("shiori.mcp_server._resolve_repo", return_value="o/r"):
+            with patch("shiori.tools.read._resolve_repo", return_value="o/r"):
                 result = read_issue(42, exclude_noise_bots=False)
 
         assert len(result["items"]) == 3
@@ -116,7 +116,7 @@ class TestReadIssueExcludeNoiseBots:
              "created_at": "2026-06-14T00:02:00Z", "html_url": "https://github.com/o/r/issues/42#issuecomment-2"},
         ]
 
-        with patch("shiori.mcp_server._github_client") as mock_gh:
+        with patch("shiori.tools.read._github_client") as mock_gh:
             client = MagicMock()
             mock_gh.return_value.__enter__.return_value = client
             client.get.side_effect = [
@@ -124,7 +124,7 @@ class TestReadIssueExcludeNoiseBots:
                 _mock_api_response(comments_data),
             ]
 
-            with patch("shiori.mcp_server._resolve_repo", return_value="o/r"):
+            with patch("shiori.tools.read._resolve_repo", return_value="o/r"):
                 result = read_issue(42, exclude_noise_bots=True)
 
         assert len(result["items"]) == 2
@@ -139,7 +139,7 @@ class TestReadIssueExcludeNoiseBots:
             user={"login": "Allowlisted-Bot[bot]", "type": "Bot"},
         )
 
-        with patch("shiori.mcp_server._github_client") as mock_gh:
+        with patch("shiori.tools.read._github_client") as mock_gh:
             client = MagicMock()
             mock_gh.return_value.__enter__.return_value = client
             client.get.side_effect = [
@@ -147,7 +147,7 @@ class TestReadIssueExcludeNoiseBots:
                 _mock_api_response([]),  # no comments
             ]
 
-            with patch("shiori.mcp_server._resolve_repo", return_value="o/r"):
+            with patch("shiori.tools.read._resolve_repo", return_value="o/r"):
                 result = read_issue(42, exclude_noise_bots=True)
 
         assert len(result["items"]) == 1
@@ -161,7 +161,7 @@ class TestReadIssueExcludeNoiseBots:
             user={"login": "dependabot[bot]", "type": "Bot"},
         )
 
-        with patch("shiori.mcp_server._github_client") as mock_gh:
+        with patch("shiori.tools.read._github_client") as mock_gh:
             client = MagicMock()
             mock_gh.return_value.__enter__.return_value = client
             client.get.side_effect = [
@@ -169,7 +169,7 @@ class TestReadIssueExcludeNoiseBots:
                 _mock_api_response([]),
             ]
 
-            with patch("shiori.mcp_server._resolve_repo", return_value="o/r"):
+            with patch("shiori.tools.read._resolve_repo", return_value="o/r"):
                 with pytest.raises(ValueError, match="all items are bots outside the allowlist"):
                     read_issue(42, exclude_noise_bots=True)
 
@@ -185,7 +185,7 @@ class TestReadIssueExcludeNoiseBots:
              "created_at": "2026-06-14T00:01:00Z", "html_url": "https://github.com/o/r/issues/42#issuecomment-1"},
         ]
 
-        with patch("shiori.mcp_server._github_client") as mock_gh:
+        with patch("shiori.tools.read._github_client") as mock_gh:
             client = MagicMock()
             mock_gh.return_value.__enter__.return_value = client
             client.get.side_effect = [
@@ -193,14 +193,14 @@ class TestReadIssueExcludeNoiseBots:
                 _mock_api_response(comments_data),
             ]
 
-            with patch("shiori.mcp_server._resolve_repo", return_value="o/r"):
+            with patch("shiori.tools.read._resolve_repo", return_value="o/r"):
                 result = read_issue(42, exclude_noise_bots=True)
 
         assert len(result["items"]) == 1  # human body remains, bot comment excluded
 
     def test_not_found_raises_value_error(self):
         """Raises ValueError when API returns 404."""
-        with patch("shiori.mcp_server._github_client") as mock_gh:
+        with patch("shiori.tools.read._github_client") as mock_gh:
             client = MagicMock()
             mock_gh.return_value.__enter__.return_value = client
             client.get.side_effect = httpx.HTTPStatusError(
@@ -208,18 +208,18 @@ class TestReadIssueExcludeNoiseBots:
                 response=_mock_api_response({}, status_code=404),
             )
 
-            with patch("shiori.mcp_server._resolve_repo", return_value="o/r"):
+            with patch("shiori.tools.read._resolve_repo", return_value="o/r"):
                 with pytest.raises(ValueError, match="not found on GitHub"):
                     read_issue(42)
 
     def test_network_error_raises(self):
         """Raises httpx.HTTPError when API is unreachable."""
-        with patch("shiori.mcp_server._github_client") as mock_gh:
+        with patch("shiori.tools.read._github_client") as mock_gh:
             client = MagicMock()
             mock_gh.return_value.__enter__.return_value = client
             client.get.side_effect = httpx.ConnectError("connection refused")
 
-            with patch("shiori.mcp_server._resolve_repo", return_value="o/r"):
+            with patch("shiori.tools.read._resolve_repo", return_value="o/r"):
                 with pytest.raises(httpx.ConnectError):
                     read_issue(42)
 
@@ -248,8 +248,8 @@ class TestReadIssueNumbers:
         }
 
     def test_batch_all_success(self):
-        with patch("shiori.mcp_server._read_issue_single") as mock, \
-             patch("shiori.mcp_server._resolve_repo", return_value="o/r"):
+        with patch("shiori.tools.read._read_issue_single") as mock, \
+             patch("shiori.tools.read._resolve_repo", return_value="o/r"):
             mock.side_effect = [
                 self._make_result(42, "issue 42"),
                 self._make_result(43, "issue 43"),
@@ -266,8 +266,8 @@ class TestReadIssueNumbers:
         assert result[1]["title"] == "issue 43"
 
     def test_batch_partial_not_found(self):
-        with patch("shiori.mcp_server._read_issue_single") as mock, \
-             patch("shiori.mcp_server._resolve_repo", return_value="o/r"):
+        with patch("shiori.tools.read._read_issue_single") as mock, \
+             patch("shiori.tools.read._resolve_repo", return_value="o/r"):
             mock.side_effect = [
                 self._make_result(42, "issue 42"),
                 ValueError("#43 not found on GitHub"),
@@ -286,14 +286,14 @@ class TestReadIssueNumbers:
         assert result[2]["number"] == 44
 
     def test_batch_empty_array(self):
-        with patch("shiori.mcp_server._resolve_repo", return_value="o/r"):
+        with patch("shiori.tools.read._resolve_repo", return_value="o/r"):
             result = read_issue(numbers=[])
         assert isinstance(result, list)
         assert result == []
 
     def test_batch_duplicate_numbers(self):
-        with patch("shiori.mcp_server._read_issue_single") as mock, \
-             patch("shiori.mcp_server._resolve_repo", return_value="o/r"):
+        with patch("shiori.tools.read._read_issue_single") as mock, \
+             patch("shiori.tools.read._resolve_repo", return_value="o/r"):
             mock.side_effect = [
                 self._make_result(42, "issue 42"),
                 self._make_result(42, "issue 42"),
@@ -303,8 +303,8 @@ class TestReadIssueNumbers:
         assert len(result) == 2
 
     def test_batch_applies_exclude_noise_bots(self):
-        with patch("shiori.mcp_server._read_issue_single") as mock, \
-             patch("shiori.mcp_server._resolve_repo", return_value="o/r"):
+        with patch("shiori.tools.read._read_issue_single") as mock, \
+             patch("shiori.tools.read._resolve_repo", return_value="o/r"):
             mock.return_value = self._make_result(42, "issue 42")
             read_issue(numbers=[42, 43], exclude_noise_bots=True)
         assert mock.call_count == 2
@@ -313,8 +313,8 @@ class TestReadIssueNumbers:
             assert call_args[0][0] == "o/r"
 
     def test_batch_passes_repo_to_single(self):
-        with patch("shiori.mcp_server._read_issue_single") as mock_single, \
-             patch("shiori.mcp_server._resolve_repo") as mock_resolve:
+        with patch("shiori.tools.read._read_issue_single") as mock_single, \
+             patch("shiori.tools.read._resolve_repo") as mock_resolve:
             mock_resolve.return_value = "my/repo"
             mock_single.return_value = self._make_result(42, "issue 42")
             read_issue(numbers=[42], repo="my/repo")
@@ -322,8 +322,8 @@ class TestReadIssueNumbers:
         mock_single.assert_called_once_with("my/repo", 42, False)
 
     def test_batch_all_errors(self):
-        with patch("shiori.mcp_server._read_issue_single") as mock, \
-             patch("shiori.mcp_server._resolve_repo", return_value="o/r"):
+        with patch("shiori.tools.read._read_issue_single") as mock, \
+             patch("shiori.tools.read._resolve_repo", return_value="o/r"):
             mock.side_effect = ValueError("#99 not found on GitHub")
             result = read_issue(numbers=[99])
         assert isinstance(result, list)
@@ -333,20 +333,20 @@ class TestReadIssueNumbers:
         assert "not found" in result[0]["error"]
 
     def test_number_and_numbers_missing_raises(self):
-        with patch("shiori.mcp_server._resolve_repo", return_value="o/r"):
+        with patch("shiori.tools.read._resolve_repo", return_value="o/r"):
             with pytest.raises(ValueError, match="specify number or numbers"):
                 read_issue()
 
     def test_single_number_backward_compatible(self):
         """Single call without numbers returns dict as before."""
-        with patch("shiori.mcp_server._github_client") as mock_gh:
+        with patch("shiori.tools.read._github_client") as mock_gh:
             client = MagicMock()
             mock_gh.return_value.__enter__.return_value = client
             client.get.side_effect = [
                 _mock_api_response(_mock_issue_response()),
                 _mock_api_response([]),
             ]
-            with patch("shiori.mcp_server._resolve_repo", return_value="o/r"):
+            with patch("shiori.tools.read._resolve_repo", return_value="o/r"):
                 result = read_issue(42)
         assert isinstance(result, dict)
         assert result["number"] == 42
@@ -354,12 +354,12 @@ class TestReadIssueNumbers:
         assert len(result["items"]) == 1
 
     def test_number_and_numbers_mutually_exclusive(self):
-        with patch("shiori.mcp_server._resolve_repo", return_value="o/r"):
+        with patch("shiori.tools.read._resolve_repo", return_value="o/r"):
             with pytest.raises(ValueError, match="cannot be specified together"):
                 read_issue(number=42, numbers=[42, 43])
 
     def test_batch_too_many_numbers(self):
-        with patch("shiori.mcp_server._resolve_repo", return_value="o/r"):
+        with patch("shiori.tools.read._resolve_repo", return_value="o/r"):
             with pytest.raises(ValueError, match="supports up to 50 items"):
                 read_issue(numbers=list(range(51)))
 
@@ -372,7 +372,7 @@ class TestReadIssueRepoResolution:
         monkeypatch.setattr(
             settings, "repos", ["masuda-masuo/shiori", "masuda-masuo/code-sandbox-mcp"]
         )
-        with patch("shiori.mcp_server._github_client") as mock_gh:
+        with patch("shiori.tools.read._github_client") as mock_gh:
             client = MagicMock()
             mock_gh.return_value.__enter__.return_value = client
             client.get.side_effect = httpx.HTTPStatusError(
@@ -390,7 +390,7 @@ class TestReadIssueRepoResolution:
         monkeypatch.setattr(
             settings, "repos", ["masuda-masuo/shiori", "masuda-masuo/code-sandbox-mcp"]
         )
-        with patch("shiori.mcp_server._read_issue_single") as mock_single:
+        with patch("shiori.tools.read._read_issue_single") as mock_single:
             with pytest.raises(ValueError) as exc:
                 read_issue(531, repo="totally-bogus-repo-xyz")
         msg = str(exc.value)
@@ -408,7 +408,7 @@ class TestReadIssueRepoResolution:
             number=531,
             title="Title",
         )
-        with patch("shiori.mcp_server._github_client") as mock_gh:
+        with patch("shiori.tools.read._github_client") as mock_gh:
             client = MagicMock()
             mock_gh.return_value.__enter__.return_value = client
             client.get.side_effect = [
