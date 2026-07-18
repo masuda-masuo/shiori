@@ -225,6 +225,7 @@ class TestRunIngestSyncAttemptRecording:
             patch("shiori.ingest.schema.migrate"),
             patch("shiori.ingest.schema.migrate_light"),
             patch("shiori.ingest._is_bulk_path", return_value=False),
+            patch("shiori.ingest._acquire_repo_lock", return_value=True),
             patch("shiori.ingest.build_token_provider", return_value=MagicMock()),
             patch("shiori.ingest.Embedder", return_value=MagicMock()),
             patch("shiori.ingest.fetch_docs", return_value="abc123"),
@@ -262,6 +263,7 @@ class TestRunIngestSyncAttemptRecording:
             patch("shiori.ingest.schema.migrate"),
             patch("shiori.ingest.schema.migrate_light"),
             patch("shiori.ingest._is_bulk_path", return_value=False),
+            patch("shiori.ingest._acquire_repo_lock", return_value=True),
             patch("shiori.ingest.build_token_provider", return_value=MagicMock()),
             patch("shiori.ingest.Embedder", return_value=MagicMock()),
             patch("shiori.ingest.fetch_docs", side_effect=RuntimeError("sync failed")),
@@ -288,6 +290,7 @@ class TestRunIngestSyncAttemptRecording:
             patch("shiori.ingest.schema.migrate"),
             patch("shiori.ingest.schema.migrate_light"),
             patch("shiori.ingest._is_bulk_path", return_value=False),
+            patch("shiori.ingest._acquire_repo_lock", return_value=True),
             patch("shiori.ingest.build_token_provider", return_value=MagicMock()),
             patch("shiori.ingest.Embedder", return_value=MagicMock()),
             patch("shiori.ingest.fetch_docs", return_value="abc123"),
@@ -499,7 +502,7 @@ class TestDoSyncMidStageFailureRecording:
         )
 
     def test_advisory_lock_acquisition_failure_recorded(self):
-        """advisory lock 取得の execute 失敗でも記録され、元例外が伝播する。"""
+        """_acquire_repo_lock の例外が per-repo ループ内で捕捉され記録される。"""
 
         def explode_on_lock_query(query, *args, **kwargs):
             if "pg_try_advisory_lock" in query:
@@ -525,7 +528,8 @@ class TestDoSyncMidStageFailureRecording:
             with pytest.raises(RuntimeError, match="lock query failed"):
                 _do_sync()
 
-        mock_conn.rollback.assert_called_once()
+        # Lock acquisition failed before any sync work → rollback not called
+        mock_conn.rollback.assert_not_called()
         mock_record_attempt.assert_called_once_with(
             mock_conn, "owner/repo", success=False, error="lock query failed"
         )
@@ -755,6 +759,8 @@ class TestRunIngestPerRepoContinueOnFailure:
             patch("shiori.ingest.schema.migrate"),
             patch("shiori.ingest.schema.migrate_light"),
             patch("shiori.ingest._is_bulk_path", return_value=False),
+            patch("shiori.ingest._acquire_repo_lock", return_value=True),
+            patch("shiori.ingest._release_repo_lock"),
             patch("shiori.ingest.build_token_provider", return_value=MagicMock()),
             patch("shiori.ingest.Embedder", return_value=MagicMock()),
             patch("shiori.ingest.fetch_docs", side_effect=fake_fetch_docs),
@@ -790,6 +796,8 @@ class TestRunIngestPerRepoContinueOnFailure:
             patch("shiori.ingest.schema.migrate"),
             patch("shiori.ingest.schema.migrate_light"),
             patch("shiori.ingest._is_bulk_path", return_value=False),
+            patch("shiori.ingest._acquire_repo_lock", return_value=True),
+            patch("shiori.ingest._release_repo_lock"),
             patch("shiori.ingest.build_token_provider", return_value=MagicMock()),
             patch("shiori.ingest.Embedder", return_value=MagicMock()),
             patch("shiori.ingest.fetch_docs", return_value="abc123"),
@@ -826,6 +834,8 @@ class TestRunIngestPerRepoContinueOnFailure:
             patch("shiori.ingest.schema.migrate"),
             patch("shiori.ingest.schema.migrate_light"),
             patch("shiori.ingest._is_bulk_path", return_value=True),
+            patch("shiori.ingest._acquire_repo_lock", return_value=True),
+            patch("shiori.ingest._release_repo_lock"),
             patch("shiori.ingest.schema.drop_heavy_indexes"),
             patch("shiori.ingest.ChunkBuffer", return_value=MagicMock()),
             patch("shiori.ingest.build_token_provider", return_value=MagicMock()),
@@ -969,8 +979,13 @@ class TestDoSyncOperationalErrorHandling:
 # ===================================================================
 
 
+# ===================================================================
+# run_fetch: lock guard and parallel fetch via ThreadPoolExecutor
+# ===================================================================
+
+
 class TestRunFetch:
-    """run_fetch: lock guard and fetch dispatch."""
+    """run_fetch: per-repo lock guard and parallel fetch dispatch (issue #307)."""
 
     def _mock_settings(self):
         s = MagicMock()
@@ -978,7 +993,7 @@ class TestRunFetch:
         return s
 
     def test_lock_not_acquired_returns_early(self):
-        """lock取得失敗時はすぐに return し、fetch_* は呼ばれない。"""
+        """lock取得失敗時は thread 内でスキップし、fetch_* は呼ばれない。"""
         from shiori.ingest import run_fetch
 
         mock_conn = MagicMock()
@@ -987,26 +1002,29 @@ class TestRunFetch:
         with (
             patch("shiori.ingest.db.connect", return_value=mock_conn),
             patch("shiori.ingest.schema.migrate"),
-            patch("shiori.ingest._acquire_lock", return_value=False),
+            patch("shiori.ingest._acquire_repo_lock", return_value=False),
+            patch("shiori.ingest._release_repo_lock"),
             patch("shiori.ingest.build_token_provider", return_value=MagicMock()),
             patch("shiori.ingest.fetch_docs", side_effect=mock_fetch_docs),
             patch("shiori.ingest.fetch_issues", side_effect=mock_fetch_issues),
         ):
             run_fetch(settings=self._mock_settings())
 
-        mock_conn.close.assert_called_once()
+        # Thread calls db.connect() and then conn.close() on the mock
+        mock_conn.close.assert_called()
         mock_fetch_docs.assert_not_called()
         mock_fetch_issues.assert_not_called()
 
     def test_success(self):
-        """lock取得成功時、fetch_docs → fetch_issues が順に呼ばれる。"""
+        """lock取得成功時、thread 内で fetch_docs → fetch_issues が呼ばれる。"""
         from shiori.ingest import run_fetch
 
         mock_conn = MagicMock()
         with (
             patch("shiori.ingest.db.connect", return_value=mock_conn),
             patch("shiori.ingest.schema.migrate"),
-            patch("shiori.ingest._acquire_lock", return_value=True),
+            patch("shiori.ingest._acquire_repo_lock", return_value=True),
+            patch("shiori.ingest._release_repo_lock"),
             patch("shiori.ingest.build_token_provider", return_value=MagicMock()),
             patch("shiori.ingest.fetch_docs", return_value="abc123") as mock_fetch_docs,
             patch("shiori.ingest.fetch_issues", return_value=5) as mock_fetch_issues,
@@ -1015,7 +1033,7 @@ class TestRunFetch:
 
         mock_fetch_docs.assert_called_once()
         mock_fetch_issues.assert_called_once()
-        mock_conn.close.assert_called_once()
+        mock_conn.close.assert_called()
 
 
 # ===================================================================
@@ -1024,7 +1042,7 @@ class TestRunFetch:
 
 
 class TestRunIndex:
-    """run_index: lock guard and index dispatch."""
+    """run_index: per-repo lock guard and index dispatch."""
 
     def _mock_settings(self):
         s = MagicMock()
@@ -1032,7 +1050,7 @@ class TestRunIndex:
         return s
 
     def test_lock_not_acquired_returns_early(self):
-        """lock取得失敗時はすぐに return し、index_* は呼ばれない。"""
+        """lock取得失敗時は repo をスキップし、index_* は呼ばれない。"""
         from shiori.ingest import run_index
 
         mock_conn = MagicMock()
@@ -1042,7 +1060,8 @@ class TestRunIndex:
         with (
             patch("shiori.ingest.db.connect", return_value=mock_conn),
             patch("shiori.ingest.schema.migrate"),
-            patch("shiori.ingest._acquire_lock", return_value=False),
+            patch("shiori.ingest._acquire_repo_lock", return_value=False),
+            patch("shiori.ingest._release_repo_lock"),
             patch("shiori.ingest._is_bulk_path", return_value=False),
             patch("shiori.ingest.build_token_provider", return_value=MagicMock()),
             patch("shiori.ingest.Embedder", return_value=MagicMock()),
@@ -1065,7 +1084,8 @@ class TestRunIndex:
         with (
             patch("shiori.ingest.db.connect", return_value=mock_conn),
             patch("shiori.ingest.schema.migrate"),
-            patch("shiori.ingest._acquire_lock", return_value=True),
+            patch("shiori.ingest._acquire_repo_lock", return_value=True),
+            patch("shiori.ingest._release_repo_lock"),
             patch("shiori.ingest._is_bulk_path", return_value=False),
             patch("shiori.ingest.build_token_provider", return_value=MagicMock()),
             patch("shiori.ingest.Embedder", return_value=MagicMock()),
@@ -1094,7 +1114,8 @@ class TestRunIndex:
             patch("shiori.ingest.schema.truncate_all_repos") as mock_truncate,
             patch("shiori.ingest.schema.drop_heavy_indexes") as mock_drop,
             patch("shiori.ingest.schema.create_heavy_indexes") as mock_create,
-            patch("shiori.ingest._acquire_lock", return_value=True),
+            patch("shiori.ingest._acquire_repo_lock", return_value=True),
+            patch("shiori.ingest._release_repo_lock"),
             patch("shiori.ingest._is_bulk_path", return_value=True),
             patch("shiori.ingest.build_token_provider", return_value=MagicMock()),
             patch("shiori.ingest.Embedder", return_value=MagicMock()),
