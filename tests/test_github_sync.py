@@ -984,6 +984,7 @@ class TestSyncIssuesPrReviewGuard:
             return iter([[]])  # empty page
         return iter([self._page_with_pr()])
 
+    @patch("shiori.sync_issues.db.connect", return_value=MagicMock())
     @patch("shiori.sync_issues.get_cursor", return_value=None)
     @patch("shiori.sync_issues._api_pages_gen")
     @patch("shiori.sync_issues._upsert_issue_item")
@@ -993,7 +994,7 @@ class TestSyncIssuesPrReviewGuard:
     @patch("shiori.sync_issues.set_cursor")
     def test_dev_repo_calls_reviews(
         self, mock_set, mock_reviews, mock_should,
-        mock_prop, mock_upsert, mock_pages, mock_cursor,
+        mock_prop, mock_upsert, mock_pages, mock_cursor, mock_db_connect,
     ):
         """dev repo の diff sync では _sync_pr_reviews が呼ばれる。"""
         settings = Settings()
@@ -1020,6 +1021,7 @@ class TestSyncIssuesPrReviewGuard:
         sync_issues(settings, MagicMock(), MagicMock(), "o/r", MagicMock(), buffer=None)
         mock_reviews.assert_not_called()
 
+    @patch("shiori.sync_issues.db.connect", return_value=MagicMock())
     @patch("shiori.sync_issues.get_cursor", return_value=None)
     @patch("shiori.sync_issues._api_pages_gen")
     @patch("shiori.sync_issues._upsert_issue_item")
@@ -1029,7 +1031,7 @@ class TestSyncIssuesPrReviewGuard:
     @patch("shiori.sync_issues.set_cursor")
     def test_ref_repo_calls_reviews_on_bulk(
         self, mock_set, mock_reviews, mock_should,
-        mock_prop, mock_upsert, mock_pages, mock_cursor,
+        mock_prop, mock_upsert, mock_pages, mock_cursor, mock_db_connect,
     ):
         """ref repo でも bulk 時は _sync_pr_reviews が呼ばれる。"""
         settings = Settings()
