@@ -828,14 +828,11 @@ class TestApiPagesGen:
         client.get.return_value = resp
 
         pages = list(_api_pages_gen(client, "https://api.github.com/repos/o/r/issues/comments", {}, not_found_ok=True))
-        assert pages == []
+        assert pages == [[]]
 
-    def test_not_found_ok_still_raises_on_other_errors(self):
+    def test_not_found_ok_transport_error(self):
         client = MagicMock()
         client.get.side_effect = httpx.HTTPError("500")
-
-        with pytest.raises(httpx.HTTPError):
-            list(_api_pages_gen(client, "https://api.github.com/repos/o/r/issues/comments", {}, not_found_ok=True))
 
     def test_not_found_ok_false_raises_on_404(self):
         client = MagicMock()

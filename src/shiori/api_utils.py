@@ -54,6 +54,7 @@ def _api_pages_gen(
     while next_url:
         resp = client.get(next_url, params=next_params)
         if not_found_ok and resp.status_code == 404:
+            yield []
             next_url = None
         else:
             resp.raise_for_status()
