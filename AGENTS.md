@@ -1,79 +1,52 @@
-# AGENTS.md — Agent Instructions for the Shiori Project
+# Agent Instructions
 
-## Core Rule Before Using MCP Tools
+## Shiori — ハイブリッド検索・ナレッジベース
 
-**When using an unfamiliar MCP tool, you must search for the tool's documentation in Shiori first.**
-Do not guess how a tool works. Run `shiori_search` with the tool name plus keywords like "usage" or "workflow" to verify the standard pattern from the README or design documents before taking action.
+Shiori は GitHub リポジトリの docs / issues / PRs / source code を検索対象とする RAG システム。
 
----
+## ツール早見表（したいこと → 使うツール）
 
-## Shiori (shiori MCP)
+| したいこと | 使うツール | 備考 |
+|---|---|---|
+| リポジトリ構造の把握 | `shiori_list_tree` | path / source_type / extension で絞り込み |
+| コード・ドキュメント検索（意味） | `shiori_search` | embedding + keyword ハイブリッド。概念検索に |
+| コード・ドキュメント検索（キーワード） | `shiori_keyword_search` | 関数名・API名・エラーコードの完全一致に |
+| ファイル内容の参照 | `shiori_read_file` | clone から直接読み取り。start_line/end_line で範囲指定可 |
+| issue/PR スレッドの参照 | `shiori_read_issue` | 本文 + 全コメント + review を時系列 |
+| PR の変更ファイル一覧 | `shiori_pr_changes` | head_sha / status / additions / deletions |
+| PR の head ファイル内容 | `shiori_read_pr_file` | PR 番号指定で head ブランチのファイル読み取り |
+| 索引の更新 | `shiori_ingest` | diff sync（通常秒単位）。rebuild は要環境変数 |
+| 索引の状態確認 | `shiori_status` | last_synced_at / age / counts / warnings |
 
-Shiori is a project knowledge search MCP server. Its definition and use cases are detailed in [docs/design/13_product_definition_and_use_cases.md](docs/design/13_product_definition_and_use_cases.md).
+## リポジトリ操作
 
-### Search (Where is it written?)
+| 操作 | 使うツール | 禁止 |
+|---|---|---|
+| コード検索・読み取り | `shiori_search` / `shiori_read_file` / `shiori_read_issue` | bash の `git clone` + ローカルの `read`/`grep` |
+| コード作成・全上書き | sunaba の `write_file`（新規作成 / 全上書き。部分更新不可） | ローカルの `write` |
+| コード編集（部分） | sunaba の `edit_file`（`old_str` / 行範囲 / append、`.py` は AST 自動解決） / `transform_file`（パターン一括） | ローカルの `edit` |
+| 編集の undo | sunaba の `undo_file_edit`（各編集のスナップショットから復元、redo 可能） | — |
+| テスト・検証 | sunaba の `verify_in_container`（lint + type check + テスト一括） | bash で直接 pytest |
+| git push / PR | sunaba の `publish`（checkpoint を squash して push、create_pr で PR） | bash で直接 git / gh |
 
-*   `shiori_search`: The primary hybrid search entry point. Use this first.
-*   `shiori_keyword_search`: Exact match search for function names, API names, error codes, etc.
-*   `shiori_grep`: Run line-level grep on repository clones (Stage-2 search after narrowing down files; use `repo="*"` to grep across all repos).
+コードの読み取り・検索は **Shiori の専用ツール**、編集・検証・公開は **sunaba の sandbox ツール** のみ使う。bash でローカルに clone して直接 read/write するのは禁止。
 
-### Read (What is written?)
+## Issue/PR 起票ルール
 
-*   `shiori_read_issue`: Retrieve the entire timeline thread of an issue or pull request.
-*   `shiori_read_file`: Read a local cloned file (supports line ranges).
-*   `shiori_read_pr_file`: Read a file at a specific PR's head commit.
-*   `shiori_list_tree`: Browse repository file structures (filterable by `source_type` or `extension`).
+Issue や PR を起票する際は、**冒頭に `Written by:` で記述者と使用モデルを明記する**。
+全エージェントが同じ GitHub token (`code-sandbox-mcp[bot]`) を使うため、git log だけでは誰が書いたか判別できない。
 
-### Relationships & Changes (What is linked? What changes?)
+### フォーマット
 
-*   `shiori_issue_links`: Returns inbound and outbound links between issues and PRs (such as closes, duplicate, refs, or mentions).
-*   `shiori_pr_changes`: Retrieve the map of modified files in a PR.
-*   `shiori_pr_diff`: Retrieve the unified diff for a PR.
-*   `shiori_pr_review_comments`: Retrieve review comments (with paths and line numbers) for a PR.
+- 通常: `Written by: OpenCode (DeepSeek V4 Flash)`
+- 複数関与: `Written by: OpenCode (DeepSeek V4 Flash), based on discussion with Claude`
 
-### Operations
+### 記述すべき項目
 
-*   `shiori_status`: Check indexing status, freshness, and warnings (unnecessary if auto-sync is enabled).
+| 項目 | 例 | 理由 |
+|------|-----|------|
+| クライアント | OpenCode / Claude Code / agnostic | どのUIから書かれたか |
+| モデル | DeepSeek V4 Flash / DeepSeek V4 Flash Max / Claude Sonnet / Fable 5 など | 事後的な品質評価・原因特定に必要 |
+| 人間の関与 | 人間が編集した箇所があれば "edited by masuda" | 最終判断者を明示 |
 
----
-
-## Sunaba (sunaba MCP)
-
-**Standard Pattern: Execute via `run_container_and_exec` for single-shot operations**
-
-```python
-run_container_and_exec(
-    image="python@sha256:...",       # Optional (defaults to default image)
-    clone_repo="owner/repo",         # Copies a pre-cloned repo from Shiori (sub-second copy, no network needed)
-    clone_dest="/app",               # Clone destination (defaults to /tmp/repo)
-    commands=[
-        "cd /app && pip install -e '.[dev]'",
-        "cd /app && pytest tests/ -v"
-    ],
-    allow_network=True,              # Required to run pip install
-    inject_vcs_token=True            # Required to authenticate private repositories
-)
-```
-
-*   Specifying `clone_repo` copies Shiori's local pre-cloned repository using `cp -r` (taking less than a second, bypassing the network). See `docs/design/12_clone_management_and_integration.md`.
-*   If `clone_repo` is omitted, run a standard `git clone` with `allow_network=True` and `inject_vcs_token=True`.
-*   If cloning hangs, set `GIT_TERMINAL_PROMPT=0` to check for interactive prompts.
-*   The default Docker image pre-installs `ripgrep`, `ast-grep`, and `fd` for code search.
-*   Use `sandbox_initialize` and `sandbox_exec` only for long-lived, multi-turn sessions.
-
----
-
-## GitHub MCP
-
-*   Create PRs: `github_create_pull_request`
-*   Modify files: `github_create_or_update_file`, `github_push_files`
-*   Manage issues: `github_issue_read`, `github_issue_write`
-
----
-
-## Project-Specific Instructions
-
-*   Run tests: `PYTHONPATH=src python3 -m pytest tests/ -v`
-*   Production DB dependencies: Requires PostgreSQL running (starts via Docker Compose).
-*   Target Repositories: `masuda-masuo/shiori`, `masuda-masuo/sunaba`
-*   Update index via CLI: Run `python -m shiori ingest` (the `shiori_ingest` MCP tool is deprecated).
+- shiori の正規クローン: `/home/masuda/shiori/`（systemd + update.sh 対象）

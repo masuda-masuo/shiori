@@ -1,0 +1,20 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "instructions": [".opencode/rules/*.md"],
+  "references": {
+    "repo": {
+      "repository": "masuda-masuo/shiori",
+      "description": "Default repository for PR reviews and development tasks"
+    }
+  },
+  "mcp": {
+    "shiori": {
+      "type": "remote",
+      "url": "http://localhost:8765/mcp"
+    },
+    "sunaba": {
+      "type": "remote",
+      "url": "http://localhost:8750/mcp"
+    }
+  }
+}
