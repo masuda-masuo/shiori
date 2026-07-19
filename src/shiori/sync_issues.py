@@ -259,7 +259,7 @@ def _fetch_pr_reviews_parallel(
         count = 0
         conn2 = db.connect(settings)
         try:
-            with httpx.Client(headers=headers, auth=_GitHubAuth(provider), timeout=30.0) as cl:
+            with httpx.Client(headers=headers, auth=_GitHubAuth(provider), timeout=30.0, follow_redirects=True) as cl:
                 for no in chunk:
                     try:
                         _sync_pr_reviews(
@@ -375,7 +375,7 @@ def fetch_issues(
             was_seeded = True
 
     with httpx.Client(
-        headers=headers, auth=_GitHubAuth(provider), timeout=30.0
+        headers=headers, auth=_GitHubAuth(provider), timeout=30.0, follow_redirects=True,
     ) as client:
         # --- Body (issues endpoint includes PRs) ---
         since = get_cursor(conn, repo, "issues")
