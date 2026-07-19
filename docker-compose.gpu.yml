@@ -3,11 +3,11 @@
 # CPU-only ホストでは本ファイルを指定しないこと。
 #
 # 使い方:
-#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
-#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml run --rm ingest
+#   SHIORI_GPU=1 ./scripts/ingest.sh        # ingest.sh が自動で本ファイルを追加
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d  # 明示指定も可
 #
-# app (常時稼働): deploy.resources.reservations.devices (docker compose up 時のみ有効)
-# ingest (on-demand): runtime: nvidia (docker compose run でも有効)
+# app (常時稼働): deploy.resources.reservations.devices (docker compose up 時に有効)
+# ingest (on-demand): runtime: nvidia + deploy.resources.reservations.devices (docker compose run でも有効)
 
 services:
   app:
@@ -21,3 +21,10 @@ services:
 
   ingest:
     runtime: nvidia
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
