@@ -13,16 +13,26 @@
 # ==== 並行実行パターン ====
 # per-repo PG advisory lock (issue #307) により、同一リポジトリの同時実行は
 # 排他されるが、異なるリポジトリは並行して実行できる。
-# 例: 大きな ref backfill が動いている横で、
+# 例: 大きい ref backfill が動いている横で、
 #   ./scripts/ingest.sh fetch --repo owner/dev-repo
 # を実行できる（kill 運用の代替）。
 # fetch/index/run の対象順序は dev repo 優先（SHIORI_DEV_REPOS が先）。
 #
-# ビルド: デフォルトでは --build なし。SHIORI_BUILD=1 でビルドを強制する。
+# ==== ビルド / GPU ====
+# デフォルトでは --build なし。SHIORI_BUILD=1 でビルドを強制する。
+# デフォルトでは CPU 構成。SHIORI_GPU=1 で docker-compose.gpu.yml を追加する
+# （nvidia-container-toolkit が入ったホストでのみ有効）。
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
+
+# compose file list (empty = docker compose default: docker-compose.yml only)
+COMPOSE_FILES=()
+if [ "${SHIORI_GPU:-}" = "1" ]; then
+    COMPOSE_FILES=(-f docker-compose.yml -f docker-compose.gpu.yml)
+fi
+
 if [ "${SHIORI_BUILD:-}" = "1" ]; then
-    exec docker compose run --build --rm ingest python -m shiori ingest "$@"
+    exec docker compose "${COMPOSE_FILES[@]}" run --build --rm ingest python -m shiori ingest "$@"
 else
-    exec docker compose run --rm ingest python -m shiori ingest "$@"
+    exec docker compose "${COMPOSE_FILES[@]}" run --rm ingest python -m shiori ingest "$@"
 fi
