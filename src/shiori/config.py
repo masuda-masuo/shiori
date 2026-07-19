@@ -135,6 +135,12 @@ class Settings:
     # Default false. Set true only when operationally required.
     # CLI path (python -m shiori ingest --rebuild) always allowed regardless.
     allow_rebuild: bool = field(default_factory=_allow_rebuild_from_env)
+    # Backfill seed for ref repos (not in SHIORI_DEV_REPOS) whose cursor is None.
+    # YYYY-MM-DD format. CLI --backfill-since overrides this for all targets.
+    # Dev repos are never seeded by this env var (always full backfill).
+    ref_backfill_since: str | None = field(
+        default_factory=lambda: os.environ.get("SHIORI_REF_BACKFILL_SINCE") or None
+    )
 
     def repo_dir(self, repo: str) -> str:
         owner, name = repo.split("/", 1)

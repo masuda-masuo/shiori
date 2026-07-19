@@ -1039,3 +1039,140 @@ class TestSyncIssuesPrReviewGuard:
         mock_pages.side_effect = self._mock_api_pages
         sync_issues(settings, MagicMock(), MagicMock(), "o/r", MagicMock(), buffer=MagicMock())
         mock_reviews.assert_called_once()
+
+
+# ===================================================================
+# fetch_issues backfill_since seeding + one-time state=open pass (issue #315)
+# ===================================================================
+
+
+class TestFetchIssuesBackfillSince:
+    """fetch_issues backfill_since: seed cursors for new repos only."""
+
+    def test_backfill_since_seeds_when_cursor_none(self):
+        """When cursor is None and backfill_since is set, seed all 3 cursors."""
+        settings = Settings()
+        conn = MagicMock()
+        provider = MagicMock()
+
+        # Stateful cursor: starts None, remembers set_cursor values
+        cursor_store: dict[str, str | None] = {}
+        def get_cursor_side(conn, repo, kind):
+            return cursor_store.get(kind)
+        def set_cursor_side(conn, repo, kind, cursor):
+            cursor_store[kind] = cursor
+
+        with (
+            patch("shiori.sync_issues._api_pages_gen", return_value=iter([[]])),
+            patch("shiori.sync_issues.get_cursor", side_effect=get_cursor_side),
+            patch("shiori.sync_issues.set_cursor", side_effect=set_cursor_side) as mock_set,
+            patch("shiori.sync_issues._fetch_dormant_open_bodies") as mock_dormant,
+        ):
+            from shiori.sync_issues import fetch_issues
+            fetch_issues(settings, conn, "o/r", provider, backfill_since="2024-06-01T00:00:00Z")
+
+        # set_cursor should have been called with seed date for all 3 kinds
+        seed_calls = [
+            c for c in mock_set.call_args_list
+            if c[0][3] == "2024-06-01T00:00:00Z"
+        ]
+        assert len(seed_calls) == 3
+        seed_kinds = [c[0][2] for c in seed_calls]
+        assert "issues" in seed_kinds
+        assert "issue_comments" in seed_kinds
+        assert "pr_review_comments" in seed_kinds
+        # Dormant open pass should have been called
+        mock_dormant.assert_called_once()
+
+    def test_backfill_since_skips_when_cursor_exists(self):
+        """When cursor already exists, backfill_since does NOT seed."""
+        settings = Settings()
+        conn = MagicMock()
+        provider = MagicMock()
+        existing = "2024-01-01T00:00:00Z"
+
+        def get_cursor_side(conn, repo, kind):
+            return existing  # all cursors exist
+
+        with (
+            patch("shiori.sync_issues._api_pages_gen", return_value=iter([[]])),
+            patch("shiori.sync_issues.get_cursor", side_effect=get_cursor_side),
+            patch("shiori.sync_issues.set_cursor") as mock_set,
+            patch("shiori.sync_issues._fetch_dormant_open_bodies") as mock_dormant,
+        ):
+            from shiori.sync_issues import fetch_issues
+            fetch_issues(settings, conn, "o/r", provider, backfill_since="2024-06-01T00:00:00Z")
+
+        # set_cursor should NOT be called with backfill_since
+        # (it may be called by the normal cursor-advancement logic, but not with the seed)
+        for call in mock_set.call_args_list:
+            assert call[0][3] != "2024-06-01T00:00:00Z", "Seed date must not override existing cursor"
+        # Dormant open pass should NOT have been called
+        mock_dormant.assert_not_called()
+
+    def test_backfill_since_none_no_seeding(self):
+        """When backfill_since is None, no seeding occurs."""
+        settings = Settings()
+        conn = MagicMock()
+        provider = MagicMock()
+
+        def get_cursor_side(conn, repo, kind):
+            return None
+
+        with (
+            patch("shiori.sync_issues._api_pages_gen", return_value=iter([[]])),
+            patch("shiori.sync_issues.get_cursor", side_effect=get_cursor_side),
+            patch("shiori.sync_issues.set_cursor"),
+            patch("shiori.sync_issues._fetch_dormant_open_bodies") as mock_dormant,
+        ):
+            from shiori.sync_issues import fetch_issues
+            fetch_issues(settings, conn, "o/r", provider, backfill_since=None)
+
+        # Dormant open pass should NOT have been called
+        mock_dormant.assert_not_called()
+
+
+class TestFetchDormantOpenBodies:
+    """_fetch_dormant_open_bodies: upserts body rows only, no cursor advance."""
+
+    def test_upserts_open_bodies(self):
+        """Fetches state=open issues/PRs and upserts body rows."""
+        conn = MagicMock()
+        client = MagicMock()
+
+        page = [{
+            "number": 1,
+            "user": {"login": "alice", "type": "User"},
+            "title": "Dormant Issue",
+            "body": "Old issue not updated since seed date",
+            "state": "open",
+            "html_url": "https://github.com/o/r/issues/1",
+            "created_at": "2023-01-01T00:00:00Z",
+            "updated_at": "2023-01-01T00:00:00Z",
+        }, {
+            "number": 2,
+            "pull_request": {},
+            "user": {"login": "bob", "type": "User"},
+            "title": "Dormant PR",
+            "body": "Old PR not updated since seed date",
+            "state": "open",
+            "html_url": "https://github.com/o/r/pull/2",
+            "created_at": "2023-06-01T00:00:00Z",
+            "updated_at": "2023-06-01T00:00:00Z",
+        }]
+
+        with (
+            patch("shiori.sync_issues._api_pages_gen", return_value=iter([page])),
+            patch("shiori.sync_issues._upsert_issue_item") as mock_upsert,
+        ):
+            from shiori.sync_issues import _fetch_dormant_open_bodies
+            n = _fetch_dormant_open_bodies(client, conn, "o/r")
+
+        assert n == 2
+        assert mock_upsert.call_count == 2
+        # Only body rows (comment_id=0)
+        for call in mock_upsert.call_args_list:
+            row = call[0][1]
+            assert row["comment_id"] == 0
+            assert row["state"] == "open"
+        conn.commit.assert_called()
