@@ -135,6 +135,13 @@ class Settings:
     # Default false. Set true only when operationally required.
     # CLI path (python -m shiori ingest --rebuild) always allowed regardless.
     allow_rebuild: bool = field(default_factory=_allow_rebuild_from_env)
+    # Fetch-phase concurrency cap. Max number of repos fetched simultaneously.
+    # The actual worker count is max(1, min(len(targets), this value)).
+    fetch_concurrency: int = field(
+        default_factory=lambda: int(
+            os.environ.get("SHIORI_FETCH_CONCURRENCY", "4")
+        )
+    )
     # Backfill seed for ref repos (not in SHIORI_DEV_REPOS) whose cursor is None.
     # YYYY-MM-DD format. CLI --backfill-since overrides this for all targets.
     # Dev repos are never seeded by this env var (always full backfill).
