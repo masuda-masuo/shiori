@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
+import httpx
+import pytest
+
 from shiori.config import Settings
 from shiori.sync_issues import fetch_issues
 
@@ -362,3 +365,98 @@ class TestHttpxClientFollowRedirects:
             f"Expected follow_redirects=True in fetch_issues "
             f"but got {captured_kwargs}"
         )
+
+
+# Issue #324: 404 on main issues endpoint is handled gracefully ---------
+
+class TestFetchIssuesNotFoundOK:
+    """Issue #324: 404 on main /issues is handled like comments 404s."""
+
+    @patch("shiori.sync_issues._api_pages_gen")
+    @patch("shiori.sync_issues.set_cursor")
+    @patch("shiori.sync_issues.get_cursor", return_value="2023-01-01T00:00:00Z")
+    @patch("shiori.sync_issues._upsert_issue_item")
+    @patch("shiori.sync_issues._fetch_pr_reviews_parallel")
+    def test_404_on_issues_returns_zero_and_warns(
+        self,
+        mock_fetch: MagicMock,
+        mock_upsert: MagicMock,
+        mock_get_cursor: MagicMock,
+        mock_set_cursor: MagicMock,
+        mock_api_pages: MagicMock,
+    ):
+        """404 on /issues → fetch_issues returns 0, no exception, warning logged."""
+        settings = _make_settings()
+        conn = _mock_conn()
+        provider = _mock_provider()
+
+        # First call (issues) returns empty iterable = 404 with not_found_ok
+        # Second/third calls (comments) also return empty
+        mock_api_pages.side_effect = [[], [], []]
+        mock_fetch.return_value = 0
+
+        with patch("shiori.sync_issues.log") as mock_log:
+            result = fetch_issues(settings, conn, "owner/repo", provider)
+
+        assert result == 0
+        mock_upsert.assert_not_called()
+        mock_log.warning.assert_called_once_with(
+            "Issues API returned 404 for %s — issues disabled, skipping",
+            "owner/repo",
+        )
+
+    @patch("shiori.sync_issues._api_pages_gen")
+    @patch("shiori.sync_issues.set_cursor")
+    @patch("shiori.sync_issues.get_cursor", return_value="2023-01-01T00:00:00Z")
+    @patch("shiori.sync_issues._upsert_issue_item")
+    @patch("shiori.sync_issues._fetch_pr_reviews_parallel")
+    def test_non_404_errors_still_raise(
+        self,
+        mock_fetch: MagicMock,
+        mock_upsert: MagicMock,
+        mock_get_cursor: MagicMock,
+        mock_set_cursor: MagicMock,
+        mock_api_pages: MagicMock,
+    ):
+        """Non-404 errors (403/500) on /issues still raise."""
+        settings = _make_settings()
+        conn = _mock_conn()
+        provider = _mock_provider()
+
+        resp = MagicMock()
+        resp.status_code = 403
+        error = httpx.HTTPStatusError(
+            "403 Forbidden", request=MagicMock(), response=resp,
+        )
+        mock_api_pages.side_effect = [error, [], []]
+
+        with pytest.raises(httpx.HTTPStatusError):
+            fetch_issues(settings, conn, "owner/repo", provider)
+
+    @patch("shiori.sync_issues._api_pages_gen")
+    @patch("shiori.sync_issues.set_cursor")
+    @patch("shiori.sync_issues.get_cursor", return_value="2023-01-01T00:00:00Z")
+    @patch("shiori.sync_issues._upsert_issue_item")
+    @patch("shiori.sync_issues._fetch_pr_reviews_parallel")
+    def test_normal_repos_unchanged(
+        self,
+        mock_fetch: MagicMock,
+        mock_upsert: MagicMock,
+        mock_get_cursor: MagicMock,
+        mock_set_cursor: MagicMock,
+        mock_api_pages: MagicMock,
+    ):
+        """Repos with working issues endpoints behave exactly as before."""
+        settings = _make_settings()
+        conn = _mock_conn()
+        provider = _mock_provider()
+
+        page = [_body_item(1)]
+        mock_api_pages.side_effect = [[page], [], []]
+        mock_fetch.return_value = 0
+
+        result = fetch_issues(settings, conn, "owner/repo", provider)
+
+        # Normal path: body item is upserted
+        assert result == 1
+        mock_upsert.assert_called_once()
