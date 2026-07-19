@@ -291,6 +291,55 @@ def _fetch_pr_reviews_parallel(
 # ── Fetch (API only, no chunk/embed) ──────────────────────────────────────
 
 
+def _fetch_dormant_open_bodies(
+    client: httpx.Client,
+    conn: psycopg.Connection,
+    repo: str,
+) -> int:
+    """One-time fetch of ``state=open`` issues/PRs WITHOUT ``since`` filter.
+
+    Upserts **body rows only** (``comment_id=0``) into ``issue_items``.
+    Does NOT advance any cursor -- the normal streams own cursors.
+
+    This catches open issues/PRs whose ``updated_at`` predates the backfill
+    seed date (dormant open items that the ``since``-filtered stream skips).
+    Only a few percent of total items, so API cost is negligible.
+    """
+    n = 0
+    params = {
+        "state": "open",
+        "per_page": 100,
+    }
+    for page in _api_pages_gen(client, f"{API}/repos/{repo}/issues", params):
+        if not page:
+            break
+        for it in page:
+            no = it["number"]
+            kind = "pr" if "pull_request" in it else "issue"
+            author = (it.get("user") or {}).get("login")
+            row = {
+                "repo": repo,
+                "issue_no": no,
+                "comment_id": 0,
+                "kind": kind,
+                "title": _clean_text(it.get("title")),
+                "author": author,
+                "is_bot": _is_bot(it.get("user")),
+                "state": it.get("state"),
+                "path": None,
+                "line": None,
+                "body": _clean_text(it.get("body") or ""),
+                "url": it.get("html_url"),
+                "created_at": it.get("created_at"),
+                "updated_at": it.get("updated_at"),
+            }
+            _upsert_issue_item(conn, row)
+            n += 1
+        conn.commit()
+    log.info("dormant open bodies fetched for %s: %d", repo, n)
+    return n
+
+
 def fetch_issues(
     settings: Settings,
     conn: psycopg.Connection,
@@ -298,6 +347,7 @@ def fetch_issues(
     provider: TokenProvider,
     *,
     skip_pr_reviews: bool | None = None,
+    backfill_since: str | None = None,
 ) -> int:
     """Fetch issues/PRs/comments/reviews from GitHub API and upsert into issue_items.
 
@@ -315,6 +365,14 @@ def fetch_issues(
         "X-GitHub-Api-Version": "2022-11-28",
     }
     n_fetched = 0
+    # --- Backfill seeding: seed cursors when repo has none (first fetch) ---
+    was_seeded = False
+    if backfill_since:
+        cur_issues = get_cursor(conn, repo, "issues")
+        if cur_issues is None:
+            for _kind in ("issues", "issue_comments", "pr_review_comments"):
+                set_cursor(conn, repo, _kind, backfill_since)
+            was_seeded = True
 
     with httpx.Client(
         headers=headers, auth=_GitHubAuth(provider), timeout=30.0
@@ -436,6 +494,10 @@ def fetch_issues(
             n_fetched += _fetch_pr_reviews_parallel(
                 settings, repo, provider, pr_numbers,
             )
+
+        # --- One-time state=open pass for seeded repos ---
+        if was_seeded:
+            _fetch_dormant_open_bodies(client, conn, repo)
 
     return n_fetched
 

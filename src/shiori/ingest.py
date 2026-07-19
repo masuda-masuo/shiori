@@ -162,12 +162,40 @@ def _route() -> str:
     return os.environ.get("SHIORI_INGEST_ROUTE", "cli")
 
 
+def _order_repos_dev_first(targets: list[str], dev_repos: set[str]) -> list[str]:
+    """Stable-sort ``targets``: dev repos first, then ref repos.
+
+    Within each group, original config order is preserved.
+    """
+    devs = [r for r in targets if r in dev_repos]
+    refs = [r for r in targets if r not in dev_repos]
+    return devs + refs
+
+
+def _resolve_backfill_since(
+    cli_backfill_since: str | None,
+    settings: Settings,
+    repo: str,
+) -> str | None:
+    """Resolve ``backfill_since`` for a single repo.
+
+    CLI flag takes precedence over env default.
+    Env default (``settings.ref_backfill_since``) applies to ref repos only.
+    """
+    if cli_backfill_since is not None:
+        return cli_backfill_since
+    if repo not in settings.dev_repos:
+        return settings.ref_backfill_since
+    return None
+
+
 # ── run_fetch: API/git only, no chunk/embed ──────────────────────────────
 
 
 def run_fetch(
     settings: Settings | None = None,
     repos: list[str] | None = None,
+    backfill_since: str | None = None,
 ) -> None:
     """Fetch phase: API fetch + git pull only.
 
@@ -182,6 +210,7 @@ def run_fetch(
 
     settings = settings or load_settings()
     targets = _validate_repos(repos, settings)
+    targets = _order_repos_dev_first(targets, settings.dev_repos)
     provider = build_token_provider(settings)
 
     t_total = time.monotonic()
@@ -216,7 +245,8 @@ def run_fetch(
                 # Fetch issues/PRs/comments/reviews (API only)
                 try:
                     t0 = time.monotonic()
-                    n_fetched = fetch_issues(settings, conn, repo, provider)
+                    resolved_since = _resolve_backfill_since(backfill_since, settings, repo)
+                    n_fetched = fetch_issues(settings, conn, repo, provider, backfill_since=resolved_since)
                     log.info("fetch issues: %d items fetched (%.1fs)",
                              n_fetched, time.monotonic() - t0)
                 except Exception as exc:
@@ -265,6 +295,7 @@ def run_index(
     """
     settings = settings or load_settings()
     targets = _validate_repos(repos, settings)
+    targets = _order_repos_dev_first(targets, settings.dev_repos)
     route = _route()
 
     conn = db.connect(settings)
@@ -393,6 +424,7 @@ def run_ingest(
     settings: Settings | None = None,
     repos: list[str] | None = None,
     rebuild: bool = False,
+    backfill_since: str | None = None,
 ) -> None:
     """Combined fetch + index (legacy ingest behavior).
 
@@ -419,6 +451,7 @@ def run_ingest(
     targets = repos or settings.repos
     if not targets:
         raise SystemExit("SHIORI_REPOS not set (e.g. SHIORI_REPOS=owner/name)")
+    targets = _order_repos_dev_first(targets, settings.dev_repos)
 
     provider = build_token_provider(settings)
     route = os.environ.get("SHIORI_INGEST_ROUTE", "cli")
@@ -484,7 +517,8 @@ def run_ingest(
 
                 t0 = time.monotonic()
                 try:
-                    n_fetched = fetch_issues(settings, conn2, repo, provider)
+                    resolved_since = _resolve_backfill_since(backfill_since, settings, repo)
+                    n_fetched = fetch_issues(settings, conn2, repo, provider, backfill_since=resolved_since)
                     log.info("fetch issues: %d items fetched (%.1fs)",
                              n_fetched, time.monotonic() - t0)
                 except Exception as exc:

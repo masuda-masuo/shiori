@@ -1132,3 +1132,78 @@ class TestRunIndex:
         mock_truncate.assert_called_once_with(mock_conn)
         mock_drop.assert_called_once_with(mock_conn)
         mock_create.assert_called_once_with(mock_conn)
+
+
+# ===================================================================
+# _order_repos_dev_first: dev-first ordering (issue #315)
+# ===================================================================
+
+
+class TestOrderReposDevFirst:
+    """_order_repos_dev_first: dev repos ordered before ref repos."""
+
+    def test_dev_repos_first(self):
+        from shiori.ingest import _order_repos_dev_first
+        targets = ["ref/a", "dev/b", "ref/c", "dev/a"]
+        dev_repos = {"dev/a", "dev/b"}
+        ordered = _order_repos_dev_first(targets, dev_repos)
+        # devs first (stable: "dev/b", "dev/a"), then refs (stable: "ref/a", "ref/c")
+        assert ordered == ["dev/b", "dev/a", "ref/a", "ref/c"]
+
+    def test_all_dev(self):
+        from shiori.ingest import _order_repos_dev_first
+        targets = ["dev/b", "dev/a"]
+        dev_repos = {"dev/a", "dev/b"}
+        ordered = _order_repos_dev_first(targets, dev_repos)
+        assert ordered == ["dev/b", "dev/a"]
+
+    def test_all_ref(self):
+        from shiori.ingest import _order_repos_dev_first
+        targets = ["ref/b", "ref/a"]
+        dev_repos = set()
+        ordered = _order_repos_dev_first(targets, dev_repos)
+        assert ordered == ["ref/b", "ref/a"]
+
+    def test_empty_targets(self):
+        from shiori.ingest import _order_repos_dev_first
+        assert _order_repos_dev_first([], {"dev/a"}) == []
+
+
+# ===================================================================
+# _resolve_backfill_since: CLI vs env vs dev/repo logic (issue #315)
+# ===================================================================
+
+
+class TestResolveBackfillSince:
+    """_resolve_backfill_since: CLI flag takes precedence, env default for ref only."""
+
+    def _settings_with(self, dev_repos: set[str], ref_since: str | None = None) -> MagicMock:
+        s = MagicMock()
+        s.dev_repos = dev_repos
+        s.ref_backfill_since = ref_since
+        return s
+
+    def test_cli_flag_overrides_env_for_all_repos(self):
+        from shiori.ingest import _resolve_backfill_since
+        settings = self._settings_with(dev_repos={"dev/r"}, ref_since="2024-01-01")
+        # CLI flag applies to both dev and ref
+        assert _resolve_backfill_since("2024-06-01", settings, "dev/r") == "2024-06-01"
+        assert _resolve_backfill_since("2024-06-01", settings, "ref/r") == "2024-06-01"
+
+    def test_env_default_applies_to_ref_only(self):
+        from shiori.ingest import _resolve_backfill_since
+        settings = self._settings_with(dev_repos={"dev/r"}, ref_since="2024-01-01")
+        # Dev repo: no backfill (always full)
+        assert _resolve_backfill_since(None, settings, "dev/r") is None
+        # Ref repo: env default applies
+        assert _resolve_backfill_since(None, settings, "ref/r") == "2024-01-01"
+
+    def test_no_env_no_cli_returns_none(self):
+        from shiori.ingest import _resolve_backfill_since
+        settings = self._settings_with(dev_repos=set(), ref_since=None)
+        assert _resolve_backfill_since(None, settings, "any/r") is None
+
+    def test_cli_only_no_env(self):
+        from shiori.ingest import _resolve_backfill_since
+        settings = self._settings_with(dev_repos=set(), ref_since=None)
+        assert _resolve_backfill_since("2024-06-01", settings, "any/r") == "2024-06-01"
