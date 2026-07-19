@@ -50,7 +50,7 @@ Bot comments (e.g. Dependabot) are excluded from the index to reduce noise. Spec
 
 ## How It Works
 
-1.  **Ingestion**: Downloads docs and issues/PRs, splits them into chunks (documents are chunked by headings, discussions by comments with title context), and attaches metadata. Supports differential sync.
+1.  **Ingestion**: Three subcommands — `fetch` (API + git pull, no embeddings), `index` (chunk + embed from stored rows), `run` (both, the default). Downloads docs and issues/PRs, splits them into chunks (documents are chunked by headings, discussions by comments with title context), and attaches metadata. Supports differential sync with page-level resumability.
 2.  **Indexing**: Stores vector embeddings, full-text tokens, and metadata in PostgreSQL.
 3.  **Search**: Runs hybrid search (vector similarity + full-text keyword search via Reciprocal Rank Fusion) combined with metadata filtering.
 4.  **Delivery**: Exposes search APIs as MCP tools for the AI agent.
@@ -94,14 +94,23 @@ The 12 tools are classified into 4 layers based on user query intent:
 ## Quick Start
 
 ```bash
-cp .env.example .env   # Configure SHIORI_REPOS and GITHUB_TOKEN
+cp .env.example .env   # Configure SHIORI_REPOS; see below for role annotations
 docker compose up -d --build
 
 # Initial ingestion (may take time to download the embedding model)
 docker compose run --rm ingest
+
+# Adding a large reference repo? Bound the backfill:
+# ./scripts/ingest.sh run --backfill-since 2024-01-01
 ```
 
-The MCP server is exposed at `http://localhost:8765/mcp` (Streamable HTTP). See [docs/guides/setup.md](docs/guides/setup.md) for details.
+Ingestion has three subcommands — `fetch` (API + git pull only), `index` (chunk + embed), and `run` (both, default). The MCP server is exposed at `http://localhost:8765/mcp` (Streamable HTTP).
+
+See [docs/guides/setup.md](docs/guides/setup.md) for:
+- **Reference (read-only) setup** — public repos, no token, one-shot bounded ingest
+- **Development (writable) setup** — code indexing, PR review sync, GitHub App token
+
+The [design doc](docs/design/01_data_ingestion_and_sync.md) covers the architecture: three cursor streams, per-repo PG advisory locks for parallel containers, dev-first ordering, and the ingest strategy.
 
 ### Removing Repositories from the Index
 Removing a repository from `SHIORI_REPOS` does not delete its existing rows or disk clones. Delete it explicitly using `forget`:
