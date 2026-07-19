@@ -53,6 +53,10 @@ services:
       - tcp_keepalives_interval=10
       - -c
       - tcp_keepalives_count=3
+      - -c
+      - shared_buffers=1GB
+      - -c
+      - effective_cache_size=8GB
     ports:
       # ホスト上の stdio serve / ingest（セットアップ.md 参照）から接続するため
       # localhost に限定して公開する
