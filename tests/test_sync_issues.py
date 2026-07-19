@@ -460,3 +460,97 @@ class TestFetchIssuesNotFoundOK:
         # Normal path: body item is upserted
         assert result == 1
         mock_upsert.assert_called_once()
+
+
+# Issue #165: labels extracted from GitHub payload ----------------------
+
+class TestLabelExtraction:
+    """Labels are extracted from the GitHub API payload and stored in issue_items."""
+
+    @patch("shiori.sync_issues._api_pages_gen")
+    @patch("shiori.sync_issues.set_cursor")
+    @patch("shiori.sync_issues.get_cursor", return_value="2023-01-01T00:00:00Z")
+    @patch("shiori.sync_issues._upsert_issue_item")
+    @patch("shiori.sync_issues._fetch_pr_reviews_parallel")
+    def test_labels_extracted_and_stored(
+        self,
+        mock_fetch: MagicMock,
+        mock_upsert: MagicMock,
+        mock_get_cursor: MagicMock,
+        mock_set_cursor: MagicMock,
+        mock_api_pages: MagicMock,
+    ):
+        """Labels from the GitHub payload are extracted and passed to _upsert_issue_item."""
+        settings = _make_settings(dev_repos=set())
+        conn = _mock_conn()
+        provider = _mock_provider()
+
+        labels_payload = [
+            {"name": "bug", "color": "d73a4a"},
+            {"name": "enhancement", "color": "a2eeef"},
+        ]
+        page = [
+            _body_item(1, labels=labels_payload),
+            _body_item(2),  # no labels
+        ]
+        mock_api_pages.side_effect = [[page], [], []]
+        mock_fetch.return_value = 0
+
+        fetch_issues(settings, conn, "owner/repo", provider)
+
+        # First call: item with labels
+        call1_row = mock_upsert.call_args_list[0][0][1]
+        assert call1_row["labels"] == ["bug", "enhancement"]
+
+        # Second call: item without labels
+        call2_row = mock_upsert.call_args_list[1][0][1]
+        assert call2_row["labels"] == []
+
+    @patch("shiori.sync_issues._api_pages_gen")
+    @patch("shiori.sync_issues.set_cursor")
+    @patch("shiori.sync_issues.get_cursor", return_value="2023-01-01T00:00:00Z")
+    @patch("shiori.sync_issues._upsert_issue_item")
+    @patch("shiori.sync_issues._fetch_pr_reviews_parallel")
+    def test_labels_empty_list_when_no_labels_key(
+        self,
+        mock_fetch: MagicMock,
+        mock_upsert: MagicMock,
+        mock_get_cursor: MagicMock,
+        mock_set_cursor: MagicMock,
+        mock_api_pages: MagicMock,
+    ):
+        """Items without a 'labels' key in the payload get an empty list."""
+        settings = _make_settings(dev_repos=set())
+        conn = _mock_conn()
+        provider = _mock_provider()
+
+        # Item without labels key at all — _body_item doesn't include it by default
+        page = [_body_item(1)]
+        assert "labels" not in page[0]
+
+        mock_api_pages.side_effect = [[page], [], []]
+        mock_fetch.return_value = 0
+
+        fetch_issues(settings, conn, "owner/repo", provider)
+
+        call_row = mock_upsert.call_args_list[0][0][1]
+        assert call_row["labels"] == []
+
+
+class TestUpsertLabelsKey:
+    """Rows without a "labels" key (comments/reviews) must not break %(labels)s."""
+
+    def test_upsert_supplies_missing_labels_key(self):
+        from shiori.sync_issues import _upsert_issue_item
+
+        conn = _mock_conn()
+        row = {
+            "repo": "o/r", "issue_no": 1, "comment_id": 42,
+            "kind": "comment", "title": None, "author": "u",
+            "is_bot": False, "state": "open", "path": None, "line": None,
+            "body": "hi", "url": None,
+            "created_at": "2024-01-01T00:00:00Z", "updated_at": "2024-01-01T00:00:00Z",
+        }
+        _upsert_issue_item(conn, row)
+        executed_row = conn.cursor.return_value.__enter__.return_value.execute.call_args[0][1]
+        assert executed_row["labels"] is None

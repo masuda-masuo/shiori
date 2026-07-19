@@ -245,6 +245,35 @@ class TestFilterSql:
         assert "state = %s" in sql
         assert params == ["open"]
 
+    def test_labels_filter_adds_exists_subquery(self):
+        sql, params = _filter_sql({"labels": ["bug", "enhancement"]})
+        assert "EXISTS" in sql
+        assert "issue_items" in sql
+        assert "&&" in sql
+        assert params == [["bug", "enhancement"]]
+
+    def test_labels_filter_combined_with_other_filters(self):
+        sql, params = _filter_sql({
+            "labels": ["bug"],
+            "state": "open",
+            "source_type": "issue",
+        })
+        assert "EXISTS" in sql
+        assert "issue_items" in sql
+        assert "state = %s" in sql
+        assert "source_type = %s" in sql
+        assert params == ["issue", "open", ["bug"]]
+
+    def test_labels_filter_none_excluded(self):
+        sql, params = _filter_sql({"labels": None})
+        assert sql == ""
+        assert params == []
+
+    def test_labels_filter_empty_list_excluded(self):
+        sql, params = _filter_sql({"labels": []})
+        assert sql == ""
+        assert params == []
+
 
 # ── _to_or_query tests (issue #99) ──
 

@@ -19,12 +19,16 @@ def semantic_search(
     updated_after: str | None = None,
     prog_lang: str | None = None,
     kind: str | None = None,
+    labels: list[str] | None = None,
     top_k: int | None = None,
     sort_by: str = "score",
     sort_order: str = "desc",
 ) -> list[dict[str, Any]]:
     """Semantic search (entry). Strong for paraphrasing, concept, cross-lingual queries.
     Hybrid with keyword search internally.
+    labels: filter by GitHub issue labels (match-any semantics). Only affects
+            issue/pr_review source_types; doc/code results are excluded when
+            labels filter is active (issue #165).
     kind: 'issue' | 'pr' — further filter source_type='issue'/'pr_review' results
           by thread type. No effect on doc/code results (issue #98).
     repo: "owner/name" filter, or a short name if it uniquely matches one
@@ -42,7 +46,7 @@ def semantic_search(
     with _conn() as conn:
         return search.semantic_search(
             settings, conn, _get_embedder(), query,
-            _make_filters(source_type, language, state, _resolve_repo_filter(repo), path_prefix, updated_after, prog_lang, kind),
+            _make_filters(source_type, language, state, _resolve_repo_filter(repo), path_prefix, updated_after, prog_lang, kind, labels=labels),
             top_k,
             sort_by,
             sort_order,
@@ -60,6 +64,7 @@ def keyword_search(
     updated_after: str | None = None,
     prog_lang: str | None = None,
     kind: str | None = None,
+    labels: list[str] | None = None,
     top_k: int | None = None,
     sort_by: str = "score",
     sort_order: str = "desc",
@@ -68,6 +73,9 @@ def keyword_search(
     """Keyword search (Japanese tokenize). Strong for exact matches: function names, API names, error codes, config keys.
     Multi-token queries use OR matching by default (any token can match); tokens that match more/strongly rank higher.
     Pass match_all=True for AND behavior (all tokens must match the same chunk).
+    labels: filter by GitHub issue labels (match-any semantics). Only affects
+            issue/pr_review source_types; doc/code results are excluded when
+            labels filter is active (issue #165).
     kind: 'issue' | 'pr' — further filter source_type='issue'/'pr_review' results
           by thread type. No effect on doc/code results (issue #98).
     repo: "owner/name" filter, or a short name if it uniquely matches one
@@ -85,7 +93,7 @@ def keyword_search(
     with _conn() as conn:
         return search.keyword_search(
             settings, conn, query,
-            _make_filters(source_type, language, state, _resolve_repo_filter(repo), path_prefix, updated_after, prog_lang, kind),
+            _make_filters(source_type, language, state, _resolve_repo_filter(repo), path_prefix, updated_after, prog_lang, kind, labels=labels),
             top_k,
             sort_by,
             sort_order,
