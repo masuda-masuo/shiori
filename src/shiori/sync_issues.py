@@ -329,12 +329,15 @@ def fetch_issues(
         }
         if since:
             params["since"] = since
+        pr_numbers: list[int] = []
         for page in _api_pages_gen(client, f"{API}/repos/{repo}/issues", params):
             if not page:
                 break
             for it in page:
                 no = it["number"]
                 kind = "pr" if "pull_request" in it else "issue"
+                if kind == "pr":
+                    pr_numbers.append(no)
                 author = (it.get("user") or {}).get("login")
                 row = {
                     "repo": repo,
@@ -429,28 +432,10 @@ def fetch_issues(
         _skip_reviews = skip_pr_reviews
         if _skip_reviews is None:
             _skip_reviews = repo not in settings.dev_repos
-        if not _skip_reviews:
-            # Collect PR numbers (cursors already advanced above)
-            pr_cursor = get_cursor(conn, repo, "issues")
-            params_pr = {
-                "state": "all",
-                "sort": "updated",
-                "direction": "asc",
-                "per_page": 100,
-            }
-            if pr_cursor:
-                params_pr["since"] = pr_cursor
-            pr_numbers: list[int] = []
-            for page in _api_pages_gen(client, f"{API}/repos/{repo}/issues", params_pr):
-                if not page:
-                    break
-                for it in page:
-                    if "pull_request" in it:
-                        pr_numbers.append(it["number"])
-            if pr_numbers:
-                n_fetched += _fetch_pr_reviews_parallel(
-                    settings, repo, provider, pr_numbers,
-                )
+        if not _skip_reviews and pr_numbers:
+            n_fetched += _fetch_pr_reviews_parallel(
+                settings, repo, provider, pr_numbers,
+            )
 
     return n_fetched
 
