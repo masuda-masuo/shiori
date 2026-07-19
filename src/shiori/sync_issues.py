@@ -388,7 +388,9 @@ def fetch_issues(
         if since:
             params["since"] = since
         pr_numbers: list[int] = []
-        for page in _api_pages_gen(client, f"{API}/repos/{repo}/issues", params):
+        _had_issues_page = False
+        for page in _api_pages_gen(client, f"{API}/repos/{repo}/issues", params, not_found_ok=True):
+            _had_issues_page = True
             if not page:
                 break
             for it in page:
@@ -417,6 +419,8 @@ def fetch_issues(
                 n_fetched += 1
             conn.commit()
             set_cursor(conn, repo, "issues", page[-1]["updated_at"])
+        if not _had_issues_page:
+            log.warning("Issues API returned 404 for %s — issues disabled, skipping", repo)
 
         if get_cursor(conn, repo, "issues") is None:
             set_cursor(conn, repo, "issues", datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
