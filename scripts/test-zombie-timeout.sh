@@ -6,18 +6,19 @@
 set -euo pipefail
 
 DB="${DATABASE_URL:?DATABASE_URL が未設定}"
-LOCK_ID=12345
+REPO="${1:-owner/example}"
+LOCK_CLASSID=0x5348494F
 TIMEOUT_SECONDS=10
 WAIT=$((TIMEOUT_SECONDS + 5))
 
 # cleanup: ゾンビセッションを確実に片付ける
 cleanup() {
   psql "$DB" -c "SELECT pg_terminate_backend(pid) FROM pg_locks
-    WHERE locktype='advisory' AND objid=$LOCK_ID AND pid != pg_backend_pid();" >/dev/null 2>&1 || true
+    WHERE locktype='advisory' AND classid=$LOCK_CLASSID AND objid=hashtext('$REPO') AND pid != pg_backend_pid();" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 
-echo "=== 1. zombie セッション生成（advisory lock $LOCK_ID 獲得、timeout=${TIMEOUT_SECONDS}s）==="
+echo "=== 1. zombie セッション生成（advisory lock ${LOCK_CLASSID}/hashtext('${REPO}') 獲得、timeout=${TIMEOUT_SECONDS}s）==="
 
 # pg_sleep を使うと idle in transaction にならないので、FIFO で psql を
 # 開きっぱなしにして block させる。
@@ -29,7 +30,7 @@ exec 3>"$FIFO"
 
 echo "SET idle_in_transaction_session_timeout = $((TIMEOUT_SECONDS * 1000));" >&3
 echo "BEGIN;" >&3
-echo "SELECT pg_advisory_xact_lock($LOCK_ID);" >&3
+echo "SELECT pg_advisory_xact_lock($LOCK_CLASSID, hashtext('$REPO'));" >&3
 
 # psql が lock 獲得するのを待つ
 sleep 1
@@ -37,9 +38,9 @@ sleep 1
 echo ""
 echo "=== 2. lock 保持確認 ==="
 psql "$DB" --no-psqlrc -c "
-  SELECT locktype, objid, pid, granted
+  SELECT locktype, classid, objid, pid, granted
   FROM pg_locks
-  WHERE locktype = 'advisory' AND objid = $LOCK_ID;
+  WHERE locktype = 'advisory' AND classid = $LOCK_CLASSID AND objid = hashtext('$REPO');
 "
 
 echo ""
@@ -47,7 +48,7 @@ echo "=== 3. 別セッションからの lock 取得試行（blocking_pids 確�
 psql "$DB" --no-psqlrc -c "
   SELECT pid, pg_blocking_pids(pid) AS blocked_by
   FROM pg_locks
-  WHERE locktype = 'advisory' AND objid = $LOCK_ID AND NOT granted;
+  WHERE locktype = 'advisory' AND classid = $LOCK_CLASSID AND objid = hashtext('$REPO') AND NOT granted;
 " || echo "（block されず=lock 未獲得。再試行）"
 
 echo ""
@@ -55,7 +56,7 @@ echo "=== 4. ${TIMEOUT_SECONDS}秒待機（timeout で zombie が切断される
 for i in $(seq 1 "$WAIT"); do
   sleep 1
   HELD=$(psql "$DB" --no-psqlrc -t -A \
-    -c "SELECT count(*) FROM pg_locks WHERE locktype='advisory' AND objid=$LOCK_ID AND granted;" 2>/dev/null || echo "0")
+    -c "SELECT count(*) FROM pg_locks WHERE locktype='advisory' AND classid=$LOCK_CLASSID AND objid=hashtext('$REPO') AND granted;" 2>/dev/null || echo "0")
   if [ "$HELD" = "0" ]; then
     echo "  ${i}秒経過: lock 解放を検知"
     break
@@ -69,13 +70,13 @@ echo ""
 echo ""
 echo "=== 5. 最終状態確認 ==="
 psql "$DB" --no-psqlrc -c "
-  SELECT locktype, objid, pid, granted
+  SELECT locktype, classid, objid, pid, granted
   FROM pg_locks
-  WHERE locktype = 'advisory' AND objid = $LOCK_ID;
+  WHERE locktype = 'advisory' AND classid = $LOCK_CLASSID AND objid = hashtext('$REPO');
 "
 
 HELD=$(psql "$DB" --no-psqlrc -t -A \
-  -c "SELECT count(*) FROM pg_locks WHERE locktype='advisory' AND objid=$LOCK_ID AND granted;" 2>/dev/null || echo "1")
+  -c "SELECT count(*) FROM pg_locks WHERE locktype='advisory' AND classid=$LOCK_CLASSID AND objid=hashtext('$REPO') AND granted;" 2>/dev/null || echo "1")
 
 echo ""
 if [ "$HELD" = "0" ]; then
