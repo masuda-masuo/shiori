@@ -259,7 +259,8 @@ def run_fetch(
         finally:
             conn.close()
 
-    with ThreadPoolExecutor(max_workers=len(targets)) as executor:
+    n_workers = max(1, min(len(targets), settings.fetch_concurrency))
+    with ThreadPoolExecutor(max_workers=n_workers) as executor:
         futures = {executor.submit(_fetch_one, repo): repo for repo in targets}
         for future in as_completed(futures):
             repo = futures[future]
@@ -533,7 +534,8 @@ def run_ingest(
         finally:
             conn2.close()
 
-    with ThreadPoolExecutor(max_workers=len(targets)) as executor:
+    n_workers = max(1, min(len(targets), settings.fetch_concurrency))
+    with ThreadPoolExecutor(max_workers=n_workers) as executor:
         futures = {executor.submit(_fetch_one, repo): repo for repo in targets}
         for future in as_completed(futures):
             future.result()  # _fetch_one never re-raises

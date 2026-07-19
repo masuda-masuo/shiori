@@ -28,6 +28,7 @@ class TestDoSyncAllowlist:
             patch("shiori.pipeline._sync_lock") as mock_lock,
         ):
             mock_settings.repos = ["owner/repo", "owner2/repo2"]
+            mock_settings.fetch_concurrency = 4
             mock_lock.acquire.return_value = False  # lock acquisition failed → skipped
 
             result = _do_sync(repos=["owner/repo"])
@@ -38,6 +39,7 @@ class TestDoSyncAllowlist:
         """repo not in settings.repos raises ValueError."""
         with patch("shiori.pipeline.settings") as mock_settings:
             mock_settings.repos = ["owner/repo"]
+            mock_settings.fetch_concurrency = 4
 
             with pytest.raises(ValueError, match="SHIORI_REPOS"):
                 _do_sync(repos=["evil/repo"])
@@ -46,6 +48,7 @@ class TestDoSyncAllowlist:
         """Raises ValueError even if only some repos are invalid."""
         with patch("shiori.pipeline.settings") as mock_settings:
             mock_settings.repos = ["owner/repo"]
+            mock_settings.fetch_concurrency = 4
 
             with pytest.raises(ValueError, match="SHIORI_REPOS"):
                 _do_sync(repos=["owner/repo", "evil/repo"])
@@ -57,6 +60,7 @@ class TestDoSyncAllowlist:
             patch("shiori.pipeline._sync_lock") as mock_lock,
         ):
             mock_settings.repos = ["owner/repo"]
+            mock_settings.fetch_concurrency = 4
             mock_lock.acquire.return_value = False
 
             result = _do_sync(repos=None)
@@ -66,6 +70,7 @@ class TestDoSyncAllowlist:
         """エラーメッセージに無効な repo 名が含まれる。"""
         with patch("shiori.pipeline.settings") as mock_settings:
             mock_settings.repos = ["owner/repo"]
+            mock_settings.fetch_concurrency = 4
 
             with pytest.raises(ValueError, match="evil/repo"):
                 _do_sync(repos=["evil/repo"])
@@ -74,6 +79,7 @@ class TestDoSyncAllowlist:
         """複数の無効な repo がエラーメッセージに含まれる。"""
         with patch("shiori.pipeline.settings") as mock_settings:
             mock_settings.repos = ["owner/repo"]
+            mock_settings.fetch_concurrency = 4
 
             with pytest.raises(ValueError) as exc_info:
                 _do_sync(repos=["evil1/repo", "evil2/repo"])
@@ -88,6 +94,7 @@ class TestDoSyncAllowlist:
             patch("shiori.pipeline._sync_lock") as mock_lock,
         ):
             mock_settings.repos = ["owner/repo"]
+            mock_settings.fetch_concurrency = 4
             mock_lock.acquire.return_value = False
 
             result = _do_sync(repos=[])
@@ -113,6 +120,7 @@ class TestIngestRebuildGuard:
         ):
             mock_settings.allow_rebuild = False
             mock_settings.repos = ["test/repo"]
+            mock_settings.fetch_concurrency = 4
             mock_do_sync.return_value = {"status": "ok", "repos": {}}
 
             with pytest.raises(ValueError, match="rebuild=True"):
@@ -128,6 +136,7 @@ class TestIngestRebuildGuard:
         ):
             mock_settings.allow_rebuild = True
             mock_settings.repos = ["test/repo"]
+            mock_settings.fetch_concurrency = 4
             mock_do_sync.return_value = {"status": "ok", "repos": {}}
 
             result = ingest(rebuild=True, repo="test/repo")
@@ -144,6 +153,7 @@ class TestIngestRebuildGuard:
         ):
             mock_settings.allow_rebuild = False
             mock_settings.repos = ["test/repo"]
+            mock_settings.fetch_concurrency = 4
             mock_do_sync.return_value = {"status": "ok", "repos": {}}
 
             result = ingest(rebuild=False, repo="test/repo")
@@ -160,6 +170,7 @@ class TestIngestRebuildGuard:
         ):
             mock_settings.allow_rebuild = False
             mock_settings.repos = ["test/repo"]
+            mock_settings.fetch_concurrency = 4
             mock_do_sync.return_value = {"status": "ok", "repos": {}}
 
             result = ingest(rebuild=False)
@@ -176,6 +187,7 @@ class TestIngestRebuildGuard:
         ):
             mock_settings.allow_rebuild = False
             mock_settings.repos = ["test/repo"]
+            mock_settings.fetch_concurrency = 4
 
             with pytest.raises(ValueError) as exc_info:
                 ingest(rebuild=True)
@@ -219,6 +231,7 @@ class TestRunIngestSyncAttemptRecording:
         mock_conn = self._mock_conn()
         mock_settings = MagicMock()
         mock_settings.repos = ["owner/repo"]
+        mock_settings.fetch_concurrency = 4
 
         with (
             patch("shiori.ingest.db.connect", return_value=mock_conn),
@@ -257,6 +270,7 @@ class TestRunIngestSyncAttemptRecording:
         mock_conn = self._mock_conn()
         mock_settings = MagicMock()
         mock_settings.repos = ["owner/repo"]
+        mock_settings.fetch_concurrency = 4
 
         with (
             patch("shiori.ingest.db.connect", return_value=mock_conn),
@@ -284,6 +298,7 @@ class TestRunIngestSyncAttemptRecording:
         mock_conn = self._mock_conn()
         mock_settings = MagicMock()
         mock_settings.repos = ["owner/repo"]
+        mock_settings.fetch_concurrency = 4
 
         with (
             patch("shiori.ingest.db.connect", return_value=mock_conn),
@@ -346,6 +361,7 @@ class TestDoSyncPreLoopFailureRecording:
             patch("shiori.pipeline.db.record_sync_attempt") as mock_record_attempt,
         ):
             mock_settings.repos = ["owner/repo1", "owner/repo2"]
+            mock_settings.fetch_concurrency = 4
             mock_lock.acquire.return_value = True
 
             with pytest.raises(ModuleNotFoundError, match="sentence_transformers"):
@@ -380,6 +396,7 @@ class TestDoSyncPreLoopFailureRecording:
             patch("shiori.pipeline.db.record_sync_attempt") as mock_record_attempt,
         ):
             mock_settings.repos = ["owner/repo"]
+            mock_settings.fetch_concurrency = 4
             mock_lock.acquire.return_value = True
 
             with pytest.raises(ValueError, match="GitHub App configuration"):
@@ -407,6 +424,7 @@ class TestDoSyncPreLoopFailureRecording:
             patch("shiori.pipeline.db.record_sync_attempt"),
         ):
             mock_settings.repos = ["owner/repo"]
+            mock_settings.fetch_concurrency = 4
             mock_lock.acquire.return_value = True
 
             with pytest.raises(ValueError, match="boom"):
@@ -429,6 +447,7 @@ class TestDoSyncPreLoopFailureRecording:
             ),
         ):
             mock_settings.repos = ["owner/repo"]
+            mock_settings.fetch_concurrency = 4
             mock_lock.acquire.return_value = True
 
             with pytest.raises(ValueError, match="original failure"):
@@ -484,6 +503,7 @@ class TestDoSyncMidStageFailureRecording:
             patch("shiori.pipeline.db.record_sync_attempt") as mock_record_attempt,
         ):
             mock_settings.repos = ["owner/repo1", "owner/repo2"]
+            mock_settings.fetch_concurrency = 4
             mock_lock.acquire.return_value = True
 
             with pytest.raises(RuntimeError, match="migrate failed"):
@@ -523,6 +543,7 @@ class TestDoSyncMidStageFailureRecording:
             patch("shiori.pipeline.db.record_sync_attempt") as mock_record_attempt,
         ):
             mock_settings.repos = ["owner/repo"]
+            mock_settings.fetch_concurrency = 4
             mock_lock.acquire.return_value = True
 
             with pytest.raises(RuntimeError, match="lock query failed"):
@@ -551,6 +572,7 @@ class TestDoSyncMidStageFailureRecording:
             patch("shiori.pipeline.db.record_sync_attempt") as mock_record_attempt,
         ):
             mock_settings.repos = ["owner/repo"]
+            mock_settings.fetch_concurrency = 4
             mock_lock.acquire.return_value = True
 
             with pytest.raises(RuntimeError, match="bulk detection failed"):
@@ -578,6 +600,7 @@ class TestDoSyncMidStageFailureRecording:
             patch("shiori.pipeline.db.record_sync_attempt"),
         ):
             mock_settings.repos = ["owner/repo"]
+            mock_settings.fetch_concurrency = 4
             mock_lock.acquire.return_value = True
 
             with pytest.raises(RuntimeError, match="migrate failed"):
@@ -638,6 +661,7 @@ class TestDoSyncPerRepoContinueOnFailure:
             patch("shiori.pipeline.db.record_sync_attempt") as mock_record_attempt,
         ):
             mock_settings.repos = ["owner/repo1", "owner/repo2"]
+            mock_settings.fetch_concurrency = 4
             mock_lock.acquire.return_value = True
 
             with pytest.raises(RuntimeError, match="owner/repo1"):
@@ -676,6 +700,7 @@ class TestDoSyncPerRepoContinueOnFailure:
             patch("shiori.pipeline.db.record_sync_attempt") as mock_record_attempt,
         ):
             mock_settings.repos = ["owner/repo1", "owner/repo2"]
+            mock_settings.fetch_concurrency = 4
             mock_lock.acquire.return_value = True
 
             result = _do_sync()
@@ -711,6 +736,7 @@ class TestDoSyncPerRepoContinueOnFailure:
             patch("shiori.pipeline.db.record_sync_attempt") as mock_record_attempt,
         ):
             mock_settings.repos = ["owner/repo1", "owner/repo2"]
+            mock_settings.fetch_concurrency = 4
             mock_lock.acquire.return_value = True
 
             with pytest.raises(RuntimeError, match="boom"):
@@ -748,6 +774,7 @@ class TestRunIngestPerRepoContinueOnFailure:
         mock_conn = self._mock_conn()
         mock_settings = MagicMock()
         mock_settings.repos = ["owner/repo1", "owner/repo2"]
+        mock_settings.fetch_concurrency = 4
 
         def fake_fetch_docs(settings, conn, repo, provider):
             if repo == "owner/repo1":
@@ -790,6 +817,7 @@ class TestRunIngestPerRepoContinueOnFailure:
         mock_conn = self._mock_conn()
         mock_settings = MagicMock()
         mock_settings.repos = ["owner/repo1", "owner/repo2"]
+        mock_settings.fetch_concurrency = 4
 
         with (
             patch("shiori.ingest.db.connect", return_value=mock_conn),
@@ -823,6 +851,7 @@ class TestRunIngestPerRepoContinueOnFailure:
         mock_conn = self._mock_conn()
         mock_settings = MagicMock()
         mock_settings.repos = ["owner/repo1", "owner/repo2"]
+        mock_settings.fetch_concurrency = 4
 
         def fake_fetch_docs(settings, conn, repo, provider):
             if repo == "owner/repo1":
@@ -901,6 +930,7 @@ class TestDoSyncOperationalErrorHandling:
             patch("shiori.pipeline.db.record_sync_attempt") as mock_record_attempt,
         ):
             mock_settings.repos = ["owner/repo1", "owner/repo2"]
+            mock_settings.fetch_concurrency = 4
             mock_lock.acquire.return_value = True
 
             with pytest.raises(RuntimeError, match="owner/repo1"):
@@ -960,6 +990,7 @@ class TestDoSyncOperationalErrorHandling:
             ) as mock_record_attempt,
         ):
             mock_settings.repos = ["owner/repo1"]
+            mock_settings.fetch_concurrency = 4
             mock_lock.acquire.return_value = True
 
             with pytest.raises(RuntimeError, match="owner/repo1"):
@@ -990,6 +1021,7 @@ class TestRunFetch:
     def _mock_settings(self):
         s = MagicMock()
         s.repos = ["owner/repo"]
+        s.fetch_concurrency = 4
         return s
 
     def test_lock_not_acquired_returns_early(self):
@@ -1047,6 +1079,7 @@ class TestRunIndex:
     def _mock_settings(self):
         s = MagicMock()
         s.repos = ["owner/repo"]
+        s.fetch_concurrency = 4
         return s
 
     def test_lock_not_acquired_returns_early(self):
@@ -1207,3 +1240,170 @@ class TestResolveBackfillSince:
         from shiori.ingest import _resolve_backfill_since
         settings = self._settings_with(dev_repos=set(), ref_since=None)
         assert _resolve_backfill_since("2024-06-01", settings, "any/r") == "2024-06-01"
+
+
+# ===================================================================
+# fetch_concurrency: max_workers cap and env override (issue #326)
+# ===================================================================
+
+_EXECUTOR_ARGS: dict = {}
+
+
+class _RecordingExecutor:
+    """ThreadPoolExecutor stand-in that records init args and runs synchronously."""
+
+    def __init__(self, **kwargs):
+        _EXECUTOR_ARGS.clear()
+        _EXECUTOR_ARGS.update(kwargs)
+
+    def submit(self, fn, /, *args, **kwargs):  # type: ignore[override]
+        from concurrent.futures import Future
+        f: Future = Future()
+        try:
+            f.set_result(fn(*args, **kwargs))
+        except BaseException as exc:
+            f.set_exception(exc)
+        return f
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        pass
+
+
+class TestFetchConcurrencySettings:
+    """fetch_concurrency setting default and environment variable override."""
+
+    def test_default_is_4(self, monkeypatch):
+        """SHIORI_FETCH_CONCURRENCY unset → fetch_concurrency defaults to 4."""
+        monkeypatch.delenv("SHIORI_FETCH_CONCURRENCY", raising=False)
+        from shiori.config import Settings
+
+        s = Settings()
+        assert s.fetch_concurrency == 4
+
+    def test_env_override(self, monkeypatch):
+        """SHIORI_FETCH_CONCURRENCY set to 8 → fetch_concurrency is 8."""
+        monkeypatch.setenv("SHIORI_FETCH_CONCURRENCY", "8")
+        from shiori.config import Settings
+
+        s = Settings()
+        assert s.fetch_concurrency == 8
+
+
+class TestFetchConcurrencyCapRunFetch:
+    """ThreadPoolExecutor max_workers bounded by fetch_concurrency in run_fetch."""
+
+    def _settings_with(self, repos_count: int, concurrency: int):
+        s = MagicMock()
+        s.repos = [f"owner/{i}" for i in range(repos_count)]
+        s.fetch_concurrency = concurrency
+        return s
+
+    def test_capped_at_fetch_concurrency(self):
+        """59 targets, concurrency=4 → max_workers=4."""
+        from shiori.ingest import run_fetch
+
+        mock_conn = MagicMock()
+        with (
+            patch("concurrent.futures.ThreadPoolExecutor", _RecordingExecutor),
+            patch("shiori.ingest.db.connect", return_value=mock_conn),
+            patch("shiori.ingest.schema.migrate"),
+            patch("shiori.ingest._acquire_repo_lock", return_value=False),
+            patch("shiori.ingest._release_repo_lock"),
+            patch("shiori.ingest.build_token_provider", return_value=MagicMock()),
+            patch("shiori.ingest.fetch_docs"),
+            patch("shiori.ingest.fetch_issues"),
+        ):
+            run_fetch(settings=self._settings_with(repos_count=59, concurrency=4))
+
+        assert _EXECUTOR_ARGS.get("max_workers") == 4, (
+            f"Expected max_workers=4, got {_EXECUTOR_ARGS}"
+        )
+
+    def test_never_exceeds_targets(self):
+        """2 targets, concurrency=10 → max_workers=2 (capped to len(targets))."""
+        from shiori.ingest import run_fetch
+
+        mock_conn = MagicMock()
+        with (
+            patch("concurrent.futures.ThreadPoolExecutor", _RecordingExecutor),
+            patch("shiori.ingest.db.connect", return_value=mock_conn),
+            patch("shiori.ingest.schema.migrate"),
+            patch("shiori.ingest._acquire_repo_lock", return_value=False),
+            patch("shiori.ingest._release_repo_lock"),
+            patch("shiori.ingest.build_token_provider", return_value=MagicMock()),
+            patch("shiori.ingest.fetch_docs"),
+            patch("shiori.ingest.fetch_issues"),
+        ):
+            run_fetch(settings=self._settings_with(repos_count=2, concurrency=10))
+
+        assert _EXECUTOR_ARGS.get("max_workers") == 2, (
+            f"Expected max_workers=2, got {_EXECUTOR_ARGS}"
+        )
+
+    def test_never_below_one(self):
+        """1 target, concurrency=4 → max_workers=1 (at least 1)."""
+        from shiori.ingest import run_fetch
+
+        mock_conn = MagicMock()
+        with (
+            patch("concurrent.futures.ThreadPoolExecutor", _RecordingExecutor),
+            patch("shiori.ingest.db.connect", return_value=mock_conn),
+            patch("shiori.ingest.schema.migrate"),
+            patch("shiori.ingest._acquire_repo_lock", return_value=False),
+            patch("shiori.ingest._release_repo_lock"),
+            patch("shiori.ingest.build_token_provider", return_value=MagicMock()),
+            patch("shiori.ingest.fetch_docs"),
+            patch("shiori.ingest.fetch_issues"),
+        ):
+            run_fetch(settings=self._settings_with(repos_count=1, concurrency=4))
+
+        assert _EXECUTOR_ARGS.get("max_workers") == 1, (
+            f"Expected max_workers=1, got {_EXECUTOR_ARGS}"
+        )
+
+
+class TestFetchConcurrencyCapRunIngest:
+    """ThreadPoolExecutor max_workers bounded by fetch_concurrency in run_ingest."""
+
+    def _settings_with(self, repos_count: int, concurrency: int):
+        s = MagicMock()
+        s.repos = [f"owner/{i}" for i in range(repos_count)]
+        s.fetch_concurrency = 4
+        s.dev_repos = set()
+        s.ref_backfill_since = None
+        s.allow_rebuild = False
+        s.fetch_concurrency = concurrency
+        return s
+
+    def test_capped_in_run_ingest(self):
+        """59 targets, concurrency=4 → max_workers=4 in run_ingest."""
+        from shiori.ingest import run_ingest
+
+        mock_conn = MagicMock()
+        with (
+            patch("concurrent.futures.ThreadPoolExecutor", _RecordingExecutor),
+            patch("shiori.ingest.db.connect", return_value=mock_conn),
+            patch("shiori.ingest.schema.migrate"),
+            patch("shiori.ingest._acquire_repo_lock", return_value=False),
+            patch("shiori.ingest._release_repo_lock"),
+            patch("shiori.ingest._is_bulk_path", return_value=False),
+            patch("shiori.ingest.build_token_provider", return_value=MagicMock()),
+            patch("shiori.ingest.Embedder", return_value=MagicMock()),
+            patch("shiori.ingest.ChunkBuffer", return_value=MagicMock()),
+            patch("shiori.ingest.fetch_docs"),
+            patch("shiori.ingest.fetch_issues"),
+            patch("shiori.ingest.index_docs"),
+            patch("shiori.ingest.index_issues"),
+            patch("shiori.ingest.index_code"),
+            patch("shiori.ingest.db.record_sync_run",
+                   return_value=MagicMock(isoformat=lambda: "2026-01-01T00:00:00+00:00")),
+            patch("shiori.ingest.db.record_sync_attempt"),
+        ):
+            run_ingest(settings=self._settings_with(repos_count=59, concurrency=4))
+
+        assert _EXECUTOR_ARGS.get("max_workers") == 4, (
+            f"Expected max_workers=4, got {_EXECUTOR_ARGS}"
+        )
