@@ -279,3 +279,86 @@ class TestFetchIssuesSkipPRReviewsGuard:
         fetch_issues(settings, conn, "owner/repo", provider, skip_pr_reviews=None)
 
         mock_fetch.assert_not_called()
+
+# Issue #323: httpx.Client follow_redirects regression tests ------------
+
+class TestHttpxClientFollowRedirects:
+    """Verify every httpx.Client(...) construction passes follow_redirects=True."""
+
+    # --- _fetch_pr_reviews_parallel (line 262) ---
+
+    @patch("shiori.sync_issues.db.connect")
+    @patch("shiori.sync_issues._sync_pr_reviews")
+    def test_fetch_pr_reviews_parallel_client_has_follow_redirects(
+        self, mock_sync: MagicMock, mock_connect: MagicMock,
+    ):
+        """The _worker inside _fetch_pr_reviews_parallel creates httpx.Client
+        with follow_redirects=True."""
+        from shiori.sync_issues import _fetch_pr_reviews_parallel
+
+        mock_connect.return_value = MagicMock()
+        captured_kwargs: dict[str, object] = {}
+
+        class _SpyClient:
+            def __init__(self, **kwargs: object) -> None:
+                captured_kwargs.update(kwargs)
+
+            def __enter__(self) -> _SpyClient:
+                return self
+
+            def __exit__(self, *args: object) -> None:
+                pass
+
+        with patch("shiori.sync_issues.httpx.Client", _SpyClient):
+            _fetch_pr_reviews_parallel(
+                _make_settings(), "owner/repo", _mock_provider(), [1],
+            )
+
+        assert captured_kwargs.get("follow_redirects") is True, (
+            f"Expected follow_redirects=True in _fetch_pr_reviews_parallel "
+            f"but got {captured_kwargs}"
+        )
+
+    # --- fetch_issues (line 377) ---
+
+    @patch("shiori.sync_issues._api_pages_gen")
+    @patch("shiori.sync_issues.set_cursor")
+    @patch("shiori.sync_issues.get_cursor", return_value="2023-01-01T00:00:00Z")
+    @patch("shiori.sync_issues._upsert_issue_item")
+    @patch("shiori.sync_issues._fetch_pr_reviews_parallel")
+    def test_fetch_issues_client_has_follow_redirects(
+        self,
+        mock_fetch: MagicMock,
+        mock_upsert: MagicMock,
+        mock_get_cursor: MagicMock,
+        mock_set_cursor: MagicMock,
+        mock_api_pages: MagicMock,
+    ):
+        """fetch_issues creates httpx.Client with follow_redirects=True."""
+        settings = _make_settings(dev_repos={"owner/repo"})
+        conn = _mock_conn()
+        provider = _mock_provider()
+
+        page = [_body_item(1)]
+        mock_api_pages.side_effect = [[page], [], []]
+        mock_fetch.return_value = 0
+
+        captured_kwargs: dict[str, object] = {}
+
+        class _SpyClient:
+            def __init__(self, **kwargs: object) -> None:
+                captured_kwargs.update(kwargs)
+
+            def __enter__(self) -> _SpyClient:
+                return self
+
+            def __exit__(self, *args: object) -> None:
+                pass
+
+        with patch("shiori.sync_issues.httpx.Client", _SpyClient):
+            fetch_issues(settings, conn, "owner/repo", provider)
+
+        assert captured_kwargs.get("follow_redirects") is True, (
+            f"Expected follow_redirects=True in fetch_issues "
+            f"but got {captured_kwargs}"
+        )

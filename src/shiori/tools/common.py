@@ -34,7 +34,7 @@ def _github_client() -> Iterator[httpx.Client]:
         "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
     }
-    with httpx.Client(headers=headers, auth=_GitHubAuth(provider), timeout=30.0) as client:
+    with httpx.Client(headers=headers, auth=_GitHubAuth(provider), timeout=30.0, follow_redirects=True) as client:
         yield client
 
 
