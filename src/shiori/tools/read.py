@@ -191,6 +191,7 @@ def _read_issue_single(target: str, number: int, exclude_noise_bots: bool) -> di
         "title": title,
         "state": state,
         "url": url,
+        "labels": [label["name"] for label in issue.get("labels", [])],
         "items": items,
     }
 

@@ -73,6 +73,13 @@ def _filter_sql(filters: dict | None) -> tuple[str, list]:
     if f.get("updated_after"):
         clauses.append("updated_at >= %s")
         params.append(f["updated_after"])
+    if f.get("labels"):
+        clauses.append(
+            "EXISTS (SELECT 1 FROM issue_items ii WHERE ii.repo = chunks.repo "
+            "AND ii.issue_no = chunks.issue_no AND ii.comment_id = 0 "
+            "AND ii.labels && %s::text[])"
+        )
+        params.append(f["labels"])
     sql = (" AND " + " AND ".join(clauses)) if clauses else ""
     return sql, params
 

@@ -22,15 +22,20 @@ MAX_PR_REVIEW_WORKERS = 10
 
 
 def _upsert_issue_item(conn: psycopg.Connection, row: dict) -> None:
+    # Only issue/PR body rows carry labels; comment/review rows omit the key,
+    # but %(labels)s requires it to be present (#165)
+    row.setdefault("labels", None)
     with conn.cursor() as cur:
         cur.execute(
             """ INSERT INTO issue_items (
                 repo, issue_no, comment_id, kind, title, author, is_bot,
-                state, path, line, body, url, created_at, updated_at
+                state, path, line, body, url, created_at, updated_at,
+                labels
             ) VALUES (
                 %(repo)s, %(issue_no)s, %(comment_id)s, %(kind)s, %(title)s,
                 %(author)s, %(is_bot)s, %(state)s, %(path)s, %(line)s,
-                %(body)s, %(url)s, %(created_at)s, %(updated_at)s
+                %(body)s, %(url)s, %(created_at)s, %(updated_at)s,
+                %(labels)s
             )
             ON CONFLICT (repo, issue_no, comment_id) DO UPDATE SET
                 kind = EXCLUDED.kind, title = EXCLUDED.title,
@@ -38,7 +43,8 @@ def _upsert_issue_item(conn: psycopg.Connection, row: dict) -> None:
                 state = EXCLUDED.state, path = EXCLUDED.path,
                 line = EXCLUDED.line, body = EXCLUDED.body,
                 url = EXCLUDED.url, created_at = EXCLUDED.created_at,
-                updated_at = EXCLUDED.updated_at
+                updated_at = EXCLUDED.updated_at,
+                labels = EXCLUDED.labels
             """,
             row,
         )
@@ -332,6 +338,7 @@ def _fetch_dormant_open_bodies(
                 "url": it.get("html_url"),
                 "created_at": it.get("created_at"),
                 "updated_at": it.get("updated_at"),
+                "labels": [label["name"] for label in it.get("labels", [])],
             }
             _upsert_issue_item(conn, row)
             n += 1
@@ -414,6 +421,7 @@ def fetch_issues(
                     "url": it.get("html_url"),
                     "created_at": it.get("created_at"),
                     "updated_at": it.get("updated_at"),
+                    "labels": [label["name"] for label in it.get("labels", [])],
                 }
                 _upsert_issue_item(conn, row)
                 n_fetched += 1

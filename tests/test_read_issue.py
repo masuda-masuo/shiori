@@ -39,6 +39,7 @@ def _mock_issue_response(
     body="test body",
     user=None,
     created_at="2026-06-14T00:00:00Z",
+    labels=None,
 ):
     """Build a mock GitHub issue API response."""
     if user is None:
@@ -51,6 +52,7 @@ def _mock_issue_response(
         "user": user,
         "html_url": f"https://github.com/o/r/issues/{number}",
         "created_at": created_at,
+        "labels": labels or [],
     }
     if kind == "pr":
         data["pull_request"] = {"url": "https://api.github.com/repos/o/r/pulls/1"}
@@ -235,6 +237,7 @@ class TestReadIssueNumbers:
             "title": title,
             "state": "open",
             "url": f"https://github.com/o/r/issues/{number}",
+            "labels": [],
             "items": [
                 {
                     "author": "user",
@@ -417,3 +420,84 @@ class TestReadIssueRepoResolution:
             ]
             result = read_issue(531, repo="code-sandbox-mcp")
         assert result["repo"] == "masuda-masuo/code-sandbox-mcp"
+
+
+# Issue #165: labels in read_issue response -----------------------------
+
+class TestReadIssueLabels:
+    """read_issue includes labels from the GitHub API response."""
+
+    def test_labels_in_response(self):
+        """Labels from the API are included in the read_issue response."""
+        issue_data = _mock_issue_response(
+            number=42,
+            title="Labeled Issue",
+            labels=[
+                {"name": "bug", "color": "d73a4a"},
+                {"name": "enhancement", "color": "a2eeef"},
+            ],
+        )
+
+        with patch("shiori.tools.read._github_client") as mock_gh:
+            client = MagicMock()
+            mock_gh.return_value.__enter__.return_value = client
+            client.get.side_effect = [
+                _mock_api_response(issue_data),
+                _mock_api_response([]),
+            ]
+
+            with patch("shiori.tools.read._resolve_repo", return_value="o/r"):
+                result = read_issue(42)
+
+        assert result["labels"] == ["bug", "enhancement"]
+
+    def test_labels_empty_list_when_no_labels(self):
+        """When an issue has no labels, an empty list is returned."""
+        issue_data = _mock_issue_response(
+            number=43,
+            title="Unlabeled Issue",
+            labels=[],
+        )
+
+        with patch("shiori.tools.read._github_client") as mock_gh:
+            client = MagicMock()
+            mock_gh.return_value.__enter__.return_value = client
+            client.get.side_effect = [
+                _mock_api_response(issue_data),
+                _mock_api_response([]),
+            ]
+
+            with patch("shiori.tools.read._resolve_repo", return_value="o/r"):
+                result = read_issue(43)
+
+        assert result["labels"] == []
+
+    def test_labels_present_with_comments(self):
+        """Labels are included even when the issue has comments."""
+        issue_data = _mock_issue_response(
+            number=44,
+            title="Issue With Comments",
+            labels=[{"name": "question", "color": "d876e3"}],
+        )
+        comments_data = [
+            {
+                "user": {"login": "user2", "type": "User"},
+                "body": "A comment",
+                "created_at": "2026-06-14T00:01:00Z",
+                "html_url": "https://github.com/o/r/issues/44#issuecomment-1",
+            },
+        ]
+
+        with patch("shiori.tools.read._github_client") as mock_gh:
+            client = MagicMock()
+            mock_gh.return_value.__enter__.return_value = client
+            client.get.side_effect = [
+                _mock_api_response(issue_data),
+                _mock_api_response(comments_data),
+            ]
+
+            with patch("shiori.tools.read._resolve_repo", return_value="o/r"):
+                result = read_issue(44)
+
+        assert result["labels"] == ["question"]
+        assert len(result["items"]) == 2  # body + comment

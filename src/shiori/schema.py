@@ -126,6 +126,7 @@ CREATE TABLE IF NOT EXISTS issue_items (
     created_at TIMESTAMPTZ,
     updated_at TIMESTAMPTZ,
     indexed_at TIMESTAMPTZ,
+    labels TEXT[],                  -- GitHub label names (issue #165)
     PRIMARY KEY (repo, issue_no, comment_id)
 );
 
@@ -245,6 +246,11 @@ def _run_alter_statements(conn: psycopg.Connection) -> None:
     # 9. Add indexed_at to issue_items for incremental indexing (#318)
     with conn.cursor() as cur:
         cur.execute("ALTER TABLE issue_items ADD COLUMN IF NOT EXISTS indexed_at TIMESTAMPTZ")
+    conn.commit()
+
+    # 10. Add labels to issue_items for label-based search filtering (#165)
+    with conn.cursor() as cur:
+        cur.execute("ALTER TABLE issue_items ADD COLUMN IF NOT EXISTS labels TEXT[]")
     conn.commit()
 
 

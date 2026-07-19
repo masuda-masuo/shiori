@@ -153,6 +153,7 @@ def _make_filters(
     updated_after: str | None,
     prog_lang: str | None = None,
     kind: str | None = None,
+    labels: list[str] | None = None,
 ) -> dict:
     return {
         "source_type": source_type,
@@ -163,4 +164,5 @@ def _make_filters(
         "updated_after": updated_after,
         "prog_lang": prog_lang,
         "kind": kind,
+        "labels": labels,
     }
