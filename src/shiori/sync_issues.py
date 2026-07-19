@@ -505,6 +505,9 @@ def fetch_issues(
 # ── Index (read issue_items, chunk + embed) ───────────────────────────────
 
 
+BATCH_INDEX_SIZE = 200
+
+
 def index_issues(
     settings: Settings,
     conn: psycopg.Connection,
@@ -512,101 +515,144 @@ def index_issues(
     repo: str,
     buffer: ChunkBuffer | None = None,
 ) -> int:
-    """Read issue_items for *repo* and re-generate chunks.
+    """Incremental index of issue_items for *repo*.
 
-    Idempotent: running this multiple times against the same issue_items
-    produces the same chunks.
+    Only (re)indexes rows where ``indexed_at IS NULL`` or
+    ``updated_at > indexed_at``.  Idempotent: running this multiple
+    times against the same issue_items produces the same chunks.
+
+    **Durability invariant**: chunks are always committed *before*
+    ``indexed_at`` is set, so a killed index run resumes correctly.
+
     Returns the number of items indexed.
     """
-    # Read all issue_items for the repo, ordered by issue_no, comment_id
+    # --- Step 1: fetch ALL body rows for state propagation ---
+    # This must see every body row regardless of indexed_at so that
+    # close/reopen state changes are propagated to chunks even for
+    # otherwise-unchanged issues (outcome 6).
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT issue_no, kind, state FROM issue_items "
+            "WHERE repo = %s AND comment_id = 0",
+            (repo,),
+        )
+        body_rows = cur.fetchall()
+
+    issue_bodies: dict[int, tuple[str | None, str | None]] = {}
+    for r in body_rows:
+        issue_bodies[r[0]] = (r[1], r[2])  # kind, state from body row
+
+    # --- Step 2: select only items that need (re)indexing ---
     with conn.cursor() as cur:
         cur.execute(
             """SELECT issue_no, comment_id, kind, title, author, is_bot,
                       state, path, line, body, url, created_at, updated_at
                FROM issue_items
                WHERE repo = %s
+                 AND (indexed_at IS NULL
+                      OR (updated_at IS NOT NULL AND updated_at > indexed_at))
                ORDER BY issue_no, comment_id""",
             (repo,),
         )
         rows = cur.fetchall()
 
     if not rows:
+        # Only propagate states -- no items to index
+        for issue_no, (_, st) in issue_bodies.items():
+            _propagate_issue_state(conn, repo, issue_no, st)
         return 0
 
-    # Collect issue body kinds and states for reference
-    # issue_no -> (kind, state) from the body row (comment_id=0)
-    # r[2]=kind, r[6]=state (see SELECT column order above)
-    issue_bodies: dict[int, tuple[str | None, str | None]] = {}
-    for r in rows:
-        if r[1] == 0:  # comment_id == 0 => body row
-            issue_bodies[r[0]] = (r[2], r[6])  # kind, state from body row
-
     n_indexed = 0
-    for r in rows:
-        issue_no = r[0]
-        comment_id = r[1]
-        kind = r[2]   # item kind: "issue"/"pr"/"comment"/"pr_review"/"pr_review_comment"
-        title = r[3]
-        author = r[4]
-        is_bot = r[5]
-        item_state = r[6]
-        path = r[7]
-        line = r[8]
-        body = r[9] or ""
-        url = r[10]
-        created_at = r[11]
-        updated_at = r[12]
 
-        # Determine the issue kind (for issues/comments, use the stored kind;
-        # for PR reviews, use "pr")
-        if kind == "pr_review" or kind == "pr_review_comment":
-            issue_kind = "pr"
-        elif kind == "comment":
-            # For comments, get the issue kind from the body row
-            issue_kind = (issue_bodies.get(issue_no) or (None, None))[0]
+    # Process in batches to maintain the durability invariant
+    for i in range(0, len(rows), BATCH_INDEX_SIZE):
+        batch = rows[i:i + BATCH_INDEX_SIZE]
+        batch_keys: list[tuple[int, int]] = []
+
+        for r in batch:
+            issue_no = r[0]
+            comment_id = r[1]
+            kind = r[2]   # item kind: "issue"/"pr"/"comment"/"pr_review"/"pr_review_comment"
+            title = r[3]
+            author = r[4]
+            is_bot = r[5]
+            item_state = r[6]
+            path = r[7]
+            line = r[8]
+            body = r[9] or ""
+            url = r[10]
+            created_at = r[11]
+            updated_at = r[12]
+
+            # Determine the issue kind (for issues/comments, use the stored kind;
+            # for PR reviews, use "pr")
+            if kind == "pr_review" or kind == "pr_review_comment":
+                issue_kind = "pr"
+            elif kind == "comment":
+                # For comments, get the issue kind from the body row
+                issue_kind = (issue_bodies.get(issue_no) or (None, None))[0]
+            else:
+                issue_kind = kind  # "issue" or "pr"
+
+            # Determine the state to use (use the body's state for consistency)
+            state = (issue_bodies.get(issue_no) or (None, None))[1] or item_state
+
+            # Determine chunk_key based on item type
+            if comment_id == 0:
+                chunk_key = f"issue:{repo}:{issue_no}:body"
+                source_type = "issue"
+            elif kind == "comment":
+                chunk_key = f"issue:{repo}:{issue_no}:c{comment_id}"
+                source_type = "issue"
+            elif kind == "pr_review":
+                # comment_id is negative for PR review submissions
+                chunk_key = f"pr_review_submission:{repo}:{issue_no}:r{-comment_id}"
+                source_type = "pr_review"
+                # PR review submissions have body with [state] prefix handled at fetch time
+            elif kind == "pr_review_comment":
+                chunk_key = f"pr_review:{repo}:{issue_no}:rc{comment_id}"
+                source_type = "pr_review"
+            else:
+                log.warning("index_issues: unknown kind=%s for %s issue_no=%d comment_id=%d",
+                            kind, repo, issue_no, comment_id)
+                continue
+
+            if not is_bot or _should_index(is_bot, author, settings):
+                _index_item(
+                    settings, conn, embedder,
+                    chunk_key=chunk_key,
+                    source_type=source_type,
+                    repo=repo, issue_no=issue_no, comment_id=comment_id if comment_id != 0 else None,
+                    kind=issue_kind,
+                    title=title, body=body,
+                    state=state, author=author,
+                    path=path, line=line,
+                    created_at=created_at, updated_at=updated_at,
+                    url=url,
+                    buffer=buffer,
+                )
+                n_indexed += 1
+
+            batch_keys.append((issue_no, comment_id))
+
+        # ---- Durability invariant: chunks first, then indexed_at ----
+        # Flush buffer (commits chunks) or commit non-buffer inserts.
+        if buffer is not None:
+            buffer.flush()
         else:
-            issue_kind = kind  # "issue" or "pr"
+            conn.commit()
 
-        # Determine the state to use (use the body's state for consistency)
-        state = (issue_bodies.get(issue_no) or (None, None))[1] or item_state
+        # Set indexed_at for this batch (separate transaction after chunks are committed)
+        with conn.cursor() as cur:
+            for issue_no_pk, comment_id_pk in batch_keys:
+                cur.execute(
+                    "UPDATE issue_items SET indexed_at = now() "
+                    "WHERE repo = %s AND issue_no = %s AND comment_id = %s",
+                    (repo, issue_no_pk, comment_id_pk),
+                )
+        conn.commit()
 
-        # Determine chunk_key based on item type
-        if comment_id == 0:
-            chunk_key = f"issue:{repo}:{issue_no}:body"
-            source_type = "issue"
-        elif kind == "comment":
-            chunk_key = f"issue:{repo}:{issue_no}:c{comment_id}"
-            source_type = "issue"
-        elif kind == "pr_review":
-            # comment_id is negative for PR review submissions
-            chunk_key = f"pr_review_submission:{repo}:{issue_no}:r{-comment_id}"
-            source_type = "pr_review"
-            # PR review submissions have body with [state] prefix handled at fetch time
-        elif kind == "pr_review_comment":
-            chunk_key = f"pr_review:{repo}:{issue_no}:rc{comment_id}"
-            source_type = "pr_review"
-        else:
-            log.warning("index_issues: unknown kind=%s for %s issue_no=%d comment_id=%d",
-                        kind, repo, issue_no, comment_id)
-            continue
-
-        if not is_bot or _should_index(is_bot, author, settings):
-            _index_item(
-                settings, conn, embedder,
-                chunk_key=chunk_key,
-                source_type=source_type,
-                repo=repo, issue_no=issue_no, comment_id=comment_id if comment_id != 0 else None,
-                kind=issue_kind,
-                title=title, body=body,
-                state=state, author=author,
-                path=path, line=line,
-                created_at=created_at, updated_at=updated_at,
-                url=url,
-                buffer=buffer,
-            )
-            n_indexed += 1
-
-    # Propagate states to chunks
+    # Propagate states to chunks (over ALL body rows, not just indexed)
     for issue_no, (_, st) in issue_bodies.items():
         _propagate_issue_state(conn, repo, issue_no, st)
 

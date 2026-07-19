@@ -125,6 +125,7 @@ CREATE TABLE IF NOT EXISTS issue_items (
     url TEXT,
     created_at TIMESTAMPTZ,
     updated_at TIMESTAMPTZ,
+    indexed_at TIMESTAMPTZ,
     PRIMARY KEY (repo, issue_no, comment_id)
 );
 
@@ -239,6 +240,11 @@ def _run_alter_statements(conn: psycopg.Connection) -> None:
                 )
                 """
             )
+    conn.commit()
+
+    # 9. Add indexed_at to issue_items for incremental indexing (#318)
+    with conn.cursor() as cur:
+        cur.execute("ALTER TABLE issue_items ADD COLUMN IF NOT EXISTS indexed_at TIMESTAMPTZ")
     conn.commit()
 
 

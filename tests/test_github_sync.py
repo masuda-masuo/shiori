@@ -6,6 +6,7 @@ _clean_text control character removal, _git_fetch_ref / _git_delete_ref.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
 import httpx
@@ -25,6 +26,7 @@ from shiori.github_sync import (
     _should_index,
     _sync_pr_reviews,
     sync_issues,
+    index_issues,
 )
 from shiori.walk_utils import (
     _is_excluded_dir,
@@ -1176,3 +1178,219 @@ class TestFetchDormantOpenBodies:
             assert row["comment_id"] == 0
             assert row["state"] == "open"
         conn.commit.assert_called()
+
+
+# ===================================================================
+# index_issues incremental (issue #318)
+# ===================================================================
+
+
+class TestIndexIssuesIncremental:
+    """index_issues: incremental filtering, durability invariant, kill-resume, rebuild."""
+
+    def _make_item_row(
+        self, issue_no, comment_id=0, kind="issue", title="T", author="alice",
+        is_bot=False, state="open", path=None, line=None, body="body",
+        url="url", created_at=None, updated_at=None,
+    ):
+        return (issue_no, comment_id, kind, title, author, is_bot,
+                state, path, line, body, url, created_at, updated_at)
+
+    def _make_conn(self, body_rows, filtered_rows):
+        """Create a mock connection that returns *body_rows* for the body
+        SELECT and *filtered_rows* for the incremental-filtered SELECT."""
+        conn = MagicMock()
+        cursor = MagicMock()
+        conn.cursor.return_value.__enter__.return_value = cursor
+
+        def _execute(sql, params=None):
+            if 'comment_id = 0' in (sql or '') and 'indexed_at' not in (sql or ''):
+                cursor.fetchall.return_value = body_rows
+            elif 'indexed_at IS NULL' in (sql or '') or 'updated_at > indexed_at' in (sql or ''):
+                cursor.fetchall.return_value = filtered_rows
+            else:
+                cursor.fetchall.return_value = []
+
+        cursor.execute.side_effect = _execute
+        return conn
+
+    def test_all_indexed_skips_embedder(self):
+        """When every item has indexed_at set and no item has newer updated_at,
+        zero embedder calls are made (acceptance criterion 1)."""
+        settings = Settings()
+        embedder = MagicMock()
+        body = [(1, "issue", "open")]
+        filtered = []  # nothing needs indexing
+        conn = self._make_conn(body, filtered)
+
+        n = index_issues(settings, conn, embedder, "o/r")
+
+        assert n == 0
+        embedder.embed_passages.assert_not_called()
+
+    def test_null_indexed_at_is_indexed(self):
+        """Items whose indexed_at IS NULL are (re)indexed (acceptance criterion 2)."""
+        settings = Settings()
+        embedder = MagicMock()
+        embedder.embed_passages.return_value = [[0.1, 0.2]]
+        body = [(1, "issue", "open")]
+        filtered = [self._make_item_row(1)]
+        conn = self._make_conn(body, filtered)
+
+        n = index_issues(settings, conn, embedder, "o/r")
+
+        assert n == 1
+        embedder.embed_passages.assert_called_once()
+
+    def test_updated_at_newer_than_indexed_reindexes(self):
+        """Items whose updated_at > indexed_at are re-indexed (acceptance criterion 2)."""
+        settings = Settings()
+        embedder = MagicMock()
+        embedder.embed_passages.return_value = [[0.1, 0.2]]
+        past = datetime(2020, 1, 1, tzinfo=timezone.utc)
+        future = datetime(2025, 6, 1, tzinfo=timezone.utc)
+        body = [(1, "issue", "open")]
+        filtered = [self._make_item_row(1, updated_at=future, created_at=past)]
+        conn = self._make_conn(body, filtered)
+
+        n = index_issues(settings, conn, embedder, "o/r")
+
+        assert n == 1
+        embedder.embed_passages.assert_called_once()
+
+    def test_mixed_old_and_new_partial_index(self):
+        """Only unindexed or outdated items are processed; already-indexed
+        items are skipped."""
+        settings = Settings()
+        embedder = MagicMock()
+        embedder.embed_passages.return_value = [[0.1, 0.2]]
+        body = [(1, "issue", "open"), (2, "pr", "closed")]
+        # Only item 2 needs indexing
+        filtered = [self._make_item_row(2, kind="pr", author="bob", body="body2")]
+        conn = self._make_conn(body, filtered)
+
+        n = index_issues(settings, conn, embedder, "o/r")
+
+        assert n == 1
+        embedder.embed_passages.assert_called_once()
+
+    def test_rebuild_all_null_indexed_at(self):
+        """After rebuild (all indexed_at = NULL), every item is indexed
+        (acceptance criterion 4)."""
+        settings = Settings()
+        embedder = MagicMock()
+        embedder.embed_passages.return_value = [[0.1, 0.2], [0.3, 0.4]]
+        body = [(1, "issue", "open"), (2, "pr", "closed")]
+        filtered = [
+            self._make_item_row(1),
+            self._make_item_row(2, kind="pr", author="bob", body="body2"),
+        ]
+        conn = self._make_conn(body, filtered)
+
+        n = index_issues(settings, conn, embedder, "o/r")
+
+        assert n == 2
+        assert embedder.embed_passages.call_count >= 1
+
+    def test_kill_resume(self):
+        """Simulate kill-resume: first run indexes everything, second run
+        skips already-indexed items (acceptance criterion 3).
+
+        In production, kill-resume means some items have indexed_at committed
+        while others do not.  The incremental filter ensures the second run
+        only touches remaining items.
+        """
+        settings = Settings()
+
+        # Phase 1: index all items
+        embedder1 = MagicMock()
+        embedder1.embed_passages.return_value = [[0.1, 0.2], [0.3, 0.4]]
+        body1 = [(1, "issue", "open"), (2, "issue", "open")]
+        filtered1 = [
+            self._make_item_row(1),
+            self._make_item_row(2, body="body2"),
+        ]
+        conn1 = self._make_conn(body1, filtered1)
+        n1 = index_issues(settings, conn1, embedder1, "o/r")
+        assert n1 == 2
+
+        # Phase 2: all items now indexed; second run must NOT re-embed
+        embedder2 = MagicMock()
+        body2 = [(1, "issue", "open"), (2, "issue", "open")]
+        filtered2 = []  # everything already indexed
+        conn2 = self._make_conn(body2, filtered2)
+        n2 = index_issues(settings, conn2, embedder2, "o/r")
+
+        assert n2 == 0
+        embedder2.embed_passages.assert_not_called()
+
+    def test_kill_resume_partial_batch(self):
+        """Simulate mid-run kill after batch 1 committed: rerun processes
+        only remaining items without re-embedding batch 1."""
+        settings = Settings()
+
+        # 250 items: batch 1 (200) indexed in first run, batch 2 (50) remaining
+        # On rerun, only the 50 remaining items appear in filtered_rows
+        embedder = MagicMock()
+        embedder.embed_passages.return_value = [[0.5, 0.6]] * 50
+        body = [(i, "issue", "open") for i in range(1, 251)]
+        remaining = [
+            self._make_item_row(i,
+                                kind="issue",
+                                author="alice",
+                                body=f"body{i}",
+                                url=f"url{i}",
+            )
+            for i in range(201, 251)
+        ]
+        conn = self._make_conn(body, remaining)
+
+        n = index_issues(settings, conn, embedder, "o/r")
+
+        assert n == 50
+        # The first 200 items must NOT have been re-embedded
+        # (they don't appear in filtered_rows, so they're skipped)
+        # embed_passages is called at least once for the 50 remaining items
+        assert embedder.embed_passages.called, \
+            "embedder must be called for remaining items"
+
+    def test_propagate_state_covers_all_body_rows(self):
+        """_propagate_issue_state runs for ALL body rows, not just
+        the filtered subset (state propagation unchanged, outcome 6)."""
+        settings = Settings()
+        embedder = MagicMock()
+        embedder.embed_passages.return_value = [[0.1, 0.2]]
+
+        body = [
+            (1, "issue", "closed"),  # already indexed but state='closed'
+            (2, "issue", "open"),     # new, needs indexing
+        ]
+        filtered = [self._make_item_row(2, body="new body")]
+
+        with patch("shiori.sync_issues._propagate_issue_state") as mock_prop:
+            conn = self._make_conn(body, filtered)
+            n = index_issues(settings, conn, embedder, "o/r")
+
+        assert n == 1
+        # Both issues must have state propagated
+        assert mock_prop.call_count == 2
+        issues_propagated = {call[0][2] for call in mock_prop.call_args_list}
+        assert 1 in issues_propagated, "issue 1 (body-only, not re-indexed) must get state propagation"
+        assert 2 in issues_propagated, "issue 2 (re-indexed) must get state propagation"
+
+    def test_signature_backward_compatible(self):
+        """index_issues signature unchanged: callers in pipeline.py and
+        ingest.py keep working (outcome 7)."""
+        # This verifies the function can be called with all existing params
+        settings = Settings()
+        conn = MagicMock()
+        embedder = MagicMock()
+        buffer = MagicMock()
+
+        # Without buffer (non-bulk path)
+        result = index_issues(settings, conn, embedder, "o/r")
+        assert result == 0  # no rows
+
+        # With buffer (bulk path)
+        result = index_issues(settings, conn, embedder, "o/r", buffer=buffer)
+        assert result == 0  # no rows
