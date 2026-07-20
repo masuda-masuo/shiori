@@ -98,10 +98,10 @@ cp .env.example .env   # Configure SHIORI_REPOS; see below for role annotations
 docker compose up -d --build
 
 # Initial ingestion (may take time to download the embedding model)
-docker compose run --rm ingest
+docker compose run --rm ingest --repo owner/repo
 
 # Adding a large reference repo? Bound the backfill:
-# ./scripts/ingest.sh run --backfill-since 2024-01-01
+# ./scripts/ingest.sh run --backfill-since 2024-01-01 --repo owner/repo
 ```
 
 Ingestion has three subcommands — `fetch` (API + git pull only), `index` (chunk + embed), and `run` (both, default). The MCP server is exposed at `http://localhost:8765/mcp` (Streamable HTTP).

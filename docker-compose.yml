@@ -112,7 +112,7 @@ services:
       context: .
       dockerfile: docker/app/Dockerfile
     profiles: ["ingest"]
-    command: ["python", "-m", "shiori", "ingest"]
+    command: ["sh", "-c", "python -m shiori ingest $(echo \"$SHIORI_REPOS\" | tr ',' ' ' | xargs -n1 echo --repo)"]
     environment:
       DATABASE_URL: postgresql://shiori:shiori@db:5432/shiori
       SHIORI_REPOS: ${SHIORI_REPOS:-}

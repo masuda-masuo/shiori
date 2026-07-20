@@ -224,7 +224,7 @@ services:
   ingest:
     profiles: ["ingest"]
     image: shiori-app
-    command: python -m shiori ingest
+    command: python -m shiori ingest --repo owner/repo
     environment:
       GITHUB_TOKEN_SOCKET: ${GITHUB_TOKEN_SOCKET:-}
       GITHUB_TOKEN_COMMAND: ${GITHUB_TOKEN_COMMAND:-}

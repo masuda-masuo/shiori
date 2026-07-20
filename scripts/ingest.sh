@@ -5,7 +5,7 @@
 # ==== 有界 backfill (issue #315) ====
 # 巨大な ref repo の初回 backfill は既定では全履歴を取りに行く。
 # --backfill-since でカーソルを seed し、開始日時を区切れる:
-#   ./scripts/ingest.sh fetch --backfill-since 2024-01-01
+#   ./scripts/ingest.sh fetch --backfill-since 2024-01-01 --repo owner/repo
 # 環境変数 SHIORI_REF_BACKFILL_SINCE でも指定できる（ref repo のみ適用、
 # dev repo は常に全量 backfill）。seed された repo には state=open の
 # 一回限りパスも走り、seed 日以前から open のままの issue も本文が索引に入る。

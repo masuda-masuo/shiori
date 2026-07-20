@@ -76,4 +76,4 @@ run_container_and_exec(
 *   Run tests: `PYTHONPATH=src python3 -m pytest tests/ -v`
 *   Production DB dependencies: Requires PostgreSQL running (starts via Docker Compose).
 *   Target Repositories: `masuda-masuo/shiori`, `masuda-masuo/sunaba`
-*   Update index via CLI: Run `python -m shiori ingest` (the `shiori_ingest` MCP tool is deprecated).
+*   Update index via CLI: Run `python -m shiori ingest --repo owner/repo` (the `shiori_ingest` MCP tool is deprecated).

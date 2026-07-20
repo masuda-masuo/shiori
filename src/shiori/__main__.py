@@ -31,23 +31,23 @@ def main() -> None:
 
     # fetch
     p_fetch = ingest_sub.add_parser("fetch", help="API fetch + git pull only (no chunk/embed)")
-    p_fetch.add_argument("--repo", action="append", help="owner/name (multiple allowed, defaults to SHIORI_REPOS)")
+    p_fetch.add_argument("--repo", action="append", required=True, help="owner/name (multiple allowed)")
     p_fetch.add_argument("--rebuild", action="store_true", help=argparse.SUPPRESS)
     p_fetch.add_argument("--backfill-since", help="YYYY-MM-DD: seed cursors for initial backfill of new repos")
 
     # index
     p_index = ingest_sub.add_parser("index", help="chunk + embed from issue_items/doc_files")
-    p_index.add_argument("--repo", action="append", help="owner/name (multiple allowed, defaults to SHIORI_REPOS)")
+    p_index.add_argument("--repo", action="append", required=True, help="owner/name (multiple allowed)")
     p_index.add_argument("--rebuild", action="store_true", help=argparse.SUPPRESS)
 
     # run
     p_run = ingest_sub.add_parser("run", help="fetch + index sequentially (default behavior)")
-    p_run.add_argument("--repo", action="append", help="owner/name (multiple allowed, defaults to SHIORI_REPOS)")
+    p_run.add_argument("--repo", action="append", required=True, help="owner/name (multiple allowed)")
     p_run.add_argument("--rebuild", action="store_true", help="discard index and rebuild all")
     p_run.add_argument("--backfill-since", help="YYYY-MM-DD: seed cursors for initial backfill of new repos")
 
     # Backward-compatible: ingest without subcommand uses the same args as run
-    p_ingest.add_argument("--repo", action="append", help="owner/name (multiple allowed, defaults to SHIORI_REPOS)")
+    p_ingest.add_argument("--repo", action="append", required=True, help="owner/name (multiple allowed)")
     p_ingest.add_argument("--rebuild", action="store_true", help="discard index and rebuild all")
     p_ingest.add_argument("--backfill-since", help="YYYY-MM-DD: seed cursors for initial backfill of new repos")
 

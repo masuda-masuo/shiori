@@ -292,7 +292,7 @@ Comments by GitHub bots (`type=Bot` or name ending in `[bot]`) are excluded from
 
 ## 16. Rebuild Gate (Issue #63)
 
-`rebuild=True` via the MCP tool requires `SHIORI_ALLOW_REBUILD=true`. The CLI (`python -m shiori ingest --rebuild`) has no restriction.
+`rebuild=True` via the MCP tool requires `SHIORI_ALLOW_REBUILD=true`. The CLI (`python -m shiori ingest --rebuild --repo owner/repo`) has no restriction.
 
 ---
 
