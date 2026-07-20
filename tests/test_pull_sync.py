@@ -230,8 +230,6 @@ class TestCrossRepoSearchPhase1:
         def fake_phase1(repo):
             called.append(("phase1", repo))
 
-        def fake_phase2(repo):
-            called.append(("phase2", repo))
 
         with (
             patch("shiori.tools.search._conn"),
@@ -241,7 +239,6 @@ class TestCrossRepoSearchPhase1:
             patch("shiori.tools.search._resolve_repo_filter", return_value=None),
             patch("shiori.tools.search._resolve_repos", return_value=["r1", "r2", "r3"]),
             patch("shiori.tools.search._ensure_phase1", side_effect=fake_phase1),
-            patch("shiori.tools.search._trigger_phase2", side_effect=fake_phase2),
         ):
             mock_emb.return_value = MagicMock()
             mock_settings.repos = ["r1", "r2", "r3"]
@@ -257,8 +254,6 @@ class TestCrossRepoSearchPhase1:
         def fake_phase1(repo):
             called.append(("phase1", repo))
 
-        def fake_phase2(repo):
-            called.append(("phase2", repo))
 
         with (
             patch("shiori.tools.search._conn"),
@@ -268,7 +263,6 @@ class TestCrossRepoSearchPhase1:
             patch("shiori.tools.search._resolve_repo_filter", return_value="o/r"),
             patch("shiori.tools.search._resolve_repo", return_value="o/r"),
             patch("shiori.tools.search._ensure_phase1", side_effect=fake_phase1),
-            patch("shiori.tools.search._trigger_phase2", side_effect=fake_phase2),
         ):
             mock_emb.return_value = MagicMock()
             mock_settings.repos = ["r1", "r2", "r3"]
