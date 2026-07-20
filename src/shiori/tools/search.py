@@ -4,7 +4,7 @@ from typing import Any
 
 from .registry import mcp
 from .common import _make_filters, _resolve_repo, _resolve_repo_filter, _resolve_repos  # noqa: F401 — re-export for tests
-from ..pipeline import _conn, _ensure_phase1, _get_embedder, settings, _trigger_phase2
+from ..pipeline import _conn, _ensure_phase1, _get_embedder, settings
 from .. import search
 
 
@@ -34,15 +34,13 @@ def semantic_search(
     repo: "owner/name" filter, or a short name if it uniquely matches one
           configured (indexed) repo (e.g. "shiori" -> "owner/shiori").
           Omit to search across all indexed repos."""
-    # Phase 1/2 for cross-repo search: refresh all repos when no filter (#236)
+    # Phase 1 for cross-repo search: refresh all repos when no filter (#236)
     resolved_repo = _resolve_repo_filter(repo)
     if resolved_repo:
         _ensure_phase1(resolved_repo)
-        _trigger_phase2(resolved_repo)
     else:
         for r in _resolve_repos("*"):
             _ensure_phase1(r)
-            _trigger_phase2(r)
     with _conn() as conn:
         return search.semantic_search(
             settings, conn, _get_embedder(), query,
@@ -81,15 +79,13 @@ def keyword_search(
     repo: "owner/name" filter, or a short name if it uniquely matches one
           configured (indexed) repo (e.g. "shiori" -> "owner/shiori").
           Omit to search across all indexed repos."""
-    # Phase 1/2 for cross-repo search: refresh all repos when no filter (#236)
+    # Phase 1 for cross-repo search: refresh all repos when no filter (#236)
     resolved_repo = _resolve_repo_filter(repo)
     if resolved_repo:
         _ensure_phase1(resolved_repo)
-        _trigger_phase2(resolved_repo)
     else:
         for r in _resolve_repos("*"):
             _ensure_phase1(r)
-            _trigger_phase2(r)
     with _conn() as conn:
         return search.keyword_search(
             settings, conn, query,
