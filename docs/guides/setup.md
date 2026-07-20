@@ -53,16 +53,16 @@ docker compose up -d --build
 
 ```bash
 # Uses SHIORI_REF_BACKFILL_SINCE as the seed (if set)
-docker compose run --rm ingest
+docker compose run --rm ingest --repo owner/repo
 
 # Or specify seed per run (overrides env):
-./scripts/ingest.sh run --backfill-since 2023-06-01
+./scripts/ingest.sh run --backfill-since 2023-06-01 --repo owner/repo
 ```
 
 After this completes, the index contains issues and docs from the seed date onward. The repos are **frozen** — no periodic sync runs. To refresh manually:
 
 ```bash
-docker compose run --rm ingest
+docker compose run --rm ingest --repo owner/repo
 ```
 
 ### 4. Verify
@@ -155,7 +155,7 @@ docker compose up -d --build
 ```bash
 # Dev repo gets full backfill (all history)
 # Ref repos are bounded by SHIORI_REF_BACKFILL_SINCE
-docker compose run --rm ingest
+docker compose run --rm ingest --repo owner/repo
 ```
 
 ### 5. Sync habits
@@ -164,10 +164,10 @@ When you need up-to-date indices during development:
 
 ```bash
 # Quick: fetch only (API + git pull, no embedding)
-./scripts/ingest.sh fetch
+./scripts/ingest.sh fetch --repo owner/repo
 
 # Full: fetch + index
-./scripts/ingest.sh run
+./scripts/ingest.sh run --repo owner/repo
 
 # Single repo (fast when others are frozen):
 ./scripts/ingest.sh fetch --repo masuda-masuo/shiori
@@ -241,7 +241,7 @@ Then rebuild:
 
 ```bash
 docker compose build app
-./scripts/ingest.sh run --rebuild
+./scripts/ingest.sh run --rebuild --repo owner/repo
 ```
 
 ---
