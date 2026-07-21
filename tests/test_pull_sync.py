@@ -221,15 +221,25 @@ class TestStatusIndexStale:
 
 
 class TestCrossRepoSearchPhase1:
-    """semantic_search / keyword_search with repo=None refresh all repos."""
+    """semantic_search / keyword_search no longer triggers Phase 1 (removed)."""
 
-    def test_repo_none_triggers_phase1_for_all_repos(self):
+    def test_search_works_without_phase1(self):
         from shiori.mcp_server import semantic_search
 
-        called = []
-        def fake_phase1(repo):
-            called.append(("phase1", repo))
+        with (
+            patch("shiori.tools.search._conn"),
+            patch("shiori.tools.search._get_embedder") as mock_emb,
+            patch("shiori.tools.search.settings") as mock_settings,
+            patch("shiori.tools.search.search.semantic_search", return_value=[]),
+            patch("shiori.tools.search._resolve_repo_filter", return_value="o/r"),
+        ):
+            mock_emb.return_value = MagicMock()
+            mock_settings.repos = ["r1", "r2", "r3"]
+            result = semantic_search(query="test", repo="o/r")
+            assert result == []
 
+    def test_cross_repo_search_works_without_phase1(self):
+        from shiori.mcp_server import semantic_search
 
         with (
             patch("shiori.tools.search._conn"),
@@ -238,35 +248,8 @@ class TestCrossRepoSearchPhase1:
             patch("shiori.tools.search.search.semantic_search", return_value=[]),
             patch("shiori.tools.search._resolve_repo_filter", return_value=None),
             patch("shiori.tools.search._resolve_repos", return_value=["r1", "r2", "r3"]),
-            patch("shiori.tools.search._ensure_phase1", side_effect=fake_phase1),
         ):
             mock_emb.return_value = MagicMock()
             mock_settings.repos = ["r1", "r2", "r3"]
-            semantic_search(query="test", repo=None)
-
-        phase1_calls = [r for (kind, r) in called if kind == "phase1"]
-        assert phase1_calls == ["r1", "r2", "r3"]
-
-    def test_repo_specific_triggers_only_that_repo(self):
-        from shiori.mcp_server import semantic_search
-
-        called = []
-        def fake_phase1(repo):
-            called.append(("phase1", repo))
-
-
-        with (
-            patch("shiori.tools.search._conn"),
-            patch("shiori.tools.search._get_embedder") as mock_emb,
-            patch("shiori.tools.search.settings") as mock_settings,
-            patch("shiori.tools.search.search.semantic_search", return_value=[]),
-            patch("shiori.tools.search._resolve_repo_filter", return_value="o/r"),
-            patch("shiori.tools.search._resolve_repo", return_value="o/r"),
-            patch("shiori.tools.search._ensure_phase1", side_effect=fake_phase1),
-        ):
-            mock_emb.return_value = MagicMock()
-            mock_settings.repos = ["r1", "r2", "r3"]
-            semantic_search(query="test", repo="o/r")
-
-        phase1_calls = [r for (kind, r) in called if kind == "phase1"]
-        assert phase1_calls == ["o/r"]
+            result = semantic_search(query="test", repo=None)
+            assert result == []

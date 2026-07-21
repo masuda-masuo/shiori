@@ -5,24 +5,11 @@ from typing import Any
 
 from .registry import mcp
 from .common import _make_filters, _resolve_repo, _resolve_repo_filter, _resolve_repos  # noqa: F401 — re-export for tests
-from ..github_auth import build_token_provider
-from ..pipeline import _conn, _ensure_phase1, _get_embedder, settings
-from ..sync_issues import sync_issues
+from ..pipeline import _conn, _get_embedder, settings
 from .. import search
 
 log = logging.getLogger(__name__)
 
-
-def _sync_dev_issues(repo: str) -> None:
-    """Fetch + index dev repo issues incrementally. Best-effort: failures are
-    logged but do not propagate (search must still work)."""
-    try:
-        provider = build_token_provider(settings)
-        embedder = _get_embedder()
-        with _conn() as conn:
-            sync_issues(settings, conn, embedder, repo, provider)
-    except Exception:
-        log.exception("dev sync failed for %s", repo)
 
 
 @mcp.tool(name="shiori_search")
@@ -51,17 +38,7 @@ def semantic_search(
     repo: "owner/name" filter, or a short name if it uniquely matches one
           configured (indexed) repo (e.g. "shiori" -> "owner/shiori").
           Omit to search across all indexed repos."""
-    # Phase 1 + dev repo incremental sync
     resolved_repo = _resolve_repo_filter(repo)
-    if resolved_repo:
-        _ensure_phase1(resolved_repo)
-        if resolved_repo in settings.dev_repos:
-            _sync_dev_issues(resolved_repo)
-    else:
-        for r in _resolve_repos("*"):
-            _ensure_phase1(r)
-            if r in settings.dev_repos:
-                _sync_dev_issues(r)
     with _conn() as conn:
         return search.semantic_search(
             settings, conn, _get_embedder(), query,
@@ -100,17 +77,7 @@ def keyword_search(
     repo: "owner/name" filter, or a short name if it uniquely matches one
           configured (indexed) repo (e.g. "shiori" -> "owner/shiori").
           Omit to search across all indexed repos."""
-    # Phase 1 + dev repo incremental sync
     resolved_repo = _resolve_repo_filter(repo)
-    if resolved_repo:
-        _ensure_phase1(resolved_repo)
-        if resolved_repo in settings.dev_repos:
-            _sync_dev_issues(resolved_repo)
-    else:
-        for r in _resolve_repos("*"):
-            _ensure_phase1(r)
-            if r in settings.dev_repos:
-                _sync_dev_issues(r)
     with _conn() as conn:
         return search.keyword_search(
             settings, conn, query,
