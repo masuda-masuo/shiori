@@ -7,6 +7,7 @@ pgroonga for JP/EN full-text search (TokenMecab/Mecab preferred).
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 
 import psycopg
 
@@ -165,6 +166,29 @@ def get_sync_runs(conn: psycopg.Connection) -> dict[str, dict]:
         }
         for r in rows
     }
+
+
+def get_sync_attempt(
+    conn: psycopg.Connection, repo: str
+) -> tuple[int, datetime | None]:
+    """Return (consecutive_failures, last_attempt_at) for *repo*.
+
+    Returns (0, None) when the repo has no recorded attempts yet.
+    Used by the circuit breaker to decide whether to skip a repo
+    (issue #345).
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT consecutive_failures, last_attempt_at FROM sync_runs WHERE repo = %s",
+            (repo,),
+        )
+        row = cur.fetchone()
+    if row is None:
+        return (0, None)
+    try:
+        return (int(row[0] or 0), row[1])
+    except (IndexError, TypeError, ValueError):
+        return (0, None)
 
 
 def get_chunk_counts(conn: psycopg.Connection, repo: str) -> dict[str, int]:

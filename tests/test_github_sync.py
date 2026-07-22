@@ -1394,3 +1394,375 @@ class TestIndexIssuesIncremental:
         # With buffer (bulk path)
         result = index_issues(settings, conn, embedder, "o/r", buffer=buffer)
         assert result == 0  # no rows
+
+
+# ===================================================================
+# Issue #345: 403 retry storm — new behaviour tests
+# ===================================================================
+
+
+class TestApiPagesGenErrorClassification:
+    """_api_pages_gen: error classification and rate-limit retry (issue #345)."""
+
+    def test_403_non_rate_limit_raises_nonretryable(self):
+        """A 403 with x-ratelimit-remaining not 0 raises NonRetryableGitHubError."""
+        from shiori.github_errors import NonRetryableGitHubError
+
+        client = MagicMock()
+        resp = MagicMock()
+        resp.status_code = 403
+        resp.headers = {"x-ratelimit-remaining": "5000"}
+        resp.request = MagicMock()
+        resp.request.url = "https://api.github.com/repos/o/r/issues"
+        resp.raise_for_status.side_effect = httpx.HTTPStatusError(
+            "403 Forbidden", request=resp.request, response=resp,
+        )
+        client.get.return_value = resp
+
+        with pytest.raises(NonRetryableGitHubError) as exc_info:
+            list(_api_pages_gen(
+                client, "https://api.github.com/repos/o/r/issues",
+                {"per_page": 100}, repo="o/r",
+            ))
+        assert exc_info.value.status == 403
+        assert exc_info.value.repo == "o/r"
+
+    def test_403_with_rate_limit_header_retries(self):
+        """A 403 with x-ratelimit-remaining: 0 is treated as rate limit, retried."""
+        client = MagicMock()
+
+        # First response: 403 with rate-limit headers
+        resp403 = MagicMock()
+        resp403.status_code = 403
+        resp403.headers = {
+            "x-ratelimit-remaining": "0",
+            "Retry-After": "1",
+        }
+        resp403.request = MagicMock()
+        resp403.request.url = "https://api.github.com/repos/o/r/issues"
+        resp403.raise_for_status.side_effect = httpx.HTTPStatusError(
+            "403 Forbidden", request=resp403.request, response=resp403,
+        )
+
+        # Second response: success
+        resp_ok = MagicMock()
+        resp_ok.raise_for_status.return_value = None
+        resp_ok.json.return_value = [{"id": 1}]
+        resp_ok.links = {}
+
+        client.get.side_effect = [resp403, resp_ok]
+
+        sleep_calls: list[float] = []
+        with patch("time.sleep", side_effect=lambda s: sleep_calls.append(s)):
+            pages = list(_api_pages_gen(
+                client, "https://api.github.com/repos/o/r/issues",
+                {"per_page": 100}, repo="o/r",
+            ))
+
+        assert pages == [[{"id": 1}]]
+        assert len(sleep_calls) == 1
+        assert sleep_calls == [1.0]
+
+    def test_429_rate_limit_waits_and_retries(self):
+        """429 triggers wait and retry; eventually yields pages."""
+        client = MagicMock()
+
+        # First response: 429
+        resp429 = MagicMock()
+        resp429.status_code = 429
+        resp429.headers = {"Retry-After": "1"}
+        resp429.request = MagicMock()
+        resp429.request.url = "https://api.github.com/repos/o/r/issues"
+        resp429.raise_for_status.side_effect = httpx.HTTPStatusError(
+            "429 Too Many Requests", request=resp429.request, response=resp429,
+        )
+
+        # Second response: success
+        resp_ok = MagicMock()
+        resp_ok.raise_for_status.return_value = None
+        resp_ok.json.return_value = [{"id": 1}]
+        resp_ok.links = {}
+
+        client.get.side_effect = [resp429, resp_ok]
+
+        sleep_calls: list[float] = []
+        with patch("time.sleep", side_effect=lambda s: sleep_calls.append(s)):
+            pages = list(_api_pages_gen(
+                client, "https://api.github.com/repos/o/r/issues",
+                {"per_page": 100}, repo="o/r",
+            ))
+
+        assert pages == [[{"id": 1}]]
+        assert len(sleep_calls) == 1
+        assert sleep_calls == [1.0]
+
+    def test_rate_limit_retries_exhausted_raises(self):
+        """When max_retries is exhausted, RateLimitExhausted is raised."""
+        from shiori.github_errors import RateLimitExhausted
+
+        client = MagicMock()
+        resp429 = MagicMock()
+        resp429.status_code = 429
+        resp429.headers = {"Retry-After": "1"}
+        resp429.request = MagicMock()
+        resp429.request.url = "https://api.github.com/repos/o/r/issues"
+        resp429.raise_for_status.side_effect = httpx.HTTPStatusError(
+            "429 Too Many Requests", request=resp429.request, response=resp429,
+        )
+        # All 4 attempts (3 retries + 1 initial) are 429
+        client.get.side_effect = [resp429, resp429, resp429, resp429]
+
+        sleep_calls: list[float] = []
+        with (
+            patch("time.sleep", side_effect=lambda s: sleep_calls.append(s)),
+            pytest.raises(RateLimitExhausted) as exc_info,
+        ):
+            list(_api_pages_gen(
+                client, "https://api.github.com/repos/o/r/issues",
+                {"per_page": 100}, repo="o/r", max_retries=3,
+            ))
+
+        assert exc_info.value.status == 429
+        assert exc_info.value.repo == "o/r"
+        # 3 retries = 3 sleeps
+        assert len(sleep_calls) == 3
+
+
+class TestCircuitBreakerFetch:
+    """run_fetch: circuit breaker skips repos with too many failures (issue #345)."""
+
+    def test_skips_repo_within_backoff_window(self):
+        """Repo with consecutive_failures >= threshold and within backoff is skipped."""
+        from datetime import datetime, timezone
+        from shiori.ingest import run_fetch
+
+        mock_conn = MagicMock()
+        # Cursor for CB check: return 5 failures + recent timestamp
+        mock_cursor = MagicMock()
+        mock_cursor.fetchone.return_value = (5, datetime.now(timezone.utc))
+        mock_cursor.fetchall.return_value = []
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+
+        mock_settings = MagicMock()
+        mock_settings.repos = ["owner/broken"]
+        mock_settings.fetch_concurrency = 4
+        mock_settings.dev_repos = set()
+        # CB settings as real numbers (not MagicMock)
+        mock_settings.cb_threshold = 5
+        mock_settings.cb_base_backoff = 60.0
+        mock_settings.cb_max_backoff = 3600.0
+
+        mock_fetch_docs = MagicMock()
+        mock_fetch_issues = MagicMock()
+
+        with (
+            patch("shiori.ingest.db.connect", return_value=mock_conn),
+            patch("shiori.ingest.schema.migrate"),
+            patch("shiori.ingest._acquire_repo_lock", return_value=True),
+            patch("shiori.ingest._release_repo_lock"),
+            patch("shiori.ingest.build_token_provider", return_value=MagicMock()),
+            patch("shiori.ingest.fetch_docs", side_effect=mock_fetch_docs),
+            patch("shiori.ingest.fetch_issues", side_effect=mock_fetch_issues),
+        ):
+            run_fetch(settings=mock_settings)
+
+        # _fetch_one was never submitted → fetch_docs/fetch_issues not called
+        mock_fetch_docs.assert_not_called()
+        mock_fetch_issues.assert_not_called()
+
+    def test_cb_disabled_when_threshold_zero_does_not_skip(self):
+        """cb_threshold=0 disables the breaker; repo is fetched normally."""
+        from shiori.ingest import run_fetch
+
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        # Cursor for CB check would return failures, but threshold=0 → disabled
+        mock_cursor.fetchone.return_value = (5,)
+        mock_cursor.fetchall.return_value = []
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+
+        mock_settings = MagicMock()
+        mock_settings.repos = ["owner/repo"]
+        mock_settings.fetch_concurrency = 4
+        mock_settings.dev_repos = set()
+        mock_settings.cb_threshold = 0  # disabled
+        mock_settings.cb_base_backoff = 60.0
+        mock_settings.cb_max_backoff = 3600.0
+
+        with (
+            patch("shiori.ingest.db.connect", return_value=mock_conn),
+            patch("shiori.ingest.schema.migrate"),
+            patch("shiori.ingest._acquire_repo_lock", return_value=True),
+            patch("shiori.ingest._release_repo_lock"),
+            patch("shiori.ingest.build_token_provider", return_value=MagicMock()),
+            patch("shiori.ingest.fetch_docs", return_value="abc123") as mock_fetch_docs,
+            patch("shiori.ingest.fetch_issues", return_value=5) as mock_fetch_issues,
+        ):
+            run_fetch(settings=mock_settings)
+
+        # Breaker disabled → repo is fetched
+        mock_fetch_docs.assert_called_once()
+        mock_fetch_issues.assert_called_once()
+
+    def test_healthy_repo_fetched_when_another_skipped(self):
+        """Skipping one repo (breakers) does not block fetching another."""
+        from datetime import datetime, timezone
+        from shiori.ingest import run_fetch
+
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        # get_sync_attempt is called twice (once per repo).
+        # First repo: 5 failures (should be skipped)
+        # Second repo: 0 failures (healthy)
+        mock_cursor.fetchone.side_effect = [
+            (5, datetime.now(timezone.utc)),  # broken repo
+            (0, None),                         # healthy repo
+        ]
+        mock_cursor.fetchall.return_value = []
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+
+        mock_settings = MagicMock()
+        mock_settings.repos = ["owner/broken", "owner/healthy"]
+        mock_settings.fetch_concurrency = 4
+        mock_settings.dev_repos = set()
+        mock_settings.cb_threshold = 5
+        mock_settings.cb_base_backoff = 60.0
+        mock_settings.cb_max_backoff = 3600.0
+
+        with (
+            patch("shiori.ingest.db.connect", return_value=mock_conn),
+            patch("shiori.ingest.schema.migrate"),
+            patch("shiori.ingest._acquire_repo_lock", return_value=True),
+            patch("shiori.ingest._release_repo_lock"),
+            patch("shiori.ingest.build_token_provider", return_value=MagicMock()),
+            patch("shiori.ingest.fetch_docs", return_value="abc123") as mock_fetch_docs,
+            patch("shiori.ingest.fetch_issues", return_value=5) as mock_fetch_issues,
+        ):
+            run_fetch(settings=mock_settings)
+
+        # Healthy repo is still fetched (called once for it)
+        mock_fetch_docs.assert_called_once()
+        mock_fetch_issues.assert_called_once()
+
+    def test_explicit_repo_skip_raises_valueerror(self):
+        """Explicit repos=... skip raises ValueError, not silent."""
+        from datetime import datetime, timezone
+        from shiori.ingest import run_fetch
+
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_cursor.fetchone.return_value = (5, datetime.now(timezone.utc))
+        mock_cursor.fetchall.return_value = []
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+
+        mock_settings = MagicMock()
+        mock_settings.repos = ["owner/broken"]
+        mock_settings.fetch_concurrency = 4
+        mock_settings.dev_repos = set()
+        mock_settings.cb_threshold = 5
+        mock_settings.cb_base_backoff = 60.0
+        mock_settings.cb_max_backoff = 3600.0
+
+        with (
+            patch("shiori.ingest.db.connect", return_value=mock_conn),
+            patch("shiori.ingest.schema.migrate"),
+            patch("shiori.ingest.build_token_provider", return_value=MagicMock()),
+        ):
+            with pytest.raises(ValueError, match="circuit-broken"):
+                run_fetch(settings=mock_settings, repos=["owner/broken"])
+
+    def test_below_threshold_repos_not_skipped(self):
+        """Repo with failures below threshold is NOT skipped — still fetched."""
+        from datetime import datetime, timezone
+        from shiori.ingest import run_fetch
+
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        # First cursor call: CB check returns 3 failures (< threshold 5)
+        mock_cursor.fetchone.side_effect = [
+            (3, datetime.now(timezone.utc)),   # CB check
+        ]
+        mock_cursor.fetchall.return_value = []
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+
+        mock_settings = MagicMock()
+        mock_settings.repos = ["owner/repo"]
+        mock_settings.fetch_concurrency = 4
+        mock_settings.dev_repos = set()
+        mock_settings.cb_threshold = 5
+        mock_settings.cb_base_backoff = 60.0
+        mock_settings.cb_max_backoff = 3600.0
+
+        with (
+            patch("shiori.ingest.db.connect", return_value=mock_conn),
+            patch("shiori.ingest.schema.migrate"),
+            patch("shiori.ingest._acquire_repo_lock", return_value=True),
+            patch("shiori.ingest._release_repo_lock"),
+            patch("shiori.ingest.build_token_provider", return_value=MagicMock()),
+            patch("shiori.ingest.fetch_docs", return_value="abc123") as mock_fetch_docs,
+            patch("shiori.ingest.fetch_issues", return_value=5) as mock_fetch_issues,
+        ):
+            run_fetch(settings=mock_settings)
+
+        mock_fetch_docs.assert_called_once()
+        mock_fetch_issues.assert_called_once()
+
+    def test_success_resets_circuit_breaker(self):
+        """A repo past the threshold but outside its backoff window is
+        fetched, and success records ``record_sync_attempt(success=True)``.
+
+        That call is the reset path: it sets consecutive_failures back to 0,
+        so the breaker does not skip on the next run.  Starting from 0
+        failures would prove nothing here -- the point is that a repo the
+        breaker *was* tracking can get out again.
+        """
+        from datetime import datetime, timedelta, timezone
+
+        from shiori.ingest import run_fetch
+
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        # 6 failures (>= threshold 5), but the last attempt is far older
+        # than the backoff cap, so the breaker lets it through.
+        mock_cursor.fetchone.return_value = (
+            6,
+            datetime.now(timezone.utc) - timedelta(seconds=7200),
+        )
+        mock_cursor.fetchall.return_value = []
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+
+        mock_settings = MagicMock()
+        mock_settings.repos = ["owner/repo"]
+        mock_settings.fetch_concurrency = 4
+        mock_settings.dev_repos = set()
+        mock_settings.cb_threshold = 5
+        mock_settings.cb_base_backoff = 60.0
+        mock_settings.cb_max_backoff = 3600.0
+
+        with (
+            patch("shiori.ingest.db.connect", return_value=mock_conn),
+            patch("shiori.ingest.schema.migrate"),
+            patch("shiori.ingest._acquire_repo_lock", return_value=True),
+            patch("shiori.ingest._release_repo_lock"),
+            patch("shiori.ingest.build_token_provider", return_value=MagicMock()),
+            patch("shiori.ingest.fetch_docs", return_value="abc123") as mock_fetch_docs,
+            patch("shiori.ingest.fetch_issues", return_value=5) as mock_fetch_issues,
+            patch("shiori.ingest.db.record_sync_attempt") as mock_record,
+        ):
+            run_fetch(settings=mock_settings)
+
+        # Past the threshold, but outside the backoff window: still fetched.
+        mock_fetch_docs.assert_called_once()
+        mock_fetch_issues.assert_called_once()
+
+        # ...and the success is recorded.  That call is what clears
+        # consecutive_failures back to 0; without it the repo would stay
+        # circuit-broken forever once it crossed the threshold.
+        assert mock_record.called, "record_sync_attempt was never called"
+        assert any(
+            call.kwargs.get("success") is True
+            for call in mock_record.call_args_list
+        ), (
+            "no record_sync_attempt(success=True): a repo that crossed the "
+            f"threshold could never reset. calls: {mock_record.call_args_list}"
+        )

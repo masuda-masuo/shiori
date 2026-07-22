@@ -148,6 +148,43 @@ class Settings:
     ref_backfill_since: str | None = field(
         default_factory=lambda: os.environ.get("SHIORI_REF_BACKFILL_SINCE") or None
     )
+    # --- Circuit breaker: stop retrying a repo after N consecutive failures (issue #345) ---
+    # Set to 0 to disable the circuit breaker entirely.
+    cb_threshold: int = field(
+        default_factory=lambda: int(
+            os.environ.get("SHIORI_CB_THRESHOLD", "5")
+        )
+    )
+    # Base backoff in seconds. The actual backoff grows exponentially:
+    #   min(cb_max_backoff, cb_base_backoff * 2^(failures - 1))
+    cb_base_backoff: float = field(
+        default_factory=lambda: float(
+            os.environ.get("SHIORI_CB_BASE_BACKOFF", "60")
+        )
+    )
+    # Maximum backoff cap in seconds. Prevents exponential growth from
+    # parking a repo for days.
+    cb_max_backoff: float = field(
+        default_factory=lambda: float(
+            os.environ.get("SHIORI_CB_MAX_BACKOFF", "3600")
+        )
+    )
+    # --- Rate-limit handling (issue #345) ---
+    # Maximum seconds to wait on a rate-limit response (Retry-After or
+    # x-ratelimit-reset). A bogus reset value cannot park the process
+    # beyond this cap.
+    rate_limit_max_wait: float = field(
+        default_factory=lambda: float(
+            os.environ.get("SHIORI_RATE_LIMIT_MAX_WAIT", "60")
+        )
+    )
+    # Maximum number of retries when rate-limited before giving up and
+    # recording a failure.
+    rate_limit_max_retries: int = field(
+        default_factory=lambda: int(
+            os.environ.get("SHIORI_RATE_LIMIT_MAX_RETRIES", "3")
+        )
+    )
 
     def repo_dir(self, repo: str) -> str:
         owner, name = repo.split("/", 1)
