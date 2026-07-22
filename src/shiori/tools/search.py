@@ -38,7 +38,6 @@ def semantic_search(
     repo: "owner/name" filter, or a short name if it uniquely matches one
           configured (indexed) repo (e.g. "shiori" -> "owner/shiori").
           Omit to search across all indexed repos."""
-    resolved_repo = _resolve_repo_filter(repo)
     with _conn() as conn:
         return search.semantic_search(
             settings, conn, _get_embedder(), query,
@@ -77,7 +76,6 @@ def keyword_search(
     repo: "owner/name" filter, or a short name if it uniquely matches one
           configured (indexed) repo (e.g. "shiori" -> "owner/shiori").
           Omit to search across all indexed repos."""
-    resolved_repo = _resolve_repo_filter(repo)
     with _conn() as conn:
         return search.keyword_search(
             settings, conn, query,

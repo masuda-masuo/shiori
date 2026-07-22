@@ -301,6 +301,8 @@ def _fetch_dormant_open_bodies(
     client: httpx.Client,
     conn: psycopg.Connection,
     repo: str,
+    max_wait: float = 60.0,
+    max_retries: int = 3,
 ) -> int:
     """One-time fetch of ``state=open`` issues/PRs WITHOUT ``since`` filter.
 
@@ -316,7 +318,9 @@ def _fetch_dormant_open_bodies(
         "state": "open",
         "per_page": 100,
     }
-    for page in _api_pages_gen(client, f"{API}/repos/{repo}/issues", params):
+    for page in _api_pages_gen(client, f"{API}/repos/{repo}/issues", params,
+                               repo=repo, max_wait=max_wait,
+                               max_retries=max_retries):
         if not page:
             break
         for it in page:
@@ -396,7 +400,10 @@ def fetch_issues(
             params["since"] = since
         pr_numbers: list[int] = []
         _had_issues_page = False
-        for page in _api_pages_gen(client, f"{API}/repos/{repo}/issues", params, not_found_ok=True):
+        for page in _api_pages_gen(client, f"{API}/repos/{repo}/issues", params,
+                                  not_found_ok=True, repo=repo,
+                                  max_wait=settings.rate_limit_max_wait,
+                                  max_retries=settings.rate_limit_max_retries):
             _had_issues_page = True
             if not page:
                 break
@@ -439,7 +446,10 @@ def fetch_issues(
         if since:
             params["since"] = since
         _any_issue_comments = False
-        for page in _api_pages_gen(client, f"{API}/repos/{repo}/issues/comments", params, not_found_ok=True):
+        for page in _api_pages_gen(client, f"{API}/repos/{repo}/issues/comments", params,
+                                  not_found_ok=True, repo=repo,
+                                  max_wait=settings.rate_limit_max_wait,
+                                  max_retries=settings.rate_limit_max_retries):
             _any_issue_comments = True
             if not page:
                 break
@@ -467,7 +477,10 @@ def fetch_issues(
         if since:
             params["since"] = since
         _any_pr_review_comments = False
-        for page in _api_pages_gen(client, f"{API}/repos/{repo}/pulls/comments", params, not_found_ok=True):
+        for page in _api_pages_gen(client, f"{API}/repos/{repo}/pulls/comments", params,
+                                  not_found_ok=True, repo=repo,
+                                  max_wait=settings.rate_limit_max_wait,
+                                  max_retries=settings.rate_limit_max_retries):
             _any_pr_review_comments = True
             if not page:
                 break
@@ -509,7 +522,11 @@ def fetch_issues(
 
         # --- One-time state=open pass for seeded repos ---
         if was_seeded:
-            _fetch_dormant_open_bodies(client, conn, repo)
+            _fetch_dormant_open_bodies(
+                client, conn, repo,
+                max_wait=settings.rate_limit_max_wait,
+                max_retries=settings.rate_limit_max_retries,
+            )
 
     return n_fetched
 

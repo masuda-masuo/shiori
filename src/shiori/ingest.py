@@ -21,6 +21,7 @@ import os
 import shutil
 import threading
 import time
+from datetime import datetime, timedelta, timezone
 
 from . import db, schema
 from .config import Settings, load_settings
@@ -142,6 +143,72 @@ def _release_repo_lock(conn, repo: str) -> None:
         pass
 
 
+# --- Circuit breaker helpers (issue #345) ---
+
+
+def _compute_backoff(failures: int, base: float, cap: float) -> float:
+    """Exponential backoff: min(cap, base * 2^(failures - 1))."""
+    return min(cap, base * (2 ** max(0, failures - 1)))
+
+
+def _should_skip_repo(
+    conn,
+    repo: str,
+    settings: Settings,
+    explicit: bool,
+) -> bool:
+    """Return True when *repo* should be skipped by the circuit breaker.
+
+    Reads ``consecutive_failures`` and ``last_attempt_at`` from the DB.
+    When *explicit* is True (caller passed ``repos=[...]``), a skip raises
+    ``ValueError`` instead of silently returning True.
+    """
+    # Defensive: settings may be a MagicMock (tests); MagicMock.__int__()
+    # returns 1, so we must use isinstance to detect non-real settings.
+    # When settings fields are not real numbers, disable the breaker.
+    cb_threshold = getattr(settings, "cb_threshold", 0)
+    if not isinstance(cb_threshold, (int, float)):
+        return False
+    if cb_threshold <= 0:
+        return False
+
+    base_backoff = getattr(settings, "cb_base_backoff", 60.0)
+    if not isinstance(base_backoff, (int, float)):
+        return False
+    max_backoff = getattr(settings, "cb_max_backoff", 3600.0)
+    if not isinstance(max_backoff, (int, float)):
+        return False
+
+    threshold = int(cb_threshold)
+
+    failures, last_attempt_at = db.get_sync_attempt(conn, repo)
+    if failures < threshold:
+        return False
+
+    if last_attempt_at is None:
+        return False
+
+    backoff = _compute_backoff(failures, base_backoff, max_backoff)
+    now = datetime.now(timezone.utc)
+    elapsed = (now - last_attempt_at).total_seconds()
+
+    if elapsed < backoff:
+        retry_at = last_attempt_at + timedelta(seconds=backoff)
+        if explicit:
+            raise ValueError(
+                f"Repo {repo} is circuit-broken: {failures} consecutive "
+                f"failures, retry after {retry_at.isoformat()}"
+            )
+        log.warning(
+            "Circuit breaker: skipping %s (%d consecutive failures, "
+            "retry after %s)",
+            repo, failures, retry_at.isoformat(),
+        )
+        return True
+
+    return False
+
+
 def _validate_repos(repos: list[str] | None, settings: Settings) -> list[str]:
     """Validate repos against SHIORI_REPOS allowlist (issue #63)."""
     if repos is not None:
@@ -213,6 +280,30 @@ def run_fetch(
     targets = _order_repos_dev_first(targets, settings.dev_repos)
     provider = build_token_provider(settings)
 
+    # Circuit breaker pre-check: skip repos with too many consecutive
+    # failures BEFORE opening a DB connection inside a thread.  This
+    # eliminates the connection leak that the old per-thread check had
+    # (issue #345).
+    explicit_repos = repos is not None
+    _cb_conn = db.connect(settings)
+    try:
+        schema.migrate(_cb_conn, settings)
+        _cb_skipped: list[str] = []
+        _active_targets: list[str] = []
+        for repo in targets:
+            if _should_skip_repo(_cb_conn, repo, settings, explicit_repos):
+                _cb_skipped.append(repo)
+            else:
+                _active_targets.append(repo)
+    finally:
+        _cb_conn.close()
+
+    if _cb_skipped:
+        log.info(
+            "Circuit breaker skipped %d repo(s): %s",
+            len(_cb_skipped), ", ".join(_cb_skipped),
+        )
+
     t_total = time.monotonic()
     failed: list[str] = []
 
@@ -254,14 +345,21 @@ def run_fetch(
                     db.record_sync_attempt(conn, repo, success=False, error=str(exc))
                     log.exception("fetch issues failed for %s", repo)
                     raise
+
+                # Record the success.  The circuit breaker gates *fetch*, so
+                # fetch is what has to be able to clear it: run_fetch used to
+                # only ever record failures, leaving consecutive_failures and
+                # last_attempt_at frozen at the last failure for fetch-only
+                # runs (run_ingest resets in its index phase instead).
+                db.record_sync_attempt(conn, repo, success=True)
             finally:
                 _release_repo_lock(conn, repo)
         finally:
             conn.close()
 
-    n_workers = max(1, min(len(targets), settings.fetch_concurrency))
+    n_workers = max(1, min(len(_active_targets), settings.fetch_concurrency))
     with ThreadPoolExecutor(max_workers=n_workers) as executor:
-        futures = {executor.submit(_fetch_one, repo): repo for repo in targets}
+        futures = {executor.submit(_fetch_one, repo): repo for repo in _active_targets}
         for future in as_completed(futures):
             repo = futures[future]
             try:
@@ -271,7 +369,7 @@ def run_fetch(
 
     if failed:
         raise RuntimeError(
-            f"fetch failed for {len(failed)}/{len(targets)} repo(s): "
+            f"fetch failed for {len(failed)}/{len(_active_targets)} repo(s): "
             f"{', '.join(failed)}"
         )
 
@@ -481,7 +579,32 @@ def run_ingest(
     # Phase 1: Parallel fetch (ThreadPoolExecutor)
     # Each repo gets its own DB connection with per-repo PG advisory lock.
     # Failures are recorded per-repo; the process continues for other repos.
+    #
+    # Circuit breaker pre-check: repos with too many consecutive failures
+    # are skipped BEFORE a DB connection is opened inside a thread (issue #345).
     # ========================================================================
+    explicit_repos = repos is not None
+    _cb_skipped: list[str] = []
+    _active_targets: list[str] = []
+    try:
+        for repo in targets:
+            if _should_skip_repo(conn, repo, settings, explicit_repos):
+                _cb_skipped.append(repo)
+            else:
+                _active_targets.append(repo)
+    except BaseException:
+        # An explicitly requested repo that is circuit-broken raises here.
+        # This connection is owned by run_ingest and nothing downstream will
+        # close it once we leave via an exception (mirrors the try/finally
+        # around the same pre-check in run_fetch).
+        conn.close()
+        raise
+    if _cb_skipped:
+        log.info(
+            "Circuit breaker skipped %d repo(s): %s",
+            len(_cb_skipped), ", ".join(_cb_skipped),
+        )
+
     fetch_failed: dict[str, str] = {}
     _fetch_failed_lock = threading.Lock()
 
@@ -534,29 +657,29 @@ def run_ingest(
         finally:
             conn2.close()
 
-    n_workers = max(1, min(len(targets), settings.fetch_concurrency))
+    n_workers = max(1, min(len(_active_targets), settings.fetch_concurrency))
     with ThreadPoolExecutor(max_workers=n_workers) as executor:
-        futures = {executor.submit(_fetch_one, repo): repo for repo in targets}
+        futures = {executor.submit(_fetch_one, repo): repo for repo in _active_targets}
         for future in as_completed(futures):
             future.result()  # _fetch_one never re-raises
 
     if fetch_failed:
         log.warning(
             "fetch failed for %d/%d repo(s): %s",
-            len(fetch_failed), len(targets),
+            len(fetch_failed), len(_active_targets),
             "; ".join(f"{r}: {e}" for r, e in fetch_failed.items()),
         )
         # Bulk path: abort immediately on first fetch failure (backward compat)
         if is_bulk:
             first = next(iter(fetch_failed.items()))
             raise RuntimeError(
-                f"sync failed for 1/{len(targets)} repo(s): "
+                f"sync failed for 1/{len(_active_targets)} repo(s): "
                 f"{first[0]}: {first[1]}"
             )
 
     # ========================================================================
     # Phase 2: Sequential index (with batch embedding via ChunkBuffer)
-    # Repos that failed during fetch are skipped.
+    # Repos that failed during fetch OR were skipped by CB are excluded.
     # ========================================================================
     embedder = Embedder()
 
@@ -567,7 +690,7 @@ def run_ingest(
     t_total = time.monotonic()
     index_failed: dict[str, str] = {}
 
-    for repo in targets:
+    for repo in _active_targets:
         if repo in fetch_failed:
             log.info("index %s: skipped (fetch failed earlier)", repo)
             continue
