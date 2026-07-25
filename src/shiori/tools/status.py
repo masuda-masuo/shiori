@@ -103,7 +103,8 @@ def status(repo: str | None = None) -> dict[str, Any]:
         if repo:
             resolved = _validate_repo_name(repo)
             targets = [resolved]
-            runs = db.get_sync_runs(conn)
+            run_info = db.get_sync_run(conn, resolved)
+            runs = {resolved: run_info} if run_info else {}
             index_state_row = db.get_repo_index_state(conn, resolved)
             index_state = {resolved: index_state_row} if index_state_row else {}
         else:
@@ -111,8 +112,8 @@ def status(repo: str | None = None) -> dict[str, Any]:
             runs = db.get_sync_runs(conn)
             index_state = db.get_all_repo_index_state(conn)
 
-        for repo in targets:
-            info = runs.get(repo) or {
+        for target_repo in targets:
+            info = runs.get(target_repo) or {
                 "last_synced_at": None,
                 "age_seconds": None,
                 "route": None,
@@ -123,7 +124,7 @@ def status(repo: str | None = None) -> dict[str, Any]:
                 "last_error": None,
                 "consecutive_failures": 0,
             }
-            state = index_state.get(repo, {})
+            state = index_state.get(target_repo, {})
             info["clone_head"] = state.get("clone_head")
             info["indexed_head"] = state.get("indexed_head")
             info["last_sync_error"] = state.get("last_sync_error")
@@ -136,20 +137,20 @@ def status(repo: str | None = None) -> dict[str, Any]:
             else:
                 info["index_stale"] = False
             info["never_indexed"] = bool(clone_head and not indexed_head)
-            chunk_counts = db.get_chunk_counts(conn, repo)
-            items_in_db = db.get_issue_item_count(conn, repo)
-            cursors = db.get_cursors(conn, repo)
+            chunk_counts = db.get_chunk_counts(conn, target_repo)
+            items_in_db = db.get_issue_item_count(conn, target_repo)
+            cursors = db.get_cursors(conn, target_repo)
             info["chunks"] = chunk_counts
             info["code_chunks"] = chunk_counts.get("code", 0)
             info["items_in_db"] = items_in_db
             info["cursors"] = cursors
-            info["role"] = "dev" if repo in settings.dev_repos else "ref"
+            info["role"] = "dev" if target_repo in settings.dev_repos else "ref"
             info["code_indexed"] = chunk_counts.get("code", 0) > 0
             info["token_provider_error"] = token_provider_error
             warnings = _build_warnings(info, chunk_counts, items_in_db, cursors)
             info.pop("token_provider_error", None)
             info["warnings"] = warnings
-            repos[repo] = info
+            repos[target_repo] = info
     return {
         "repos": repos,
         "sync_interval_seconds": settings.sync_interval_seconds,
