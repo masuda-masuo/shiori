@@ -31,23 +31,23 @@ def main() -> None:
 
     # fetch
     p_fetch = ingest_sub.add_parser("fetch", help="API fetch + git pull only (no chunk/embed)")
-    p_fetch.add_argument("--repo", action="append", required=True, help="owner/name (multiple allowed)")
-    p_fetch.add_argument("--rebuild", action="store_true", help=argparse.SUPPRESS)
-    p_fetch.add_argument("--backfill-since", help="YYYY-MM-DD: seed cursors for initial backfill of new repos")
+    p_fetch.add_argument("--repo", action="append", default=argparse.SUPPRESS, help="owner/name (multiple allowed)")
+    p_fetch.add_argument("--rebuild", action="store_true", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
+    p_fetch.add_argument("--backfill-since", default=argparse.SUPPRESS, help="YYYY-MM-DD: seed cursors for initial backfill of new repos")
 
     # index
     p_index = ingest_sub.add_parser("index", help="chunk + embed from issue_items/doc_files")
-    p_index.add_argument("--repo", action="append", required=True, help="owner/name (multiple allowed)")
-    p_index.add_argument("--rebuild", action="store_true", help=argparse.SUPPRESS)
+    p_index.add_argument("--repo", action="append", default=argparse.SUPPRESS, help="owner/name (multiple allowed)")
+    p_index.add_argument("--rebuild", action="store_true", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
 
     # run
     p_run = ingest_sub.add_parser("run", help="fetch + index sequentially (default behavior)")
-    p_run.add_argument("--repo", action="append", required=True, help="owner/name (multiple allowed)")
-    p_run.add_argument("--rebuild", action="store_true", help="discard index and rebuild all")
-    p_run.add_argument("--backfill-since", help="YYYY-MM-DD: seed cursors for initial backfill of new repos")
+    p_run.add_argument("--repo", action="append", default=argparse.SUPPRESS, help="owner/name (multiple allowed)")
+    p_run.add_argument("--rebuild", action="store_true", default=argparse.SUPPRESS, help="discard index and rebuild all")
+    p_run.add_argument("--backfill-since", default=argparse.SUPPRESS, help="YYYY-MM-DD: seed cursors for initial backfill of new repos")
 
     # Backward-compatible: ingest without subcommand uses the same args as run
-    p_ingest.add_argument("--repo", action="append", required=True, help="owner/name (multiple allowed)")
+    p_ingest.add_argument("--repo", action="append", help="owner/name (multiple allowed)")
     p_ingest.add_argument("--rebuild", action="store_true", help="discard index and rebuild all")
     p_ingest.add_argument("--backfill-since", help="YYYY-MM-DD: seed cursors for initial backfill of new repos")
 
@@ -81,18 +81,25 @@ def main() -> None:
     if args.command == "ingest":
         from .ingest import run_fetch, run_index, run_ingest
 
+        # Validate --repo: must be present somewhere (parent or subcommand)
+        repos = getattr(args, "repo", None)
+        if not repos:
+            p_ingest.error("the following arguments are required: --repo")
+
         # Route subcommands
         ingest_action = getattr(args, "ingest_action", None)
+        rebuild = getattr(args, "rebuild", False)
         backfill_since = getattr(args, "backfill_since", None)
+
         if ingest_action == "fetch":
-            run_fetch(repos=args.repo, backfill_since=backfill_since)
+            run_fetch(repos=repos, backfill_since=backfill_since)
         elif ingest_action == "index":
-            run_index(repos=args.repo, rebuild=getattr(args, "rebuild", False))
+            run_index(repos=repos, rebuild=rebuild)
         elif ingest_action == "run":
-            run_ingest(repos=args.repo, rebuild=getattr(args, "rebuild", False), backfill_since=backfill_since)
+            run_ingest(repos=repos, rebuild=rebuild, backfill_since=backfill_since)
         else:
             # No subcommand: backward compatible (equivalent to "run")
-            run_ingest(repos=args.repo, rebuild=args.rebuild, backfill_since=backfill_since)
+            run_ingest(repos=repos, rebuild=rebuild, backfill_since=backfill_since)
     elif args.command == "forget":
         from .ingest import run_forget
 
