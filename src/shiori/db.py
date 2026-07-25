@@ -526,6 +526,29 @@ def record_repo_sync_error(
     conn.commit()
 
 
+def get_repo_index_state(
+    conn: psycopg.Connection, repo: str
+) -> dict:
+    """Get repo_index_state for a single repo (issue #350).
+    Returns {clone_head, indexed_head, ...} or empty dict when no row exists.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT clone_head, indexed_head, last_sync_at, last_sync_error "
+            "FROM repo_index_state WHERE repo = %s",
+            (repo,),
+        )
+        row = cur.fetchone()
+    if row is None:
+        return {}
+    return {
+        "clone_head": row[0],
+        "indexed_head": row[1],
+        "last_sync_at": row[2].isoformat() if row[2] is not None else None,
+        "last_sync_error": row[3],
+    }
+
+
 def get_all_repo_index_state(
     conn: psycopg.Connection,
 ) -> dict[str, dict]:

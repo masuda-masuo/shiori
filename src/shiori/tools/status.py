@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from .registry import mcp
+from .common import _validate_repo_name
 from ..pipeline import _conn, settings
 from .. import db
 from ..github_auth import build_token_provider
@@ -81,7 +82,13 @@ def _build_warnings(
 
 
 @mcp.tool(name="shiori_status")
-def status() -> dict[str, Any]:
+def status(repo: str | None = None) -> dict[str, Any]:
+    """Report index status for one or all configured repositories (issue #350).
+
+    repo: target repo ("owner/name"), a short name if it uniquely matches
+          one configured (indexed) repo (e.g. "shiori" -> "owner/shiori"),
+          or None for all repos (default).
+    """
     try:
         provider = build_token_provider(settings)
         token_provider = provider.name
@@ -91,10 +98,20 @@ def status() -> dict[str, Any]:
         token_provider_error = str(exc)
 
     with _conn() as conn:
-        runs = db.get_sync_runs(conn)
-        index_state = db.get_all_repo_index_state(conn)
         repos: dict[str, Any] = {}
-        for repo in settings.repos:
+
+        if repo:
+            resolved = _validate_repo_name(repo)
+            targets = [resolved]
+            runs = db.get_sync_runs(conn)
+            index_state_row = db.get_repo_index_state(conn, resolved)
+            index_state = {resolved: index_state_row} if index_state_row else {}
+        else:
+            targets = settings.repos
+            runs = db.get_sync_runs(conn)
+            index_state = db.get_all_repo_index_state(conn)
+
+        for repo in targets:
             info = runs.get(repo) or {
                 "last_synced_at": None,
                 "age_seconds": None,
