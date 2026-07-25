@@ -358,3 +358,71 @@ class TestGetCodeChunks:
         assert "AND path LIKE %s || '%'" in sql
         assert "ORDER BY path, line" in sql
         assert params == ["o/r", "python", "src/"]
+class TestGetRepoIndexState:
+    """get_repo_index_state: single-repo index state lookup (issue #350)."""
+
+    def _mock_conn(self, row):
+        conn = MagicMock()
+        cursor = MagicMock()
+        cursor.fetchone.return_value = row
+        conn.cursor.return_value.__enter__.return_value = cursor
+        return conn, cursor
+
+    def test_returns_row_when_exists(self):
+        from datetime import datetime, timezone
+        from shiori.db import get_repo_index_state
+
+        conn, cursor = self._mock_conn(
+            ("abc123", "def456",
+             datetime(2026, 7, 25, 5, 0, 0, tzinfo=timezone.utc),
+             None)
+        )
+        result = get_repo_index_state(conn, "owner/repo")
+        assert result["clone_head"] == "abc123"
+        assert result["indexed_head"] == "def456"
+        assert result["last_sync_error"] is None
+        cursor.execute.assert_called_once()
+        assert "WHERE repo = %s" in cursor.execute.call_args[0][0]
+
+    def test_returns_empty_dict_when_missing(self):
+        from shiori.db import get_repo_index_state
+
+        conn, cursor = self._mock_conn(None)
+        result = get_repo_index_state(conn, "owner/repo")
+        assert result == {}
+
+class TestGetSyncRun:
+    """get_sync_run: single-repo sync run lookup (issue #350 review)."""
+
+    def _mock_conn(self, row):
+        conn = MagicMock()
+        cursor = MagicMock()
+        cursor.fetchone.return_value = row
+        conn.cursor.return_value.__enter__.return_value = cursor
+        return conn
+
+    def test_returns_none_when_missing(self):
+        from shiori.db import get_sync_run
+        conn = self._mock_conn(None)
+        result = get_sync_run(conn, "o/r")
+        assert result is None
+
+    def test_returns_sync_info_when_exists(self):
+        from datetime import datetime, timezone
+        from shiori.db import get_sync_run
+
+        finished_at = datetime(2026, 7, 25, 6, 0, 0, tzinfo=timezone.utc)
+        last_attempt_at = datetime(2026, 7, 25, 6, 0, 5, tzinfo=timezone.utc)
+        row = ("auto", finished_at, 300, 10, 5, 3,
+               last_attempt_at, None, 0)
+        conn = self._mock_conn(row)
+
+        result = get_sync_run(conn, "o/r")
+        assert result["route"] == "auto"
+        assert result["last_synced_at"] == finished_at.isoformat()
+        assert result["age_seconds"] == 300
+        assert result["docs_updated"] == 10
+        assert result["issues_indexed"] == 5
+        assert result["code_added"] == 3
+        assert result["last_error"] is None
+        assert result["consecutive_failures"] == 0

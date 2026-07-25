@@ -253,3 +253,46 @@ class TestCrossRepoSearchPhase1:
             mock_settings.repos = ["r1", "r2", "r3"]
             result = semantic_search(query="test", repo=None)
             assert result == []
+
+class TestStatusWithRepoParam:
+    """status(repo=...): single-repo mode returns only that repo (issue #350 review)."""
+
+    def _run_status_repo(self, repo_param, index_state=None, sync_run=None):
+        with (
+            patch("shiori.tools.status._conn"),
+            patch("shiori.tools.status.settings") as mock_settings,
+            patch("shiori.tools.status._validate_repo_name",
+                  return_value="o/r"),
+            patch("shiori.tools.status.db.get_sync_run",
+                  return_value=sync_run),
+            patch("shiori.tools.status.db.get_repo_index_state",
+                  return_value=index_state or {}),
+            patch("shiori.tools.status.db.get_chunk_counts", return_value={}),
+            patch("shiori.tools.status.db.get_issue_item_count", return_value=0),
+            patch("shiori.tools.status.db.get_cursors", return_value={}),
+        ):
+            mock_settings.repos = ["o/r", "other/repo"]
+            mock_settings.sync_interval_seconds = 10
+            return status(repo=repo_param)
+
+    def test_returns_only_requested_repo(self):
+        result = self._run_status_repo("o/r")
+        repos = result["repos"]
+        assert list(repos.keys()) == ["o/r"]
+
+    def test_resolves_short_name(self):
+        with (
+            patch("shiori.tools.status._conn"),
+            patch("shiori.tools.status.settings") as mock_settings,
+            patch("shiori.tools.status._validate_repo_name",
+                  return_value="owner/shiori"),
+            patch("shiori.tools.status.db.get_sync_run", return_value=None),
+            patch("shiori.tools.status.db.get_repo_index_state", return_value={}),
+            patch("shiori.tools.status.db.get_chunk_counts", return_value={}),
+            patch("shiori.tools.status.db.get_issue_item_count", return_value=0),
+            patch("shiori.tools.status.db.get_cursors", return_value={}),
+        ):
+            mock_settings.repos = ["owner/shiori", "other/repo"]
+            mock_settings.sync_interval_seconds = 10
+            result = status(repo="shiori")
+        assert list(result["repos"].keys()) == ["owner/shiori"]

@@ -168,6 +168,39 @@ def get_sync_runs(conn: psycopg.Connection) -> dict[str, dict]:
     }
 
 
+def get_sync_run(
+    conn: psycopg.Connection, repo: str
+) -> dict | None:
+    """Latest sync record for a single repo (issue #350 review).
+    Returns same shape as get_sync_runs values, or None when no row exists.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT route, finished_at,
+                   EXTRACT(EPOCH FROM (now() - finished_at))::bigint,
+                   docs_updated, issues_indexed, code_indexed,
+                   last_attempt_at, last_error, consecutive_failures
+            FROM sync_runs WHERE repo = %s
+            """,
+            (repo,),
+        )
+        row = cur.fetchone()
+    if row is None:
+        return None
+    return {
+        "last_synced_at": row[1].isoformat() if row[1] is not None else None,
+        "age_seconds": int(row[2]) if row[2] is not None else None,
+        "route": row[0],
+        "docs_updated": row[3],
+        "issues_indexed": row[4],
+        "code_added": row[5],
+        "last_attempt_at": row[6].isoformat() if row[6] is not None else None,
+        "last_error": row[7],
+        "consecutive_failures": row[8],
+    }
+
+
 def get_sync_attempt(
     conn: psycopg.Connection, repo: str
 ) -> tuple[int, datetime | None]:
@@ -524,6 +557,29 @@ def record_repo_sync_error(
             (repo, truncated_error),
         )
     conn.commit()
+
+
+def get_repo_index_state(
+    conn: psycopg.Connection, repo: str
+) -> dict:
+    """Get repo_index_state for a single repo (issue #350).
+    Returns {clone_head, indexed_head, ...} or empty dict when no row exists.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT clone_head, indexed_head, last_sync_at, last_sync_error "
+            "FROM repo_index_state WHERE repo = %s",
+            (repo,),
+        )
+        row = cur.fetchone()
+    if row is None:
+        return {}
+    return {
+        "clone_head": row[0],
+        "indexed_head": row[1],
+        "last_sync_at": row[2].isoformat() if row[2] is not None else None,
+        "last_sync_error": row[3],
+    }
 
 
 def get_all_repo_index_state(
