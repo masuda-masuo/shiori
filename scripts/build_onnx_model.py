@@ -9,14 +9,23 @@ This is a host-side, one-time (or occasional, e.g. on model upgrade) build
 step -- it is NOT run in CI or in tests, and it is NOT run inside the app
 image build (docker/app/Dockerfile intentionally does not bake the ONNX
 artifact in; the artifact lives on the host and is bind-mounted read-only
-into the app/ingest containers via ./models:/models:ro, see
+into the app/ingest containers via ./models/onnx:/models/onnx:ro, see
 docker-compose.yml). It requires network access to download the source
 model from the Hugging Face Hub.
 
 Run it via the app image, which already has the [onnx] extra installed
-(most host venvs won't have optimum/onnxruntime):
+(most host venvs won't have optimum/onnxruntime). Three traps make the
+naive `docker compose run app python scripts/...` fail, all verified on
+2026-07-28: the image does not contain scripts/ (mount it), the compose
+/models mount is read-only (write elsewhere), and the image bakes
+HF_HUB_OFFLINE=1 (#238; re-enable network and point HF_HOME somewhere
+writable):
 
-    docker compose run --rm app python scripts/build_onnx_model.py
+    docker compose run --rm \
+      -v "$PWD/scripts:/app/scripts:ro" \
+      -v "$PWD/models:/models-out" \
+      -e HF_HUB_OFFLINE=0 -e HF_HOME=/tmp/hf \
+      app python scripts/build_onnx_model.py --output /models-out/onnx/e5-small-int8
 
 Or, with a local venv that has `pip install '.[onnx]'`:
 
