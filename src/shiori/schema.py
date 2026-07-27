@@ -204,63 +204,175 @@ _HNSW_INDEX = "chunks_embedding_hnsw"
 _PGROONGA_CONTENT_INDEX = "chunks_content_pgroonga"
 _PGROONGA_SYMBOLS_INDEX = "chunks_symbols_pgroonga"
 
+#: DDL lock-acquisition bound for migrate (issue #362): a blocked ALTER/CREATE
+#: must crash loudly within seconds rather than queue silently behind a
+#: long-held lock (Postgres lock queues are FIFO, so one stuck ACCESS
+#: EXCLUSIVE request blocks every later request, including plain reads).
+_DDL_LOCK_TIMEOUT = "5s"
+
+
+def _existing_columns(conn: psycopg.Connection, table: str) -> dict[str, bool]:
+    """{column_name: attnotnull} for *table*'s live columns.
+
+    A plain SELECT against ``pg_attribute`` -- ACCESS SHARE only, never
+    blocks behind a held lock (issue #362).
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT attname, attnotnull FROM pg_attribute "
+            "WHERE attrelid = %s::regclass AND attnum > 0 AND NOT attisdropped",
+            (table,),
+        )
+        return {row[0]: row[1] for row in cur.fetchall()}
+
+
+def _existing_constraint_defs(
+    conn: psycopg.Connection, table: str, names: tuple[str, ...]
+) -> dict[str, str]:
+    """{conname: whitespace-normalized def} for the constraints in *names*
+    that currently exist on *table*. A plain SELECT (ACCESS SHARE only).
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT conname, pg_get_constraintdef(oid) FROM pg_constraint "
+            "WHERE conrelid = %s::regclass AND conname = ANY(%s)",
+            (table, list(names)),
+        )
+        return {row[0]: " ".join(str(row[1]).split()) for row in cur.fetchall()}
+
 
 def _run_alter_statements(conn: psycopg.Connection) -> None:
-    """Idempotent ALTER for existing DB. CREATE TABLE IF NOT EXISTS does not add new columns."""
-    # 1. Add 'code' to source_type CHECK constraint (replace existing)
-    with conn.cursor() as cur:
-        cur.execute("ALTER TABLE chunks DROP CONSTRAINT IF EXISTS chunks_source_type_check")
-        cur.execute(
-            "ALTER TABLE chunks ADD CONSTRAINT chunks_source_type_check "
-            "CHECK (source_type IN ('doc', 'issue', 'pr_review', 'code'))"
-        )
-    conn.commit()
+    """Idempotent ALTER for existing DB. CREATE TABLE IF NOT EXISTS does not add new columns.
 
-    # 2. Add new columns
-    with conn.cursor() as cur:
+    Catalog-guarded (issue #362): every ALTER below -- even
+    ``ADD COLUMN IF NOT EXISTS`` -- takes ACCESS EXCLUSIVE on its table
+    *before* evaluating IF NOT EXISTS, so on an already-migrated DB this used
+    to unconditionally queue an ACCESS EXCLUSIVE request behind any
+    long-held lock (e.g. a multi-hour ``CREATE INDEX ... USING hnsw``) and,
+    because Postgres lock queues are FIFO, block every later request --
+    including plain reads -- for the duration. Each ALTER is now preceded by
+    a plain-SELECT probe (ACCESS SHARE, never blocks) and only runs when the
+    probe shows the target state isn't already there. On doubt (an
+    unparseable/unexpected constraint def) the fallback is always to run the
+    DROP+ADD -- never to skip.
+    """
+    ran_any = False
+
+    # 1 & 4. chunks' two CHECK constraints -- fetch both defs in one query.
+    # Each expected-def string below must stay in lockstep with its ADD
+    # CONSTRAINT SQL: if the SQL changes, update the expected def too, or a
+    # future migrate will think the (now-correct) constraint is still stale
+    # and keep re-running the DROP+ADD forever (harmless, just pointless).
+    source_type_check_sql = (
+        "ALTER TABLE chunks ADD CONSTRAINT chunks_source_type_check "
+        "CHECK (source_type IN ('doc', 'issue', 'pr_review', 'code'))"
+    )
+    source_type_check_expected_def = (
+        "CHECK ((source_type = ANY (ARRAY['doc'::text, 'issue'::text, "
+        "'pr_review'::text, 'code'::text])))"
+    )
+    kind_check_sql = (
+        "ALTER TABLE chunks ADD CONSTRAINT chunks_kind_check "
+        "CHECK (kind IN ('issue', 'pr') OR kind IS NULL)"
+    )
+    kind_check_expected_def = (
+        "CHECK (((kind = ANY (ARRAY['issue'::text, 'pr'::text])) OR (kind IS NULL)))"
+    )
+    chunks_constraints = _existing_constraint_defs(
+        conn, "chunks", ("chunks_source_type_check", "chunks_kind_check")
+    )
+
+    # 1. Add 'code' to source_type CHECK constraint (replace existing)
+    if chunks_constraints.get("chunks_source_type_check") != source_type_check_expected_def:
+        with conn.cursor() as cur:
+            cur.execute("ALTER TABLE chunks DROP CONSTRAINT IF EXISTS chunks_source_type_check")
+            cur.execute(source_type_check_sql)
+        conn.commit()
+        ran_any = True
+        log.info("migrate: executed chunks_source_type_check constraint (drop+add)")
+
+    # 2. Add new columns -- one probe covers this and step 4's chunks.kind.
+    chunks_columns = _existing_columns(conn, "chunks")
+    missing_chunks_cols = [
+        (col, typ)
         for col, typ in [
             ("end_line", "INTEGER"),
             ("commit_sha", "TEXT"),
             ("prog_lang", "TEXT"),
             ("symbols", "TEXT"),
-        ]:
-            cur.execute(f"ALTER TABLE chunks ADD COLUMN IF NOT EXISTS {col} {typ}")  # type: ignore[arg-type]
-    conn.commit()
+        ]
+        if col not in chunks_columns
+    ]
+    if missing_chunks_cols:
+        with conn.cursor() as cur:
+            for col, typ in missing_chunks_cols:
+                cur.execute(f"ALTER TABLE chunks ADD COLUMN IF NOT EXISTS {col} {typ}")  # type: ignore[arg-type]
+        conn.commit()
+        ran_any = True
+        log.info("migrate: executed chunks columns %s", [c for c, _ in missing_chunks_cols])
 
     # 3. Add doc_files.kind (existing rows stay 'doc')
-    with conn.cursor() as cur:
-        cur.execute("ALTER TABLE doc_files ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'doc'")
-    conn.commit()
+    doc_files_columns = _existing_columns(conn, "doc_files")
+    if "kind" not in doc_files_columns:
+        with conn.cursor() as cur:
+            cur.execute("ALTER TABLE doc_files ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'doc'")
+        conn.commit()
+        ran_any = True
+        log.info("migrate: executed doc_files.kind column")
 
-    # 4. Add chunks.kind (issue #98)
-    with conn.cursor() as cur:
-        cur.execute("ALTER TABLE chunks ADD COLUMN IF NOT EXISTS kind TEXT")
-        cur.execute(
-            "ALTER TABLE chunks DROP CONSTRAINT IF EXISTS chunks_kind_check"
-        )
-        cur.execute(
-            "ALTER TABLE chunks ADD CONSTRAINT chunks_kind_check "
-            "CHECK (kind IN ('issue', 'pr') OR kind IS NULL)"
-        )
-    conn.commit()
+    # 4. Add chunks.kind (issue #98) + its CHECK constraint
+    kind_col_missing = "kind" not in chunks_columns
+    kind_check_drifted = chunks_constraints.get("chunks_kind_check") != kind_check_expected_def
+    if kind_col_missing or kind_check_drifted:
+        with conn.cursor() as cur:
+            if kind_col_missing:
+                cur.execute("ALTER TABLE chunks ADD COLUMN IF NOT EXISTS kind TEXT")
+            cur.execute("ALTER TABLE chunks DROP CONSTRAINT IF EXISTS chunks_kind_check")
+            cur.execute(kind_check_sql)
+        conn.commit()
+        ran_any = True
+        log.info("migrate: executed chunks.kind column/constraint")
+
+    # 5 & 6. sync_runs -- one probe covers code_indexed, the attempt-tracking
+    # columns, and finished_at's NOT NULL flag together.
+    sync_runs_columns = _existing_columns(conn, "sync_runs")
 
     # 5. Add sync_runs.code_indexed (returned as code_added via API)
-    with conn.cursor() as cur:
-        cur.execute("ALTER TABLE sync_runs ADD COLUMN IF NOT EXISTS code_indexed INTEGER")
-    conn.commit()
+    if "code_indexed" not in sync_runs_columns:
+        with conn.cursor() as cur:
+            cur.execute("ALTER TABLE sync_runs ADD COLUMN IF NOT EXISTS code_indexed INTEGER")
+        conn.commit()
+        ran_any = True
+        log.info("migrate: executed sync_runs.code_indexed column")
 
     # 6. Sync attempt tracking (issue #187): finished_at can no longer be
     # NOT NULL since a row may now exist for a repo that has only failed;
     # add last_attempt_at/last_error/consecutive_failures for status visibility.
-    with conn.cursor() as cur:
-        cur.execute("ALTER TABLE sync_runs ALTER COLUMN finished_at DROP NOT NULL")
-        cur.execute("ALTER TABLE sync_runs ADD COLUMN IF NOT EXISTS last_attempt_at TIMESTAMPTZ")
-        cur.execute("ALTER TABLE sync_runs ADD COLUMN IF NOT EXISTS last_error TEXT")
-        cur.execute(
-            "ALTER TABLE sync_runs ADD COLUMN IF NOT EXISTS consecutive_failures "
-            "INTEGER NOT NULL DEFAULT 0"
-        )
-    # 8. Add repo_index_state table for pull-type sync tracking (#236)
+    finished_at_not_null = sync_runs_columns.get("finished_at", False)
+    missing_attempt_cols = [
+        col
+        for col in ("last_attempt_at", "last_error", "consecutive_failures")
+        if col not in sync_runs_columns
+    ]
+    if finished_at_not_null or missing_attempt_cols:
+        with conn.cursor() as cur:
+            if finished_at_not_null:
+                cur.execute("ALTER TABLE sync_runs ALTER COLUMN finished_at DROP NOT NULL")
+            if "last_attempt_at" in missing_attempt_cols:
+                cur.execute("ALTER TABLE sync_runs ADD COLUMN IF NOT EXISTS last_attempt_at TIMESTAMPTZ")
+            if "last_error" in missing_attempt_cols:
+                cur.execute("ALTER TABLE sync_runs ADD COLUMN IF NOT EXISTS last_error TEXT")
+            if "consecutive_failures" in missing_attempt_cols:
+                cur.execute(
+                    "ALTER TABLE sync_runs ADD COLUMN IF NOT EXISTS consecutive_failures "
+                    "INTEGER NOT NULL DEFAULT 0"
+                )
+        conn.commit()
+        ran_any = True
+        log.info("migrate: executed sync_runs attempt-tracking columns")
+
+    # 7. Add repo_index_state table for pull-type sync tracking (#236) --
+    # already probes to_regclass (ACCESS SHARE); left as-is.
     with conn.cursor() as cur:
         cur.execute("SELECT to_regclass('repo_index_state')")
         row = cur.fetchone()
@@ -276,26 +388,59 @@ def _run_alter_statements(conn: psycopg.Connection) -> None:
                 )
                 """
             )
+            ran_any = True
+            log.info("migrate: executed repo_index_state table create")
     conn.commit()
 
-    # 9. Add indexed_at to issue_items for incremental indexing (#318)
-    with conn.cursor() as cur:
-        cur.execute("ALTER TABLE issue_items ADD COLUMN IF NOT EXISTS indexed_at TIMESTAMPTZ")
-    conn.commit()
+    # 8. issue_items columns: indexed_at (#318), labels (#165)
+    issue_items_columns = _existing_columns(conn, "issue_items")
+    missing_issue_items_cols = [
+        (col, typ)
+        for col, typ in [("indexed_at", "TIMESTAMPTZ"), ("labels", "TEXT[]")]
+        if col not in issue_items_columns
+    ]
+    if missing_issue_items_cols:
+        with conn.cursor() as cur:
+            for col, typ in missing_issue_items_cols:
+                cur.execute(f"ALTER TABLE issue_items ADD COLUMN IF NOT EXISTS {col} {typ}")  # type: ignore[arg-type]
+        conn.commit()
+        ran_any = True
+        log.info(
+            "migrate: executed issue_items columns %s", [c for c, _ in missing_issue_items_cols]
+        )
 
-    # 10. Add labels to issue_items for label-based search filtering (#165)
-    with conn.cursor() as cur:
-        cur.execute("ALTER TABLE issue_items ADD COLUMN IF NOT EXISTS labels TEXT[]")
-    conn.commit()
+    if not ran_any:
+        log.info("schema up to date (no DDL executed)")
 
 
 def migrate_light(conn: psycopg.Connection, settings: Settings) -> None:
-    """Create tables, constraints, and btree indexes only. Skip HNSW/pgroonga (issue #72)."""
+    """Create tables, constraints, and btree indexes only. Skip HNSW/pgroonga (issue #72).
+
+    Bounds the DDL body (SCHEMA_SQL + catalog-guarded ALTERs) with a short
+    ``lock_timeout`` (issue #362): a long-held lock elsewhere (e.g. a
+    multi-hour ``CREATE INDEX ... USING hnsw``) must make this crash loudly
+    within seconds instead of queuing silently behind it -- Postgres lock
+    queues are FIFO, so a stuck request here blocks every later one,
+    including plain reads. On timeout the psycopg error propagates
+    unmodified: no retry, no swallow. The RESET below only runs on the
+    success path -- resetting inside an already-failed transaction would
+    itself raise and mask the real error -- and the timeout must not leak
+    into create_heavy_indexes, which runs later on the same connection.
+    """
+    with conn.cursor() as cur:
+        cur.execute(sql.SQL("SET lock_timeout = {}").format(sql.Literal(_DDL_LOCK_TIMEOUT)))
+    conn.commit()
+
     with conn.cursor() as cur:
         from shiori.config import EMBEDDING_DIM as _EMBEDDING_DIM
         cur.execute(SCHEMA_SQL.format(dim=_EMBEDDING_DIM))  # type: ignore[arg-type]
     conn.commit()
+
     _run_alter_statements(conn)
+
+    with conn.cursor() as cur:
+        cur.execute("RESET lock_timeout")
+    conn.commit()
 
 
 def _create_pgroonga_index(conn: psycopg.Connection, index_name: str, column: str) -> None:
