@@ -75,12 +75,34 @@ or in tests. Typical invocation, using the app image (which already has the
 `[onnx]` extra; most host venvs don't):
 
 ```
-docker compose run --rm app python scripts/build_onnx_model.py
+docker compose run --rm \
+  -v "$PWD/scripts:/app/scripts:ro" \
+  -v "$PWD/models:/models-out" \
+  -e HF_HUB_OFFLINE=0 -e HF_HOME=/tmp/hf \
+  app python scripts/build_onnx_model.py --output /models-out/onnx/e5-small-int8
 ```
 
-`docker-compose.yml` bind-mounts `./models:/models:ro` into both the `app`
-and `ingest` services; `models/` is gitignored, so the artifact stays a
-local/host concern.
+The three extra flags exist because (verified 2026-07-28): the app image
+does not contain `scripts/`, the compose `/models/onnx` mount is read-only,
+and the image bakes `HF_HUB_OFFLINE=1` (#238) with `HF_HOME=/models`.
+
+`docker-compose.yml` bind-mounts `./models/onnx:/models/onnx:ro` into both
+the `app` and `ingest` services -- **only the onnx subdirectory, never the
+whole `/models`**: the app image bakes its SentenceTransformer cache into
+`/models` (`HF_HOME=/models`, #238), and a whole-directory bind shadows that
+cache with the (initially empty) host directory, breaking embedding
+initialization entirely under `HF_HUB_OFFLINE=1` (real incident,
+2026-07-28). `models/` is gitignored, so the artifact stays a local/host
+concern.
+
+**Measured reality (2026-07-28, WSL2 host, app container CPU torch).**
+Quantization fidelity is fine (cos(ONNX, ST) 0.987-0.991), but INT8 did
+NOT beat plain torch on this hardware: single query 14.6ms vs 13.1ms
+(0.90x), batch-128 passages 57/s vs 67/s (0.85x) -- likely torch's
+MKL/oneDNN vs untuned onnxruntime defaults. The production artifact is
+therefore parked (renamed `*.disabled`) until an onnxruntime-tuning pass
+shows a clear win; the wiring stays live and re-arms the moment a usable
+artifact appears at the resolved path.
 
 **Fallback behavior.** If a model is present at the resolved path but the
 `[onnx]` extra isn't installed, `_init_onnx()` raises `ImportError`

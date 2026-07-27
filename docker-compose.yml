@@ -95,7 +95,10 @@ services:
       - ./data:/data     # git クローン先 (ホスト可読 bind mount; 詳細設計/12)
       # ONNX INT8 モデル成果物 (scripts/build_onnx_model.py が生成; issue #353)。
       # 未生成なら models/ は空 -- Embedder は ONNX 不在として ST にフォールバックする。
-      - ./models:/models:ro
+      # /models 全体ではなく onnx サブディレクトリだけを bind する。app イメージは
+      # HF_HOME=/models にモデルキャッシュを焼き込んでおり (#238)、全体マウントは
+      # それを空のホスト dir で隠して埋め込み初期化を壊す（2026-07-28 の実障害）。
+      - ./models/onnx:/models/onnx:ro
       # mint socket はディレクトリごとマウントする(ファイル単位はNG; 詳細設計/15)。
       # SHIORI_MINT_SOCKET_DIR は dev-infra 等が override で差し替える想定。
       - ${SHIORI_MINT_SOCKET_DIR:-${XDG_RUNTIME_DIR}/mcp-token}:/run/shiori:rw
@@ -131,7 +134,10 @@ services:
       - ./data:/data
       # CPU 常時稼働レーン向け ONNX INT8 成果物 (issue #353)。GPU overlay は
       # SHIORI_ONNX_MODEL_PATH="" でこの成果物があっても ONNX を明示的に無効化する。
-      - ./models:/models:ro
+      # /models 全体ではなく onnx サブディレクトリだけを bind する。app イメージは
+      # HF_HOME=/models にモデルキャッシュを焼き込んでおり (#238)、全体マウントは
+      # それを空のホスト dir で隠して埋め込み初期化を壊す（2026-07-28 の実障害）。
+      - ./models/onnx:/models/onnx:ro
       - ${SHIORI_MINT_SOCKET_DIR:-${XDG_RUNTIME_DIR}/mcp-token}:/run/shiori:rw
     depends_on:
       db:
