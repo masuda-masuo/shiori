@@ -21,6 +21,8 @@ def grep_search(
     """Grep clone files with ripgrep. Stage-2 search after shiori_search/keyword_search
     narrowed down the target file. Returns line-level matches.
 
+    Data sources: clone on disk (_ensure_phase1 refreshes each repo before grepping).
+
     When repo="*", search across all configured repositories.
     Each match includes a "repo" field identifying the source repository.
 

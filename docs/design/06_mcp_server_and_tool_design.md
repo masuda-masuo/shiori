@@ -54,3 +54,32 @@ The `warnings` list in `shiori_status` automatically identifies the following sy
 *   `shiori_read_pr_file` is created to fetch file contents at PR head without modifying the main branch (Issue #81).
 *   `shiori_grep` supports cross-repository searches via `repo="*"` (Issue #151).
 *   `shiori_grep` defaults `regex` to `True` to match developer habits. Fixed-string matching is supported by passing `regex=False` (Issue #152).
+
+---
+
+## 6. Tool-Contract Map (Issue #340)
+
+Every registered tool's *precise* data-source contract lives in its own docstring, as a
+one-line `Data sources:` sentence in the visible part of the description (i.e. before any
+`Args:` section -- FastMCP drops everything from `Args:` onward from the tool description
+surfaced to the model, per Issue #550). `tests/test_tool_contracts.py` enumerates the live
+FastMCP registry and fails if any tool is missing that line. The table below is the
+category-level summary; it does not replace the per-tool docstrings.
+
+| Category | Tools | Needs |
+|---|---|---|
+| ① search | `shiori_search`, `shiori_keyword_search` | search index (chunks) -- embedding required |
+| ②a GitHub REST API | `shiori_read_issue`, `shiori_pr_review_comments`, `shiori_issue_links` | GitHub REST API, live on every call; `issue_items` only as optional enrichment |
+| ②b PR-head git fetch | `shiori_pr_changes`, `shiori_pr_diff`, `shiori_read_pr_file` | own `git fetch` of the PR head/base ref against the on-disk clone -- neither the Phase 1 refresh nor the REST API |
+| ③ clone read | `shiori_read_file`, `shiori_grep`, `shiori_list_tree` | clone on disk (`_ensure_phase1`); exception: `shiori_list_tree(source_type='doc')` reads the `doc_files` index instead of walking the clone |
+| ④ state | `shiori_status`, `shiori_report` | DB metadata (`shiori_report` also refreshes the clone, and reads the search index for its `api_reference` template) |
+
+Frozen design decisions (ratified in Issue #340/#347; do not re-litigate without a new issue):
+
+*   Category ②a stays API-direct. There is no caching layer for it, and none is planned;
+    `issue_items` remains supplementary enrichment only (currently exercised by
+    `shiori_issue_links` for target titles and inbound refs), never the primary source.
+*   Neither ②a nor ②b calls `_ensure_phase1`. ②b's git fetch is its own contract,
+    documented in each tool's own docstring; it starts from the clone but does not
+    perform the Phase 1 refresh.
+*   Category ③ (plus `shiori_report`) keep `_ensure_phase1`.

@@ -31,6 +31,7 @@ def read_file(
 ) -> dict[str, Any]:
     """Read full file (or range) from clone (not index).
     PR head files via read_pr_file or GitHub MCP.
+    Data sources: clone on disk (_ensure_phase1 refreshes it before reading).
     repo: "owner/name", or a short name if it uniquely matches one
           configured (indexed) repo (e.g. "shiori" -> "owner/shiori").
           Omit for the default configured repo."""
@@ -204,6 +205,7 @@ def read_issue(
     numbers: list[int] | None = None,
 ) -> dict[str, Any] | list[dict[str, Any]]:
     """Fetch full issue/PR thread chronologically (body + comments + review).
+    Data sources: GitHub API (live); no clone/index read. Does not call _ensure_phase1.
     Bot comments included (identifiable via is_bot).
     Each item has a state field: for kind='pr_review' it is the review
     submission state (APPROVED/COMMENTED/CHANGES_REQUESTED); for other
@@ -248,6 +250,7 @@ def read_pr_file(
     repo: str | None = None,
 ) -> dict[str, Any]:
     """Read PR head file content (or range). Delegated from read_file with PR-specific fetch.
+    Data sources: own git fetch of the PR head ref against the clone; not _ensure_phase1.
     repo: "owner/name", or a short name if it uniquely matches one
           configured (indexed) repo (e.g. "shiori" -> "owner/shiori").
           Omit for the default configured repo."""

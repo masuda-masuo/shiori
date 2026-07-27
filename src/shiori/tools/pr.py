@@ -28,6 +28,7 @@ def pr_changes(
     include_diff: bool = False,
 ) -> dict[str, Any]:
     """PR change file map computed from git clone (issue #259).
+    Data sources: live git fetch of PR head + base against the clone; no cache, no index.
     Uses git diff --name-status + --numstat to build the file list.
     blob_url is omitted because it cannot be computed from git alone.
     repo: "owner/name", or a short name if it uniquely matches one
@@ -190,6 +191,8 @@ def pr_diff(
 ) -> dict[str, Any]:
     """Return PR diff (issue #96).
 
+    Data sources: live git fetch of PR head + base against the clone; no cache, no index.
+
     Computes the unified diff between PR head and base using git diff.
     Returns per-file diffs. When path is given, returns diff for that file only.
 
@@ -212,6 +215,8 @@ def pr_diff(
 @mcp.tool(name="shiori_pr_review_comments")
 def pr_review_comments(number: int, repo: str | None = None) -> dict[str, Any]:
     """Return PR review comments (issue #96).
+
+    Data sources: GitHub API (live, PR review comments endpoint); no clone, no index.
 
     Fetches from GitHub Pull Request Review Comments API directly.
     Includes file path, line number, body, author, and timestamps.

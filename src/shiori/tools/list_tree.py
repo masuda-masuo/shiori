@@ -22,6 +22,7 @@ def list_tree(
 ) -> list[dict[str, Any]]:
     """List indexed doc/code file paths. Filter by path/source_type/extension.
     Understand repo structure and locate files.
+    Data sources: doc_files index for docs; clone on disk (_ensure_phase1) for code.
     repo: "owner/name", or a short name if it uniquely matches one
           configured (indexed) repo (e.g. "shiori" -> "owner/shiori").
           Omit for the default configured repo."""

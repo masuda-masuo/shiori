@@ -30,6 +30,7 @@ def semantic_search(
 ) -> list[dict[str, Any]]:
     """Semantic search (entry). Strong for paraphrasing, concept, cross-lingual queries.
     Hybrid with keyword search internally.
+    Data sources: search index (embeddings, pgvector); needs ingest, stale if timers are off.
     labels: filter by GitHub issue labels (match-any semantics). Only affects
             issue/pr_review source_types; doc/code results are excluded when
             labels filter is active (issue #165).
@@ -68,6 +69,7 @@ def keyword_search(
     """Keyword search (Japanese tokenize). Strong for exact matches: function names, API names, error codes, config keys.
     Multi-token queries use OR matching by default (any token can match); tokens that match more/strongly rank higher.
     Pass match_all=True for AND behavior (all tokens must match the same chunk).
+    Data sources: search index (chunks, full-text); needs ingest, stale if timers are off.
     labels: filter by GitHub issue labels (match-any semantics). Only affects
             issue/pr_review source_types; doc/code results are excluded when
             labels filter is active (issue #165).
