@@ -46,7 +46,16 @@ _BULK_BUFFER_SIZE = 500
 
 
 def _is_bulk_path(conn, rebuild: bool) -> bool:
-    """Determine if bulk path: rebuild=True or chunks table empty/missing."""
+    """Determine if bulk path: rebuild=True, chunks table empty/missing, or
+    the HNSW index is absent (issue #352).
+
+    Heavy-index absence is the persistent, DB-derived marker of a drain in
+    progress (e.g. a ``reindex`` that dropped the heavy indexes and is
+    working through the bulk chunk/embed pass, possibly across several
+    invocations). While it is absent, every ``index``/``run`` invocation
+    stays on the bulk path (deferred heavy indexes); only a run that
+    completes successfully rebuilds them once, at the end.
+    """
     if rebuild:
         return True
     with conn.cursor() as cur:
@@ -56,7 +65,23 @@ def _is_bulk_path(conn, rebuild: bool) -> bool:
             return True
         cur.execute("SELECT count(*) FROM chunks")
         row = cur.fetchone()
-        return row is not None and row[0] == 0
+        if row is not None and row[0] == 0:
+            return True
+        cur.execute("SELECT to_regclass('chunks_embedding_hnsw')")
+        row = cur.fetchone()
+        return row is not None and row[0] is None
+
+
+def _bulk_covers_all_repos(targets: list[str], settings: Settings) -> bool:
+    """True when a bulk run covered every configured repo (issue #352).
+
+    Only such a run may rebuild the heavy indexes at its end: a scoped bulk
+    run during a drain (e.g. refreshing one dev repo while a reindex works
+    through a large ref backlog) must keep deferring them -- rebuilding
+    early triggers an hours-long index build over partial data and flips
+    every later invocation off the fast bulk path.
+    """
+    return bool(settings.repos) and set(targets) >= set(settings.repos)
 
 
 def run_forget(
@@ -287,7 +312,10 @@ def run_fetch(
     explicit_repos = repos is not None
     _cb_conn = db.connect(settings)
     try:
-        schema.migrate(_cb_conn, settings)
+        # fetch only writes issue_items/sync_state -- never needs heavy
+        # indexes, and a full migrate() here would resurrect them mid-drain
+        # if a reindex (#352) had dropped them (issue #352).
+        schema.migrate_light(_cb_conn, settings)
         _cb_skipped: list[str] = []
         _active_targets: list[str] = []
         for repo in targets:
@@ -310,7 +338,7 @@ def run_fetch(
     def _fetch_one(repo: str) -> None:
         """Fetch a single repo (docs + issues) in its own DB connection."""
         conn = db.connect(settings)
-        schema.migrate(conn, settings)
+        schema.migrate_light(conn, settings)
         try:
             if not _acquire_repo_lock(conn, repo):
                 log.info("fetch %s: skipped (sync already running for this repo)", repo)
@@ -492,10 +520,18 @@ def run_index(
 
     # --- Bulk path: create heavy indexes in batch ---
     if is_bulk:
-        t0 = time.monotonic()
-        schema.create_heavy_indexes(conn)
-        t_idx = time.monotonic() - t0
-        log.info("heavy indexes created (%.1fs)", t_idx)
+        if _bulk_covers_all_repos(targets, settings):
+            t0 = time.monotonic()
+            schema.create_heavy_indexes(conn, settings)
+            t_idx = time.monotonic() - t0
+            log.info("heavy indexes created (%.1fs)", t_idx)
+        else:
+            log.info(
+                "heavy indexes deferred: scoped bulk run (%d/%d repos); "
+                "an unscoped `ingest index --all` rebuilds them once the "
+                "drain completes",
+                len(targets), len(settings.repos),
+            )
 
     with conn.cursor() as cur:
         cur.execute(
@@ -514,6 +550,65 @@ def run_index(
         )
 
     conn.close()
+
+
+# ── run_reindex: rebuild chunks while preserving fetched raw data (#352) ───
+
+
+def run_reindex(
+    settings: Settings | None = None,
+    repos: list[str] | None = None,
+) -> None:
+    """Rebuild the ``chunks`` table (re-chunk + re-embed) while preserving
+    fetched raw data (issue #352).
+
+    Unlike ``--rebuild`` (which truncates ``issue_items``, ``sync_state``,
+    ``sync_runs``, and ``repo_index_state`` -- destroying cursors and forcing
+    a full, rate-limited re-fetch), ``reindex`` only clears the derived
+    ``chunks`` and ``doc_files`` tables:
+
+    - ``chunks`` is truncated/deleted outright -- it holds nothing but
+      derived embeddings.
+    - ``doc_files`` (a path+sha cache, not the content itself) is deleted so
+      every doc/code file re-chunks from the on-disk clone with no network
+      fetch.
+    - ``issue_items`` rows are kept; only ``indexed_at`` is reset to NULL so
+      ``index_issues`` re-embeds them (issue #318's incremental logic
+      otherwise re-indexes nothing once chunks are gone).
+    - ``sync_state`` (fetch cursors), ``sync_runs``, and ``repo_index_state``
+      are untouched -- reindex never re-fetches from GitHub.
+
+    ``repos=None`` reindexes every configured repo (unscoped ``TRUNCATE``).
+    ``repos=[...]`` scopes the clear to those repos only.
+
+    After clearing, the heavy indexes (HNSW/pgroonga) are dropped and the
+    existing ``index`` phase (``run_index``) runs for the same scope: it
+    detects the bulk path automatically via the now-absent HNSW index
+    (``_is_bulk_path``) and rebuilds the heavy indexes once, on success.
+
+    A reindex killed mid-drain is resumed with ``shiori ingest index --all``
+    -- there is no separate resume mechanism. While the heavy indexes stay
+    absent, every ``index``/``run`` invocation (CLI or MCP) keeps deferring
+    them, so nothing needs to remember that a reindex was in progress; only
+    an invocation that covers every configured repo rebuilds them at its end
+    (``_bulk_covers_all_repos``).
+    """
+    settings = settings or load_settings()
+    # Validates --repo against SHIORI_REPOS and requires SHIORI_REPOS to be
+    # set when unscoped; the *original* repos (None vs list) is what decides
+    # scoping below, so it is not overwritten with the resolved target list.
+    _validate_repos(repos, settings)
+
+    conn = db.connect(settings)
+    try:
+        schema.migrate_light(conn, settings)
+        schema.reindex_prepare(conn, repos)
+        conn.commit()
+        schema.drop_heavy_indexes(conn)
+    finally:
+        conn.close()
+
+    run_index(settings=settings, repos=repos)
 
 
 # ── run_ingest (combined fetch + index) — backward compatible ────────────
@@ -763,10 +858,18 @@ def run_ingest(
 
     # --- Bulk path: create heavy indexes in batch ---
     if is_bulk:
-        t0 = time.monotonic()
-        schema.create_heavy_indexes(conn)
-        t_idx = time.monotonic() - t0
-        log.info("heavy indexes created (%.1fs)", t_idx)
+        if _bulk_covers_all_repos(targets, settings):
+            t0 = time.monotonic()
+            schema.create_heavy_indexes(conn, settings)
+            t_idx = time.monotonic() - t0
+            log.info("heavy indexes created (%.1fs)", t_idx)
+        else:
+            log.info(
+                "heavy indexes deferred: scoped bulk run (%d/%d repos); "
+                "an unscoped `ingest index --all` rebuilds them once the "
+                "drain completes",
+                len(targets), len(settings.repos),
+            )
 
     with conn.cursor() as cur:
         cur.execute(

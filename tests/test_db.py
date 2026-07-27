@@ -83,9 +83,10 @@ class TestCreateHeavyIndexes:
 
     def test_creates_hnsw_and_pgroonga_indexes(self):
         """create_heavy_indexes は HNSW と pgroonga(content/symbols) を作成する。"""
+        from shiori.config import Settings
         conn, cursor = self._mock_conn()
 
-        create_heavy_indexes(conn)
+        create_heavy_indexes(conn, Settings())
 
         executed_sqls = [
             str(call_args[0][0])
