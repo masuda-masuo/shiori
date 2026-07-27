@@ -21,6 +21,11 @@ services:
 
   ingest:
     runtime: nvidia
+    # ONNX 明示 off-switch (issue #353): /models に成果物があっても、GPU 稼働時は
+    # SentenceTransformer/CUDA を使い続ける。_resolve_onnx_path() は空文字列を
+    # 「未設定なので既定パスを探す」ではなく「明示的に無効化」と解釈する。
+    environment:
+      SHIORI_ONNX_MODEL_PATH: ""
     deploy:
       resources:
         reservations:

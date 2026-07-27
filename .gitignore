@@ -26,3 +26,5 @@ target/
 .next/
 # repos クローンの bind mount 先 (docker-compose.yml)
 /data/
+# ONNX INT8 モデル成果物 (scripts/build_onnx_model.py が生成; issue #353)
+/models/

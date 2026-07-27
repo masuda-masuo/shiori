@@ -16,6 +16,10 @@ dependencies = [
 
 [project.optional-dependencies]
 embed = ["sentence-transformers>=3.0"]
+# ONNX Runtime INT8 CPU-inference path (issue #353). Deliberately kept out of
+# [embed] and [dev]: it pulls optimum + onnxruntime, which are not needed to
+# run the SentenceTransformer fallback or the test suite.
+onnx = ["optimum[onnxruntime]>=1.16"]
 dev = ["pytest>=8.0"]
 
 [build-system]
@@ -27,3 +31,13 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 shiori = ["dashboard_dist/**"]
+
+# Note on pyright (#353): the optional [embed]/[onnx] extras
+# (sentence-transformers, optimum, onnxruntime, transformers) are absent by
+# design in [dev] installs, so their three import sites in
+# src/shiori/embedding.py carry inline `# pyright: ignore[reportMissingImports]`
+# directives. Inline (not a [tool.pyright] demotion) keeps the suppression
+# scoped to exactly those lines -- a typo'd import anywhere else still fails
+# the type gate as an error -- and works regardless of the caller's cwd
+# (pyright's config-file discovery is cwd-based and not every gate runner
+# starts inside the repo).
