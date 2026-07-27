@@ -134,6 +134,9 @@ class TestStatusCodeChunks:
             patch("shiori.tools.status.db.get_cursors", return_value={}),
         ):
             mock_settings.repos = ["o/r"]
+            mock_settings.dev_repos = set()
+            mock_settings.dev_sync_interval_seconds = 900
+            mock_settings.ref_sync_interval_seconds = 86400
             mock_settings.sync_interval_seconds = 300
             result = status()
 
@@ -154,6 +157,9 @@ class TestStatusCodeChunks:
             patch("shiori.tools.status.db.get_cursors", return_value={}),
         ):
             mock_settings.repos = ["o/r"]
+            mock_settings.dev_repos = set()
+            mock_settings.dev_sync_interval_seconds = 900
+            mock_settings.ref_sync_interval_seconds = 86400
             mock_settings.sync_interval_seconds = 300
             result = status()
 
@@ -192,6 +198,9 @@ class TestStatusCodeAdded:
             patch("shiori.tools.status.db.get_cursors", return_value={}),
         ):
             mock_settings.repos = ["o/r"]
+            mock_settings.dev_repos = set()
+            mock_settings.dev_sync_interval_seconds = 900
+            mock_settings.ref_sync_interval_seconds = 86400
             mock_settings.dev_repos = {"o/r"}
             mock_settings.sync_interval_seconds = 300
             result = status()
@@ -215,6 +224,9 @@ class TestStatusCodeAdded:
             patch("shiori.tools.status.db.get_cursors", return_value={}),
         ):
             mock_settings.repos = ["o/r"]
+            mock_settings.dev_repos = set()
+            mock_settings.dev_sync_interval_seconds = 900
+            mock_settings.ref_sync_interval_seconds = 86400
             mock_settings.dev_repos = set()
             mock_settings.sync_interval_seconds = 300
             result = status()
@@ -244,6 +256,9 @@ class TestStatusTokenProvider:
             patch("shiori.tools.status.db.get_all_repo_index_state", return_value={}),
         ):
             mock_settings.repos = ["o/r"]
+            mock_settings.dev_repos = set()
+            mock_settings.dev_sync_interval_seconds = 900
+            mock_settings.ref_sync_interval_seconds = 86400
             mock_settings.sync_interval_seconds = 0
             return status()
 
@@ -282,6 +297,9 @@ class TestStatusTokenProviderError:
             ),
         ):
             mock_settings.repos = ["o/r"]
+            mock_settings.dev_repos = set()
+            mock_settings.dev_sync_interval_seconds = 900
+            mock_settings.ref_sync_interval_seconds = 86400
             mock_settings.sync_interval_seconds = 0
             return status()
 
@@ -313,6 +331,9 @@ class TestStatusTokenProviderError:
             patch("shiori.tools.status.build_token_provider", return_value=mock_provider),
         ):
             mock_settings.repos = ["o/r"]
+            mock_settings.dev_repos = set()
+            mock_settings.dev_sync_interval_seconds = 900
+            mock_settings.ref_sync_interval_seconds = 86400
             mock_settings.sync_interval_seconds = 0
             result = status()
         assert result["token_provider"] == "token_socket"

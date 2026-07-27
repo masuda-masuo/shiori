@@ -16,15 +16,24 @@ mkdir -p "$USER_UNIT_DIR"
 
 sed "s|@SHIORI_DIR@|$SHIORI_DIR|g" "$SCRIPT_DIR/shiori.service" > "$USER_UNIT_DIR/shiori.service"
 
+# Steady-sync timer units (issue #347): dev repos ~15min, ref repos daily.
+for unit in shiori-ingest-dev shiori-ingest-ref; do
+  sed "s|@SHIORI_DIR@|$SHIORI_DIR|g" "$SCRIPT_DIR/systemd/$unit.service" > "$USER_UNIT_DIR/$unit.service"
+  cp "$SCRIPT_DIR/systemd/$unit.timer" "$USER_UNIT_DIR/$unit.timer"
+done
+
 systemctl --user daemon-reload
 
 systemctl --user enable --now shiori.service
+systemctl --user enable --now shiori-ingest-dev.timer shiori-ingest-ref.timer
 
 echo ""
 echo "==> Done.  Useful commands:"
 echo "    systemctl --user status shiori"
 echo "    systemctl --user stop shiori"
 echo "    journalctl --user -u shiori -f"
+echo "    systemctl --user list-timers 'shiori-ingest-*'"
+echo "    journalctl --user -u shiori-ingest-dev -f"
 echo ""
 echo "NOTE: this only installs shiori.service.  Shiori does not own a mint-"
 echo "      socket unit -- if you need GITHUB_TOKEN_SOCKET for private repos,"

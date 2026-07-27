@@ -8,18 +8,35 @@ from ..pipeline import _conn, settings
 from .. import db
 from ..github_auth import build_token_provider
 
-_STALE_SECONDS = 86400
-_STALE_INTERVAL_MULTIPLIER = 30
+# Floor on the derived staleness threshold (seconds): a misconfigured
+# near-zero timer interval must not make every repo look permanently stale.
 _STALE_SECONDS_FLOOR = 300
 
 
-def _stale_threshold_seconds() -> int:
-    if settings.sync_interval_seconds > 0:
-        return max(
-            settings.sync_interval_seconds * _STALE_INTERVAL_MULTIPLIER,
-            _STALE_SECONDS_FLOOR,
-        )
-    return _STALE_SECONDS
+def _expected_sync_interval_seconds(repo: str) -> int:
+    """Return the EXPECTED host-timer cadence (seconds) for *repo*'s role.
+
+    Dev repos (in settings.dev_repos) are covered by the ~15-minute timer
+    (SHIORI_DEV_SYNC_INTERVAL_SECONDS); everything else is a ref repo,
+    covered by the daily timer (SHIORI_REF_SYNC_INTERVAL_SECONDS). These
+    values document the cadence of the host-level systemd timers (issue
+    #347) -- no in-server component observes or enforces them.
+    """
+    if repo in settings.dev_repos:
+        return settings.dev_sync_interval_seconds
+    return settings.ref_sync_interval_seconds
+
+
+def _stale_threshold_seconds(repo: str) -> int:
+    """Role-aware staleness threshold for *repo*: 2x its expected timer
+    cadence, floored at _STALE_SECONDS_FLOOR (issue #347).
+
+    Supersedes the old single sync_interval_seconds-derived formula (issue
+    #187): sync_interval_seconds configures the Phase-1 clone refresh
+    debounce, not any index sync cadence, so deriving a staleness threshold
+    from it reported a fictional cadence.
+    """
+    return max(_expected_sync_interval_seconds(repo) * 2, _STALE_SECONDS_FLOOR)
 
 
 def _build_warnings(
@@ -27,6 +44,7 @@ def _build_warnings(
     chunk_counts: dict[str, int],
     items_in_db: int,
     cursors: dict[str, str | None],
+    stale_threshold_seconds: int,
 ) -> list[str]:
     warnings: list[str] = []
 
@@ -43,11 +61,11 @@ def _build_warnings(
         )
 
     age = info.get("age_seconds")
-    threshold = _stale_threshold_seconds()
-    if age is not None and age > threshold:
+    if age is not None and age > stale_threshold_seconds:
         hours = age // 3600
         warnings.append(
-            f"{hours} hours since last sync (threshold {threshold}s). Index may be stale"
+            f"{hours} hours since last sync (threshold {stale_threshold_seconds}s). "
+            "Index may be stale"
         )
 
     consecutive_failures = info.get("consecutive_failures") or 0
@@ -147,12 +165,20 @@ def status(repo: str | None = None) -> dict[str, Any]:
             info["role"] = "dev" if target_repo in settings.dev_repos else "ref"
             info["code_indexed"] = chunk_counts.get("code", 0) > 0
             info["token_provider_error"] = token_provider_error
-            warnings = _build_warnings(info, chunk_counts, items_in_db, cursors)
+            info["expected_sync_interval_seconds"] = _expected_sync_interval_seconds(
+                target_repo
+            )
+            threshold = _stale_threshold_seconds(target_repo)
+            warnings = _build_warnings(info, chunk_counts, items_in_db, cursors, threshold)
             info.pop("token_provider_error", None)
             info["warnings"] = warnings
             repos[target_repo] = info
     return {
         "repos": repos,
-        "sync_interval_seconds": settings.sync_interval_seconds,
+        "clone_refresh_debounce_seconds": settings.sync_interval_seconds,
+        "sync_intervals": {
+            "dev": settings.dev_sync_interval_seconds,
+            "ref": settings.ref_sync_interval_seconds,
+        },
         "token_provider": token_provider,
     }

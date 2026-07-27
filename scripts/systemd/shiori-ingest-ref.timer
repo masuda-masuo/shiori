@@ -1,0 +1,9 @@
+[Unit]
+Description=shiori steady sync timer: ref repos daily (issue #347)
+
+[Timer]
+OnCalendar=*-*-* 04:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -109,6 +109,22 @@ class Settings:
             os.environ.get("SHIORI_SYNC_INTERVAL_SECONDS", "0")
         )
     )
+    # --- Steady sync (issue #347): EXPECTED host-timer cadence ---
+    # These document the cadence of the two host-level systemd user timers
+    # (scripts/systemd/) that call the CLI with --only-dev / --only-ref --
+    # there is no in-server sync loop reading these values on a schedule.
+    # shiori_status uses them only to derive a role-aware staleness
+    # threshold (2x the expected interval; see tools/status.py).
+    dev_sync_interval_seconds: int = field(
+        default_factory=lambda: int(
+            os.environ.get("SHIORI_DEV_SYNC_INTERVAL_SECONDS", "900")
+        )
+    )
+    ref_sync_interval_seconds: int = field(
+        default_factory=lambda: int(
+            os.environ.get("SHIORI_REF_SYNC_INTERVAL_SECONDS", "86400")
+        )
+    )
     # MCP server (streamable HTTP)
     mcp_host: str = field(
         default_factory=lambda: os.environ.get("SHIORI_MCP_HOST", "0.0.0.0")

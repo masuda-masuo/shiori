@@ -34,6 +34,14 @@ def main() -> None:
     p_fetch.add_argument("--repo", action="append", default=argparse.SUPPRESS, help="owner/name (multiple allowed)")
     p_fetch.add_argument("--rebuild", action="store_true", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
     p_fetch.add_argument("--backfill-since", default=argparse.SUPPRESS, help="YYYY-MM-DD: seed cursors for initial backfill of new repos")
+    p_fetch.add_argument(
+        "--only-dev", action="store_true", default=argparse.SUPPRESS,
+        help="scope to configured dev repos (SHIORI_DEV_REPOS); mutually exclusive with --repo/--only-ref",
+    )
+    p_fetch.add_argument(
+        "--only-ref", action="store_true", default=argparse.SUPPRESS,
+        help="scope to configured ref repos (SHIORI_REPOS minus SHIORI_DEV_REPOS); mutually exclusive with --repo/--only-dev",
+    )
 
     # index
     p_index = ingest_sub.add_parser("index", help="chunk + embed from issue_items/doc_files")
@@ -46,12 +54,28 @@ def main() -> None:
         help="index every repo in SHIORI_REPOS "
              "(the resume path for a killed reindex drain, issue #352)",
     )
+    p_index.add_argument(
+        "--only-dev", action="store_true", default=argparse.SUPPRESS,
+        help="scope to configured dev repos (SHIORI_DEV_REPOS); mutually exclusive with --repo/--only-ref/--all",
+    )
+    p_index.add_argument(
+        "--only-ref", action="store_true", default=argparse.SUPPRESS,
+        help="scope to configured ref repos (SHIORI_REPOS minus SHIORI_DEV_REPOS); mutually exclusive with --repo/--only-dev/--all",
+    )
 
     # run
     p_run = ingest_sub.add_parser("run", help="fetch + index sequentially (default behavior)")
     p_run.add_argument("--repo", action="append", default=argparse.SUPPRESS, help="owner/name (multiple allowed)")
     p_run.add_argument("--rebuild", action="store_true", default=argparse.SUPPRESS, help="discard index and rebuild all")
     p_run.add_argument("--backfill-since", default=argparse.SUPPRESS, help="YYYY-MM-DD: seed cursors for initial backfill of new repos")
+    p_run.add_argument(
+        "--only-dev", action="store_true", default=argparse.SUPPRESS,
+        help="scope to configured dev repos (SHIORI_DEV_REPOS); mutually exclusive with --repo/--only-ref",
+    )
+    p_run.add_argument(
+        "--only-ref", action="store_true", default=argparse.SUPPRESS,
+        help="scope to configured ref repos (SHIORI_REPOS minus SHIORI_DEV_REPOS); mutually exclusive with --repo/--only-dev",
+    )
 
     # reindex (issue #352): rebuild chunks, keep fetched raw data
     p_reindex = ingest_sub.add_parser(
@@ -111,6 +135,19 @@ def main() -> None:
 
         ingest_action = getattr(args, "ingest_action", None)
         repos = getattr(args, "repo", None)
+        only_dev = getattr(args, "only_dev", False)
+        only_ref = getattr(args, "only_ref", False)
+        index_all = getattr(args, "all", False)
+
+        # --only-dev/--only-ref (issue #347): role selectors so timer units
+        # never hardcode repo lists. A selector IS a repo selection, so it is
+        # mutually exclusive with --repo, with each other, and with --all.
+        if only_dev and only_ref:
+            p_ingest.error("--only-dev and --only-ref are mutually exclusive")
+        if (only_dev or only_ref) and repos:
+            p_ingest.error("--only-dev/--only-ref and --repo are mutually exclusive")
+        if index_all and (only_dev or only_ref):
+            p_ingest.error("--all and --only-dev/--only-ref are mutually exclusive")
 
         # reindex is unscoped by default (repos=None reindexes every repo in
         # SHIORI_REPOS) -- unlike fetch/index/run (issue #338), it does not
@@ -122,12 +159,30 @@ def main() -> None:
         # `index --all` is the documented resume path for a killed reindex
         # drain (issue #352): unscoped on purpose, so it bypasses the --repo
         # guard below.
-        index_all = getattr(args, "all", False)
         if index_all and repos:
             p_ingest.error("--all and --repo are mutually exclusive")
         if ingest_action == "index" and index_all:
             run_index(repos=None, rebuild=getattr(args, "rebuild", False))
             return
+
+        if only_dev or only_ref:
+            from .config import load_settings
+
+            role_settings = load_settings()
+            if only_dev:
+                repos = [
+                    r for r in role_settings.repos if r in role_settings.dev_repos
+                ]
+                if not repos:
+                    p_ingest.error("no dev repos configured (SHIORI_DEV_REPOS is empty)")
+            else:
+                repos = [
+                    r for r in role_settings.repos if r not in role_settings.dev_repos
+                ]
+                if not repos:
+                    p_ingest.error(
+                        "no ref repos configured (all configured repos are dev repos)"
+                    )
 
         # Validate --repo: must be present somewhere (parent or subcommand)
         if not repos:
