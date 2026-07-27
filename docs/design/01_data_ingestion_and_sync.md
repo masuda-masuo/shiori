@@ -296,7 +296,110 @@ Comments by GitHub bots (`type=Bot` or name ending in `[bot]`) are excluded from
 
 ---
 
-## 17. Related Documents
+## 17. Bulk Reindex Mode: Rebuild Chunks While Preserving Raw Data (Issue #352)
+
+`shiori ingest reindex [--repo owner/name ...]` rebuilds the `chunks` table
+(re-chunk + re-embed) without discarding fetched raw data or forcing a
+re-fetch from GitHub. It exists because the only previous way to rebuild
+`chunks` was `--rebuild`, which also truncates `issue_items`, `sync_state`,
+`sync_runs`, and `repo_index_state` -- destroying fetch cursors and forcing a
+full, rate-limited re-fetch even when the raw data on disk/DB was still
+perfectly good.
+
+### What is preserved vs rebuilt
+
+| Table | reindex | `--rebuild` |
+|---|---|---|
+| `chunks` | Cleared (unscoped: `TRUNCATE`; scoped: `DELETE ... WHERE repo = ANY(...)`) | Truncated |
+| `doc_files` | Cleared (path+sha cache only -- content is the on-disk clone) | Truncated |
+| `issue_items` | Kept. Only `indexed_at` reset to `NULL` | Truncated |
+| `sync_state` (fetch cursors) | Untouched | Truncated |
+| `sync_runs`, `repo_index_state` | Untouched | Truncated |
+
+Resetting `issue_items.indexed_at` matters because of §9: once `indexed_at`
+tracking landed (issue #318), `index_issues()` only re-embeds rows where
+`indexed_at IS NULL OR updated_at > indexed_at`. Deleting chunks alone would
+re-index nothing for issues; clearing `doc_files` has the equivalent effect
+for docs/code, since a matching `content_sha` is what makes `index_docs` /
+`index_code` skip a file.
+
+`--repo` scopes the clear to specific repos; omitting it reindexes every
+repo in `SHIORI_REPOS` (unscoped `TRUNCATE`).
+
+### Bulk/drain lifecycle: heavy-index absence is the marker
+
+After clearing state, `reindex` drops the heavy indexes (HNSW, pgroonga) via
+`schema.drop_heavy_indexes()` and runs the existing `index` phase. `_is_bulk_path()`
+(§12) is extended to also return `True` whenever the HNSW index
+(`chunks_embedding_hnsw`) is absent, not only when `chunks` is empty/missing
+or `rebuild=True`. This makes "heavy indexes dropped" the persistent,
+DB-derived marker of a drain in progress: no new state table is needed, and
+every `ingest index` / `ingest run` invocation (CLI or MCP) stays on the
+deferred-index bulk path for as long as the marker holds. Only a run that
+completes successfully **and covered every configured repo**
+(`_bulk_covers_all_repos()`) rebuilds the heavy indexes once, at the end
+(`create_heavy_indexes()`). A scoped bulk run -- say, refreshing one dev repo
+while a large ref drain is in progress -- defers them and logs that it did,
+so it can neither trigger an hours-long index build over partial data nor
+flip later invocations off the fast bulk path.
+
+### Resuming a killed reindex
+
+A reindex killed mid-drain (container restart, OOM, etc.) is resumed with
+`shiori ingest index --all` -- there is no separate resume mechanism (the
+plain `index` subcommand requires `--repo` by design, issue #338, so `--all`
+is the explicit unscoped opt-in). Because
+heavy-index absence is itself the bulk-path marker, `index` picks the drain
+back up automatically; chunk inserts are `ON CONFLICT (chunk_key,
+chunk_index) DO UPDATE` (`src/shiori/db.py`), so replaying already-indexed
+items is a safe no-op.
+
+### Avoiding heavy-index resurrection mid-drain
+
+Two other code paths used to call the full `schema.migrate()` (which
+includes `create_heavy_indexes()`) unconditionally, which would rebuild the
+heavy indexes mid-drain the moment either ran:
+
+- `run_fetch` -- it only ever writes `issue_items`/`sync_state` and never
+  needs heavy indexes, so it now calls `schema.migrate_light()`.
+- MCP server startup (`mcp_server.run()`) -- a server restart during a
+  multi-hour drain used to trigger an hours-long HNSW rebuild at startup. It
+  now also calls `migrate_light()`; search still works without the heavy
+  indexes (just slower via sequential scan / no pgroonga), which is
+  acceptable for the duration of a drain.
+
+### Heavy-index build knobs and the /dev/shm trap
+
+pgvector's HNSW index build supports `PARALLEL` workers, which allocate
+roughly `maintenance_work_mem` of dynamic shared memory (DSM) per worker in
+`/dev/shm`. Docker's default `/dev/shm` size is 64MB, which a parallel build
+easily exceeds, failing with `could not resize shared memory segment ...
+No space left on device`. Two settings on `create_heavy_indexes()` control
+this:
+
+- `SHIORI_MAX_PARALLEL_MAINTENANCE_WORKERS` (default `0`): applied via `SET
+  max_parallel_maintenance_workers` before the `CREATE INDEX`. `0` forces a
+  serial build, which uses only backend-private memory and never touches
+  `/dev/shm` -- this is why it is the default rather than PostgreSQL's own
+  default.
+- `SHIORI_MAINTENANCE_WORK_MEM` (default unset): applied via `SET
+  maintenance_work_mem` only when configured; otherwise the PostgreSQL
+  server default is left alone.
+
+Measured effect of the heavy indexes on ingest throughput: 1,141 chunks/min
+with HNSW present vs 8,140 chunks/min without (7.1x) -- the reason the bulk
+path defers index creation at all (§12).
+
+### Caveat: heavy indexes are global
+
+The HNSW/pgroonga indexes cover the whole `chunks` table, not a single repo.
+During a drain -- including a scoped `reindex --repo X` -- search quality is
+degraded for **every** repo, not just the one being reindexed, until the
+drain completes and the heavy indexes are rebuilt.
+
+---
+
+## 18. Related Documents
 
 - [Clone Management & Integration](12_clone_management_and_integration.md) — Directory rules, shallow clone policies, and Git checkout boundaries.
 - [Setup Guide](../guides/setup.md) — Onboarding instructions for dev and reference setups.

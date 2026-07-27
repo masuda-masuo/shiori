@@ -39,12 +39,40 @@ def main() -> None:
     p_index = ingest_sub.add_parser("index", help="chunk + embed from issue_items/doc_files")
     p_index.add_argument("--repo", action="append", default=argparse.SUPPRESS, help="owner/name (multiple allowed)")
     p_index.add_argument("--rebuild", action="store_true", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
+    p_index.add_argument(
+        "--all",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="index every repo in SHIORI_REPOS "
+             "(the resume path for a killed reindex drain, issue #352)",
+    )
 
     # run
     p_run = ingest_sub.add_parser("run", help="fetch + index sequentially (default behavior)")
     p_run.add_argument("--repo", action="append", default=argparse.SUPPRESS, help="owner/name (multiple allowed)")
     p_run.add_argument("--rebuild", action="store_true", default=argparse.SUPPRESS, help="discard index and rebuild all")
     p_run.add_argument("--backfill-since", default=argparse.SUPPRESS, help="YYYY-MM-DD: seed cursors for initial backfill of new repos")
+
+    # reindex (issue #352): rebuild chunks, keep fetched raw data
+    p_reindex = ingest_sub.add_parser(
+        "reindex",
+        help="rebuild chunks (re-chunk + re-embed) while keeping fetched raw data",
+        description="""
+        Clears the chunks table (and the doc_files sha cache) and re-runs
+        the index phase, WITHOUT touching issue_items bodies/comments,
+        sync_state cursors, sync_runs, or repo_index_state -- so no GitHub
+        re-fetch is needed. --repo scopes to specific repos; omit --repo to
+        reindex every repo in SHIORI_REPOS.
+
+        A reindex killed mid-drain is resumed with 'shiori ingest index --all'.
+        """,
+    )
+    p_reindex.add_argument(
+        "--repo",
+        action="append",
+        default=argparse.SUPPRESS,
+        help="owner/name (multiple allowed); omit to reindex every configured repo",
+    )
 
     # Backward-compatible: ingest without subcommand uses the same args as run
     p_ingest.add_argument("--repo", action="append", help="owner/name (multiple allowed)")
@@ -79,15 +107,33 @@ def main() -> None:
 
     args = parser.parse_args()
     if args.command == "ingest":
-        from .ingest import run_fetch, run_index, run_ingest
+        from .ingest import run_fetch, run_index, run_ingest, run_reindex
+
+        ingest_action = getattr(args, "ingest_action", None)
+        repos = getattr(args, "repo", None)
+
+        # reindex is unscoped by default (repos=None reindexes every repo in
+        # SHIORI_REPOS) -- unlike fetch/index/run (issue #338), it does not
+        # require --repo.
+        if ingest_action == "reindex":
+            run_reindex(repos=repos)
+            return
+
+        # `index --all` is the documented resume path for a killed reindex
+        # drain (issue #352): unscoped on purpose, so it bypasses the --repo
+        # guard below.
+        index_all = getattr(args, "all", False)
+        if index_all and repos:
+            p_ingest.error("--all and --repo are mutually exclusive")
+        if ingest_action == "index" and index_all:
+            run_index(repos=None, rebuild=getattr(args, "rebuild", False))
+            return
 
         # Validate --repo: must be present somewhere (parent or subcommand)
-        repos = getattr(args, "repo", None)
         if not repos:
             p_ingest.error("the following arguments are required: --repo")
 
         # Route subcommands
-        ingest_action = getattr(args, "ingest_action", None)
         rebuild = getattr(args, "rebuild", False)
         backfill_since = getattr(args, "backfill_since", None)
 

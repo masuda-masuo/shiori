@@ -49,7 +49,16 @@ def _conn():
 
 
 def _is_bulk_path(conn, rebuild: bool) -> bool:
-    """Determine bulk path: rebuild=True or chunks table empty/missing (issue #72)."""
+    """Determine bulk path: rebuild=True, chunks table empty/missing, or the
+    HNSW index absent (issue #72; HNSW-absence check added by issue #352).
+
+    Kept in sync with ``shiori.ingest._is_bulk_path`` (duplicated rather than
+    imported -- this module predates the shared-helper extraction, see
+    issue #281). Heavy-index absence is the persistent, DB-derived marker of
+    a drain in progress (e.g. a CLI ``reindex``): while it lasts, an MCP
+    ``ingest()`` call must stay on the deferred-index bulk path too, or it
+    would resurrect the heavy indexes mid-drain via a plain ``schema.migrate``.
+    """
     if rebuild:
         return True
     with conn.cursor() as cur:
@@ -57,7 +66,10 @@ def _is_bulk_path(conn, rebuild: bool) -> bool:
         if cur.fetchone()[0] is None:
             return True
         cur.execute("SELECT count(*) FROM chunks")
-        return cur.fetchone()[0] == 0
+        if cur.fetchone()[0] == 0:
+            return True
+        cur.execute("SELECT to_regclass('chunks_embedding_hnsw')")
+        return cur.fetchone()[0] is None
 
 
 def _record_pre_loop_sync_failure(targets: list[str], error: str) -> None:
@@ -372,7 +384,16 @@ def _do_sync(
                         _release_repo_lock(conn, repo)
 
                 if is_bulk:
-                    schema.create_heavy_indexes(conn)
+                    # Mirrors ingest._bulk_covers_all_repos (issue #352): a
+                    # scoped bulk sync during a reindex drain must not rebuild
+                    # the heavy indexes early.
+                    if set(targets) >= set(settings.repos):
+                        schema.create_heavy_indexes(conn, settings)
+                    else:
+                        log.info(
+                            "heavy indexes deferred: scoped bulk sync (%d/%d repos)",
+                            len(targets), len(settings.repos),
+                        )
 
                 if failed_repos:
                     detail = "; ".join(f"{r}: {e}" for r, e in failed_repos.items())

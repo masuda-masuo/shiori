@@ -64,6 +64,12 @@ register_dashboard(mcp)
 
 def run(transport: Literal["stdio", "sse", "streamable-http"] = "streamable-http") -> None:
     with _conn() as conn:
-        schema.migrate(conn, settings)
+        # migrate_light only (issue #352): a full migrate() here would build
+        # HNSW/pgroonga on every server restart, which is an hours-long
+        # operation if a reindex/rebuild drain is in progress and had
+        # deliberately dropped the heavy indexes. Search still works without
+        # them (just slower); _do_sync/run_index rebuild them once a drain
+        # completes.
+        schema.migrate_light(conn, settings)
     log.info("shiori MCP server starting (%s), pull-type sync (#236)", transport)
     mcp.run(transport=transport)

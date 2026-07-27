@@ -33,6 +33,41 @@ def truncate_all_repos(conn: psycopg.Connection) -> None:
         )
 
 
+def reindex_prepare(conn: psycopg.Connection, repos: list[str] | None) -> None:
+    """Clear rebuildable index state for a bulk reindex while keeping raw data
+    (issue #352): rebuilds ``chunks`` (re-chunk + re-embed) without re-fetching
+    from GitHub.
+
+    Deletes only from ``chunks`` and ``doc_files`` -- ``doc_files`` is a
+    path+sha cache, not the content itself (the on-disk clone is), so
+    clearing it forces re-chunking with no network fetch. ``issue_items``
+    rows are preserved; only ``indexed_at`` is reset to NULL so
+    ``index_issues`` re-embeds them (issue #318 only re-indexes rows where
+    ``indexed_at IS NULL OR updated_at > indexed_at``).
+
+    ``sync_state`` (fetch cursors), ``sync_runs``, and ``repo_index_state``
+    are left untouched -- a reindex never re-fetches and never resets
+    freshness bookkeeping.
+
+    ``repos=None`` is unscoped (every repo, via ``TRUNCATE``).
+    ``repos=[...]`` scopes the delete/update to those repos only.
+
+    Caller commits (and is expected to follow with ``drop_heavy_indexes``).
+    """
+    with conn.cursor() as cur:
+        if repos is None:
+            cur.execute("TRUNCATE chunks")
+            cur.execute("UPDATE issue_items SET indexed_at = NULL")
+            cur.execute("DELETE FROM doc_files")
+        else:
+            cur.execute("DELETE FROM chunks WHERE repo = ANY(%s)", (repos,))
+            cur.execute(
+                "UPDATE issue_items SET indexed_at = NULL WHERE repo = ANY(%s)",
+                (repos,),
+            )
+            cur.execute("DELETE FROM doc_files WHERE repo = ANY(%s)", (repos,))
+
+
 def forget_repo(conn: psycopg.Connection, repo: str) -> dict[str, int]:
     """Drop every row belonging to *repo*. Returns rows deleted per table.
 
@@ -284,10 +319,31 @@ def _create_pgroonga_index(conn: psycopg.Connection, index_name: str, column: st
         log.info("pgroonga index created with default tokenizer (TokenBigram): %s", index_name)
 
 
-def create_heavy_indexes(conn: psycopg.Connection) -> None:
-    """Create HNSW and pgroonga indexes (issue #72). Avoided during bulk load."""
-    # pgvector: HNSW (cosine)
+def create_heavy_indexes(conn: psycopg.Connection, settings: Settings) -> None:
+    """Create HNSW and pgroonga indexes (issue #72). Avoided during bulk load.
+
+    Applies two build knobs (issue #352) before the ``CREATE INDEX``:
+
+    - ``max_parallel_maintenance_workers``: always set. Default 0 (serial
+      build) uses only backend-private memory and never touches
+      ``/dev/shm`` -- pgvector's PARALLEL HNSW build allocates roughly
+      ``maintenance_work_mem`` of DSM there, and Docker's 64MB default
+      overflows it ("could not resize shared memory segment").
+    - ``maintenance_work_mem``: only set when configured (default: leave the
+      PostgreSQL default alone).
+    """
     with conn.cursor() as cur:
+        if settings.maintenance_work_mem:
+            cur.execute(
+                sql.SQL("SET maintenance_work_mem = {}").format(
+                    sql.Literal(settings.maintenance_work_mem)
+                )
+            )
+        cur.execute(
+            sql.SQL("SET max_parallel_maintenance_workers = {}").format(
+                sql.Literal(settings.max_parallel_maintenance_workers)
+            )
+        )
         cur.execute(
             f"CREATE INDEX IF NOT EXISTS {_HNSW_INDEX} "
             "ON chunks USING hnsw (embedding vector_cosine_ops)"
@@ -313,4 +369,4 @@ def migrate(conn: psycopg.Connection, settings: Settings) -> None:
     Bulk path uses migrate_light() + create_heavy_indexes() after loading.
     """
     migrate_light(conn, settings)
-    create_heavy_indexes(conn)
+    create_heavy_indexes(conn, settings)

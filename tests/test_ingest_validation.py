@@ -1034,6 +1034,7 @@ class TestRunFetch:
         with (
             patch("shiori.ingest.db.connect", return_value=mock_conn),
             patch("shiori.ingest.schema.migrate"),
+            patch("shiori.ingest.schema.migrate_light"),
             patch("shiori.ingest._acquire_repo_lock", return_value=False),
             patch("shiori.ingest._release_repo_lock"),
             patch("shiori.ingest.build_token_provider", return_value=MagicMock()),
@@ -1055,6 +1056,7 @@ class TestRunFetch:
         with (
             patch("shiori.ingest.db.connect", return_value=mock_conn),
             patch("shiori.ingest.schema.migrate"),
+            patch("shiori.ingest.schema.migrate_light"),
             patch("shiori.ingest._acquire_repo_lock", return_value=True),
             patch("shiori.ingest._release_repo_lock"),
             patch("shiori.ingest.build_token_provider", return_value=MagicMock()),
@@ -1160,11 +1162,12 @@ class TestRunIndex:
                    return_value=MagicMock(isoformat=lambda: "2026-01-01T00:00:00+00:00")),
             patch("shiori.ingest.db.record_sync_attempt"),
         ):
-            run_index(settings=self._mock_settings(), rebuild=True)
+            settings = self._mock_settings()
+            run_index(settings=settings, rebuild=True)
 
         mock_truncate.assert_called_once_with(mock_conn)
         mock_drop.assert_called_once_with(mock_conn)
-        mock_create.assert_called_once_with(mock_conn)
+        mock_create.assert_called_once_with(mock_conn, settings)
 
 
 # ===================================================================
@@ -1310,6 +1313,7 @@ class TestFetchConcurrencyCapRunFetch:
             patch("concurrent.futures.ThreadPoolExecutor", _RecordingExecutor),
             patch("shiori.ingest.db.connect", return_value=mock_conn),
             patch("shiori.ingest.schema.migrate"),
+            patch("shiori.ingest.schema.migrate_light"),
             patch("shiori.ingest._acquire_repo_lock", return_value=False),
             patch("shiori.ingest._release_repo_lock"),
             patch("shiori.ingest.build_token_provider", return_value=MagicMock()),
@@ -1331,6 +1335,7 @@ class TestFetchConcurrencyCapRunFetch:
             patch("concurrent.futures.ThreadPoolExecutor", _RecordingExecutor),
             patch("shiori.ingest.db.connect", return_value=mock_conn),
             patch("shiori.ingest.schema.migrate"),
+            patch("shiori.ingest.schema.migrate_light"),
             patch("shiori.ingest._acquire_repo_lock", return_value=False),
             patch("shiori.ingest._release_repo_lock"),
             patch("shiori.ingest.build_token_provider", return_value=MagicMock()),
@@ -1352,6 +1357,7 @@ class TestFetchConcurrencyCapRunFetch:
             patch("concurrent.futures.ThreadPoolExecutor", _RecordingExecutor),
             patch("shiori.ingest.db.connect", return_value=mock_conn),
             patch("shiori.ingest.schema.migrate"),
+            patch("shiori.ingest.schema.migrate_light"),
             patch("shiori.ingest._acquire_repo_lock", return_value=False),
             patch("shiori.ingest._release_repo_lock"),
             patch("shiori.ingest.build_token_provider", return_value=MagicMock()),

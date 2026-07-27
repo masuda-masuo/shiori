@@ -185,6 +185,21 @@ class Settings:
             os.environ.get("SHIORI_RATE_LIMIT_MAX_RETRIES", "3")
         )
     )
+    # --- Heavy index build knobs (issue #352) ---
+    # PostgreSQL maintenance_work_mem for the session that builds HNSW/pgroonga
+    # indexes. Unset (default) leaves the server's own default alone.
+    maintenance_work_mem: str | None = field(
+        default_factory=lambda: os.environ.get("SHIORI_MAINTENANCE_WORK_MEM") or None
+    )
+    # max_parallel_maintenance_workers for the same session. Default 0 forces
+    # a serial HNSW build: PARALLEL HNSW allocates ~maintenance_work_mem of
+    # DSM in /dev/shm, and Docker's 64MB default there overflows it ("could
+    # not resize shared memory segment ... No space left on device").
+    max_parallel_maintenance_workers: int = field(
+        default_factory=lambda: int(
+            os.environ.get("SHIORI_MAX_PARALLEL_MAINTENANCE_WORKERS", "0")
+        )
+    )
 
     def repo_dir(self, repo: str) -> str:
         owner, name = repo.split("/", 1)

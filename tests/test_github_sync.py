@@ -1558,6 +1558,7 @@ class TestCircuitBreakerFetch:
         with (
             patch("shiori.ingest.db.connect", return_value=mock_conn),
             patch("shiori.ingest.schema.migrate"),
+            patch("shiori.ingest.schema.migrate_light"),
             patch("shiori.ingest._acquire_repo_lock", return_value=True),
             patch("shiori.ingest._release_repo_lock"),
             patch("shiori.ingest.build_token_provider", return_value=MagicMock()),
@@ -1592,6 +1593,7 @@ class TestCircuitBreakerFetch:
         with (
             patch("shiori.ingest.db.connect", return_value=mock_conn),
             patch("shiori.ingest.schema.migrate"),
+            patch("shiori.ingest.schema.migrate_light"),
             patch("shiori.ingest._acquire_repo_lock", return_value=True),
             patch("shiori.ingest._release_repo_lock"),
             patch("shiori.ingest.build_token_provider", return_value=MagicMock()),
@@ -1632,6 +1634,7 @@ class TestCircuitBreakerFetch:
         with (
             patch("shiori.ingest.db.connect", return_value=mock_conn),
             patch("shiori.ingest.schema.migrate"),
+            patch("shiori.ingest.schema.migrate_light"),
             patch("shiori.ingest._acquire_repo_lock", return_value=True),
             patch("shiori.ingest._release_repo_lock"),
             patch("shiori.ingest.build_token_provider", return_value=MagicMock()),
@@ -1666,6 +1669,7 @@ class TestCircuitBreakerFetch:
         with (
             patch("shiori.ingest.db.connect", return_value=mock_conn),
             patch("shiori.ingest.schema.migrate"),
+            patch("shiori.ingest.schema.migrate_light"),
             patch("shiori.ingest.build_token_provider", return_value=MagicMock()),
         ):
             with pytest.raises(ValueError, match="circuit-broken"):
@@ -1696,6 +1700,7 @@ class TestCircuitBreakerFetch:
         with (
             patch("shiori.ingest.db.connect", return_value=mock_conn),
             patch("shiori.ingest.schema.migrate"),
+            patch("shiori.ingest.schema.migrate_light"),
             patch("shiori.ingest._acquire_repo_lock", return_value=True),
             patch("shiori.ingest._release_repo_lock"),
             patch("shiori.ingest.build_token_provider", return_value=MagicMock()),
@@ -1742,6 +1747,7 @@ class TestCircuitBreakerFetch:
         with (
             patch("shiori.ingest.db.connect", return_value=mock_conn),
             patch("shiori.ingest.schema.migrate"),
+            patch("shiori.ingest.schema.migrate_light"),
             patch("shiori.ingest._acquire_repo_lock", return_value=True),
             patch("shiori.ingest._release_repo_lock"),
             patch("shiori.ingest.build_token_provider", return_value=MagicMock()),
