@@ -27,6 +27,13 @@ def report(
     prog_lang: str | None = None,
     max_chars: int = 50000,
 ) -> dict[str, Any]:
+    """Generate a structured report (stats, module_tree, symbol_index, api_reference).
+
+    Data sources: clone on disk (_ensure_phase1 refreshes it first); api_reference
+    template additionally reads the search index for cross-linking.
+
+    template: one of the registered report templates (see error message for the list).
+    """
     if template not in _REPORT_TEMPLATES:
         raise ValueError(
             f"Unknown template: '{template}'. "

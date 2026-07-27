@@ -103,6 +103,9 @@ def _build_warnings(
 def status(repo: str | None = None) -> dict[str, Any]:
     """Report index status for one or all configured repositories (issue #350).
 
+    Data sources: DB metadata only (sync_run, index_state, chunk counts); no
+    clone read, no GitHub API call.
+
     repo: target repo ("owner/name"), a short name if it uniquely matches
           one configured (indexed) repo (e.g. "shiori" -> "owner/shiori"),
           or None for all repos (default).

@@ -15,6 +15,9 @@ from .. import db
 def issue_links(number: int, repo: str | None = None) -> dict[str, Any]:
     """Return issue/PR cross-references (inbound/outbound) (issue #97).
 
+    Data sources: GitHub API (live) for this issue; issue_items index enriches
+    outbound titles/state and all inbound refs (optional, stale if unindexed).
+
     Extracts #N references from body text and comments, classifying
     them as closes/duplicate/refs/mention. Includes target title and
     state. Inbound lists other issues/PRs that reference this issue.
