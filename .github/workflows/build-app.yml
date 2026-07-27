@@ -26,7 +26,10 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # 40: the app image now installs .[embed,onnx] (torch + optimum +
+    # onnxruntime, issue #353); a cold gha-cache build exceeds 20 minutes.
+    # Cached builds stay well under the old budget.
+    timeout-minutes: 40
     permissions:
       contents: read
       packages: write
