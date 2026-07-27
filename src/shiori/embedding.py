@@ -21,7 +21,10 @@ from shiori.config import DEFAULT_EMBEDDING_MODEL
 
 log = logging.getLogger(__name__)
 
-_ONNX_MODEL_PATH = Path(os.environ.get("SHIORI_ONNX_MODEL_PATH", "/models/onnx/e5-small-int8"))
+_DEFAULT_ONNX_CANDIDATES: list[Path] = [
+    Path("/models/onnx/e5-small-int8"),
+    Path("/models/onnx/e5-small"),
+]
 
 
 def _mean_pool(token_embeddings: np.ndarray, attention_mask: np.ndarray) -> np.ndarray:
@@ -37,12 +40,41 @@ def _l2_normalize(embeddings: np.ndarray) -> np.ndarray:
 
 
 def _resolve_onnx_path() -> Path | None:
-    for p in [
-        Path(os.environ.get("SHIORI_ONNX_MODEL_PATH", "/models/onnx/e5-small-int8")),
-        Path("/models/onnx/e5-small-int8"),
-        Path("/models/onnx/e5-small"),
-    ]:
-        if p.exists() and any(f.suffix == ".onnx" for f in p.iterdir()):
+    """Resolve the ONNX model directory, or None to use SentenceTransformer.
+
+    ``SHIORI_ONNX_MODEL_PATH=""`` (set but empty) is an explicit off-switch:
+    it returns None even if a default candidate path exists. This is what
+    the GPU ingest overlay (docker-compose.gpu.yml) sets, so GPU runs keep
+    using SentenceTransformer/CUDA regardless of what else is mounted at
+    /models. Unset (not present in the environment at all) falls through to
+    the built-in default candidates.
+    """
+    raw = os.environ.get("SHIORI_ONNX_MODEL_PATH")
+    if raw == "":
+        return None
+
+    def _has_onnx(p: Path) -> bool:
+        # is_dir() guards iterdir(): a stray file at the candidate path
+        # must not raise NotADirectoryError here.
+        return p.is_dir() and any(f.suffix == ".onnx" for f in p.iterdir())
+
+    if raw:
+        # An explicitly configured path is a user choice: if it is unusable,
+        # do NOT silently try the default candidates (that would load a
+        # different model than the one pointed at) -- warn and use ST.
+        p = Path(raw)
+        if _has_onnx(p):
+            return p
+        log.warning(
+            "SHIORI_ONNX_MODEL_PATH=%s has no .onnx model; "
+            "falling back to SentenceTransformer (default candidates are "
+            "not consulted when the path is explicitly set)",
+            raw,
+        )
+        return None
+
+    for p in _DEFAULT_ONNX_CANDIDATES:
+        if _has_onnx(p):
             return p
     return None
 
@@ -56,13 +88,32 @@ class Embedder:
 
         onnx_path = _resolve_onnx_path()
         if onnx_path is not None:
-            self._init_onnx(onnx_path)
+            try:
+                self._init_onnx(onnx_path)
+            except ImportError as e:
+                # Covers ModuleNotFoundError: an ONNX model artifact is
+                # present but optimum/onnxruntime isn't installed. Fall back
+                # to SentenceTransformer rather than dying -- but only for
+                # this specific, recoverable case. Any other exception
+                # (corrupt model file, bad config, ...) still propagates:
+                # defensive code that swallows unrelated failures hides
+                # incidents instead of surfacing them.
+                log.warning(
+                    "ONNX model found at %s but the required library is "
+                    "missing (%s); falling back to SentenceTransformer. "
+                    "Install with: pip install 'shiori[onnx]'",
+                    onnx_path, e,
+                )
+                self._init_st(model_name)
         else:
             self._init_st(model_name)
 
     def _init_onnx(self, onnx_path: Path) -> None:
-        from optimum.onnxruntime import ORTModelForFeatureExtraction
-        from transformers import AutoTokenizer
+        # Optional [onnx] extra -- absent by design in [dev] installs, so the
+        # missing-import diagnostic is suppressed inline (config-file discovery
+        # is cwd-dependent and cannot be relied on by every pyright caller).
+        from optimum.onnxruntime import ORTModelForFeatureExtraction  # pyright: ignore[reportMissingImports]
+        from transformers import AutoTokenizer  # pyright: ignore[reportMissingImports]
 
         onnx_file = next(f for f in onnx_path.iterdir() if f.suffix == ".onnx")
         log.info(
@@ -77,7 +128,8 @@ class Embedder:
         self._onnx_backend = True
 
     def _init_st(self, model_name: str) -> None:
-        from sentence_transformers import SentenceTransformer
+        # Optional [embed] extra (#179) -- same inline suppression as above.
+        from sentence_transformers import SentenceTransformer  # pyright: ignore[reportMissingImports]
 
         log.info("loading embedding model: %s (pid=%d, fallback ST)", model_name, os.getpid())
         self.model = SentenceTransformer(model_name)

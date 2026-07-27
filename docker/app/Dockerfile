@@ -12,7 +12,8 @@ COPY pyproject.toml README.md ./
 RUN mkdir -p src/shiori && touch src/shiori/__init__.py \
     # CUDA 版 PyTorch (~2GB)。CPU-only なら --index-url https://download.pytorch.org/whl/cpu を追加
     && pip install torch \
-    && pip install --no-cache-dir .[embed]
+    # onnx extra: optimum/onnxruntime (issue #353). Model artifact itself is NOT built here -- it lives on the host, bind-mounted read-only at /models.
+    && pip install --no-cache-dir .[embed,onnx]
 
 COPY src ./src
 COPY dashboard/dist ./src/shiori/dashboard_dist
