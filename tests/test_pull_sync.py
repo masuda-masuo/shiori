@@ -1,4 +1,8 @@
-"""Pull-type sync tests: Phase 1/2, index_stale, cross-repo search (#236)."""
+"""Pull-type sync tests: Phase 1, index_stale, cross-repo search (#236).
+
+Phase 2 (_trigger_phase2/_drain_pending) was removed as dead code (issue
+#347): it had zero callers in src/ since #336/#343.
+"""
 
 from __future__ import annotations
 
@@ -12,13 +16,10 @@ from shiori.mcp_server import (
     _ensure_phase1,
     status,
 )
-from shiori.pipeline import _trigger_phase2
 
 
 @pytest.fixture(autouse=True)
 def _reset_pipeline_state():
-    sync_pipeline._phase2_in_flight.clear()
-    sync_pipeline._phase2_pending.clear()
     sync_pipeline._phase1_last_fetch.clear()
 
 
@@ -125,37 +126,6 @@ class TestEnsurePhase1:
         assert result is None
 
 
-# ── _trigger_phase2: single-flight no-op ──
-
-
-class TestTriggerPhase2:
-    """_trigger_phase2: single-flight background triggering."""
-
-    def test_second_call_is_noop_while_first_running(self):
-        sync_pipeline._phase2_in_flight.clear()
-        # Pre-populate in-flight so second call is seen as duplicate
-        sync_pipeline._phase2_in_flight.add("o/r")
-        _trigger_phase2("o/r")  # should be no-op, repo already in-flight
-        # In-flight set unchanged (the thread spawned by the _trigger_phase2
-        # would remove it on completion, but this test's setup means the guard
-        # already returned before thread spawn)
-        sync_pipeline._phase2_in_flight.clear()
-
-    def test_first_call_adds_to_in_flight(self):
-        sync_pipeline._phase2_in_flight.clear()
-        with (
-            patch("shiori.pipeline._do_sync", return_value={"status": "ok"}),
-            patch("shiori.pipeline.settings") as mock_settings,
-        ):
-            mock_settings.repos = ["o/r"]
-            _trigger_phase2("o/r")
-        sync_pipeline._phase2_in_flight.clear()
-
-    def test_repo_removed_from_in_flight_after_completion(self):
-        sync_pipeline._phase2_in_flight.clear()
-        assert "o/r" not in sync_pipeline._phase2_in_flight
-
-
 # ── status(): index_stale never_indexed detection ──
 
 
@@ -175,6 +145,9 @@ class TestStatusIndexStale:
             patch("shiori.tools.status.db.get_cursors", return_value={}),
         ):
             mock_settings.repos = ["o/r"]
+            mock_settings.dev_repos = set()
+            mock_settings.dev_sync_interval_seconds = 900
+            mock_settings.ref_sync_interval_seconds = 86400
             mock_settings.sync_interval_seconds = 10
             return status()
 
@@ -235,6 +208,9 @@ class TestCrossRepoSearchPhase1:
         ):
             mock_emb.return_value = MagicMock()
             mock_settings.repos = ["r1", "r2", "r3"]
+            mock_settings.dev_repos = set()
+            mock_settings.dev_sync_interval_seconds = 900
+            mock_settings.ref_sync_interval_seconds = 86400
             result = semantic_search(query="test", repo="o/r")
             assert result == []
 
@@ -251,6 +227,9 @@ class TestCrossRepoSearchPhase1:
         ):
             mock_emb.return_value = MagicMock()
             mock_settings.repos = ["r1", "r2", "r3"]
+            mock_settings.dev_repos = set()
+            mock_settings.dev_sync_interval_seconds = 900
+            mock_settings.ref_sync_interval_seconds = 86400
             result = semantic_search(query="test", repo=None)
             assert result == []
 
@@ -272,6 +251,9 @@ class TestStatusWithRepoParam:
             patch("shiori.tools.status.db.get_cursors", return_value={}),
         ):
             mock_settings.repos = ["o/r", "other/repo"]
+            mock_settings.dev_repos = set()
+            mock_settings.dev_sync_interval_seconds = 900
+            mock_settings.ref_sync_interval_seconds = 86400
             mock_settings.sync_interval_seconds = 10
             return status(repo=repo_param)
 
@@ -293,6 +275,9 @@ class TestStatusWithRepoParam:
             patch("shiori.tools.status.db.get_cursors", return_value={}),
         ):
             mock_settings.repos = ["owner/shiori", "other/repo"]
+            mock_settings.dev_repos = set()
+            mock_settings.dev_sync_interval_seconds = 900
+            mock_settings.ref_sync_interval_seconds = 86400
             mock_settings.sync_interval_seconds = 10
             result = status(repo="shiori")
         assert list(result["repos"].keys()) == ["owner/shiori"]

@@ -47,8 +47,9 @@ from .tools.status import status, _build_warnings, _stale_threshold_seconds  # n
 
 def ingest(rebuild: bool = False, repo: str | None = None) -> dict[str, Any]:
     """Sync docs/issues/code from GitHub and update index (diff sync, typically seconds).
-    Check index freshness with shiori_status first -- pull-type sync (#236) refreshes
-    the clone on-demand and triggers Phase 2 (re-index) in the background when stale.
+    Check index freshness with shiori_status first. Freshness is maintained by host-level
+    systemd timers calling the CLI (issue #347, role-scoped --only-dev/--only-ref), not by
+    this tool -- call it directly to sync now regardless of timer cadence.
     rebuild=True: discard and full rebuild (requires SHIORI_ALLOW_REBUILD=true; issue #63).
     Also treated as rebuild when chunks table is empty."""
     if rebuild and not settings.allow_rebuild:
@@ -71,5 +72,9 @@ def run(transport: Literal["stdio", "sse", "streamable-http"] = "streamable-http
         # them (just slower); _do_sync/run_index rebuild them once a drain
         # completes.
         schema.migrate_light(conn, settings)
-    log.info("shiori MCP server starting (%s), pull-type sync (#236)", transport)
+    log.info(
+        "shiori MCP server starting (%s); index freshness is maintained by "
+        "host-level systemd timers (issue #347), not this process",
+        transport,
+    )
     mcp.run(transport=transport)

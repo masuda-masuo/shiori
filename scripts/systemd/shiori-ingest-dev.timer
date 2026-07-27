@@ -1,0 +1,9 @@
+[Unit]
+Description=shiori steady sync timer: dev repos every ~15 minutes (issue #347)
+
+[Timer]
+OnCalendar=*:0/15
+Persistent=true
+
+[Install]
+WantedBy=timers.target

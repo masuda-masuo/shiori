@@ -1,10 +1,17 @@
-"""_build_warnings unit tests (issue #35, #187)."""
+"""_build_warnings unit tests (issue #35, #187, #347)."""
 
 from __future__ import annotations
 
 from unittest.mock import patch
 
 from shiori.tools.status import _build_warnings, _stale_threshold_seconds
+
+# _build_warnings now takes an explicit stale_threshold_seconds (issue #347:
+# the threshold is derived per-repo/role by the caller, status()). Tests
+# below that are not exercising the threshold derivation itself just pass a
+# fixed, arbitrary value that matches the old default (24h) so their
+# existing age_seconds fixtures keep meaning what they said.
+_THRESHOLD = 86400
 
 
 # ── No warnings (normal)──
@@ -17,7 +24,7 @@ def test_no_warnings_when_everything_is_fine():
     items_in_db = 10
     cursors = {"docs": "abc", "issues": "2026-01-01", "issue_comments": "2026-01-01", "pr_review_comments": "2026-01-01"}
 
-    result = _build_warnings(info, chunk_counts, items_in_db, cursors)
+    result = _build_warnings(info, chunk_counts, items_in_db, cursors, _THRESHOLD)
     assert result == []
 
 
@@ -25,24 +32,24 @@ def test_no_warnings_when_everything_is_fine():
 
 
 def test_staleness_warning_when_age_exceeds_threshold():
-    """Warns when age_seconds > 86400."""
+    """Warns when age_seconds > threshold."""
     info = {"age_seconds": 90000}  # 25 hours
     chunk_counts = {}
     items_in_db = 0
     cursors = {"docs": "abc"}
 
-    result = _build_warnings(info, chunk_counts, items_in_db, cursors)
+    result = _build_warnings(info, chunk_counts, items_in_db, cursors, _THRESHOLD)
     assert any("hours since last sync" in w for w in result)
 
 
 def test_no_staleness_warning_at_boundary():
-    """No warning at age_seconds == 86400 exactly."""
+    """No warning at age_seconds == threshold exactly."""
     info = {"age_seconds": 86400}
     chunk_counts = {}
     items_in_db = 0
     cursors = {"docs": "abc"}
 
-    result = _build_warnings(info, chunk_counts, items_in_db, cursors)
+    result = _build_warnings(info, chunk_counts, items_in_db, cursors, _THRESHOLD)
     assert not any("hours since last sync" in w for w in result)
 
 
@@ -53,7 +60,7 @@ def test_no_staleness_warning_when_age_is_none():
     items_in_db = 0
     cursors = {}
 
-    result = _build_warnings(info, chunk_counts, items_in_db, cursors)
+    result = _build_warnings(info, chunk_counts, items_in_db, cursors, _THRESHOLD)
     assert not any("hours since last sync" in w for w in result)
 
 
@@ -67,7 +74,7 @@ def test_missing_chunks_warning_when_chunks_few():
     items_in_db = 10
     cursors = {"docs": "abc"}
 
-    result = _build_warnings(info, chunk_counts, items_in_db, cursors)
+    result = _build_warnings(info, chunk_counts, items_in_db, cursors, _THRESHOLD)
     # issue(1) + pr_review(0) = 1 < 10//2 = 5 → warning
     assert any("Bot exclusion" in w for w in result)
 
@@ -79,7 +86,7 @@ def test_no_missing_warning_at_boundary():
     items_in_db = 6
     cursors = {"docs": "abc"}
 
-    result = _build_warnings(info, chunk_counts, items_in_db, cursors)
+    result = _build_warnings(info, chunk_counts, items_in_db, cursors, _THRESHOLD)
     # 3 >= 6//2 = 3 → no warning
     assert not any("Bot exclusion" in w for w in result)
 
@@ -91,7 +98,7 @@ def test_missing_warning_with_pr_review():
     items_in_db = 10
     cursors = {"docs": "abc"}
 
-    result = _build_warnings(info, chunk_counts, items_in_db, cursors)
+    result = _build_warnings(info, chunk_counts, items_in_db, cursors, _THRESHOLD)
     # issue(1) + pr_review(4) = 5 >= 10//2 = 5 → no warning
     assert not any("Bot exclusion" in w for w in result)
 
@@ -103,7 +110,7 @@ def test_missing_warning_with_zero_items():
     items_in_db = 0
     cursors = {"docs": "abc"}
 
-    result = _build_warnings(info, chunk_counts, items_in_db, cursors)
+    result = _build_warnings(info, chunk_counts, items_in_db, cursors, _THRESHOLD)
     assert not any("Bot exclusion" in w for w in result)
 
 
@@ -117,7 +124,7 @@ def test_unsynced_warning_for_missing_cursors():
     items_in_db = 0
     cursors = {"docs": "abc"}  # issues, issue_comments, pr_review_comments are missing
 
-    result = _build_warnings(info, chunk_counts, items_in_db, cursors)
+    result = _build_warnings(info, chunk_counts, items_in_db, cursors, _THRESHOLD)
     assert any("Unsynced categories" in w for w in result)
 
 
@@ -133,7 +140,7 @@ def test_no_unsynced_warning_when_all_cursors_present():
         "pr_review_comments": "2026-01-01",
     }
 
-    result = _build_warnings(info, chunk_counts, items_in_db, cursors)
+    result = _build_warnings(info, chunk_counts, items_in_db, cursors, _THRESHOLD)
     assert not any("Unsynced categories" in w for w in result)
 
 
@@ -144,67 +151,85 @@ def test_multiple_warnings_can_coexist():
     items_in_db = 10  # Missing chunks warning
     cursors = {}  # unsynced warning
 
-    result = _build_warnings(info, chunk_counts, items_in_db, cursors)
+    result = _build_warnings(info, chunk_counts, items_in_db, cursors, _THRESHOLD)
     assert len(result) == 3
     assert any("hours since last sync" in w for w in result)
     assert any("Bot exclusion" in w for w in result)
     assert any("Unsynced categories" in w for w in result)
 
 
-# ── Stale threshold derivation (issue #187) ──
+# ── Stale threshold derivation (issue #187, superseded by #347) ──
 
 
 class TestStaleThresholdSeconds:
-    """_stale_threshold_seconds: auto sync 有効時は interval から閾値を導出する。"""
+    """_stale_threshold_seconds: role-aware (dev vs ref), 2x the expected
+    timer cadence, floored at 300s (issue #347).
 
-    def test_disabled_uses_fixed_24h(self):
-        """auto sync 無効（sync_interval_seconds<=0）では固定24時間のまま。"""
+    Supersedes the old single sync_interval_seconds-derived formula (issue
+    #187): sync_interval_seconds is the Phase-1 clone refresh debounce, not
+    an index sync cadence, so deriving a staleness threshold from it alone
+    reported a fictional cadence.
+    """
+
+    def test_dev_repo_uses_dev_interval_default(self):
         with patch("shiori.tools.status.settings") as mock_settings:
-            mock_settings.sync_interval_seconds = 0
-            assert _stale_threshold_seconds() == 86400
+            mock_settings.dev_repos = {"o/dev"}
+            mock_settings.dev_sync_interval_seconds = 900
+            mock_settings.ref_sync_interval_seconds = 86400
+            assert _stale_threshold_seconds("o/dev") == 1800  # 2 * 900
 
-    def test_enabled_scales_with_interval(self):
-        """interval=10（issueの実例）では threshold=300（floor）になる。"""
+    def test_ref_repo_uses_ref_interval_default(self):
         with patch("shiori.tools.status.settings") as mock_settings:
-            mock_settings.sync_interval_seconds = 10
-            assert _stale_threshold_seconds() == 300
+            mock_settings.dev_repos = {"o/dev"}
+            mock_settings.dev_sync_interval_seconds = 900
+            mock_settings.ref_sync_interval_seconds = 86400
+            assert _stale_threshold_seconds("o/ref") == 172800  # 2 * 86400
 
-    def test_enabled_floor_applies_for_tiny_interval(self):
-        """interval=1 のような極端に短い値でも floor 未満にはならない。"""
+    def test_dev_repo_respects_env_override(self):
+        """A short dev interval floors at 300s rather than going below it."""
         with patch("shiori.tools.status.settings") as mock_settings:
-            mock_settings.sync_interval_seconds = 1
-            assert _stale_threshold_seconds() == 300
+            mock_settings.dev_repos = {"o/dev"}
+            mock_settings.dev_sync_interval_seconds = 60
+            mock_settings.ref_sync_interval_seconds = 86400
+            assert _stale_threshold_seconds("o/dev") == 300  # 2*60=120, floored
 
-    def test_enabled_scales_above_floor_for_larger_interval(self):
-        """interval が大きい場合は floor でなく interval*倍率が使われる。"""
+    def test_ref_repo_respects_env_override(self):
         with patch("shiori.tools.status.settings") as mock_settings:
-            mock_settings.sync_interval_seconds = 600
-            assert _stale_threshold_seconds() == 18000  # 600 * 30
+            mock_settings.dev_repos = set()
+            mock_settings.dev_sync_interval_seconds = 900
+            mock_settings.ref_sync_interval_seconds = 100
+            assert _stale_threshold_seconds("o/ref") == 300  # 2*100=200, floored
 
-    def test_negative_interval_uses_fixed_24h(self):
-        """負の値も無効扱いで固定24時間になる。"""
+    def test_floor_applies_for_tiny_interval(self):
         with patch("shiori.tools.status.settings") as mock_settings:
-            mock_settings.sync_interval_seconds = -1
-            assert _stale_threshold_seconds() == 86400
+            mock_settings.dev_repos = {"o/dev"}
+            mock_settings.dev_sync_interval_seconds = 1
+            mock_settings.ref_sync_interval_seconds = 86400
+            assert _stale_threshold_seconds("o/dev") == 300
 
-
-class TestBuildWarningsIntervalDerivedThreshold:
-    """_build_warnings が動的閾値を使うこと（issue #187）。"""
-
-    def test_warns_earlier_when_auto_sync_enabled_with_short_interval(self):
-        """interval=10 なら 20 時間経過（issueの実例）でも stale 警告が出る。"""
-        info = {"age_seconds": 72715}  # 20.2 hours, from the issue report
+    def test_scales_above_floor_for_larger_interval(self):
         with patch("shiori.tools.status.settings") as mock_settings:
-            mock_settings.sync_interval_seconds = 10
-            result = _build_warnings(info, {}, 0, {"docs": "x"})
+            mock_settings.dev_repos = set()
+            mock_settings.dev_sync_interval_seconds = 900
+            mock_settings.ref_sync_interval_seconds = 20000
+            assert _stale_threshold_seconds("o/ref") == 40000  # 2 * 20000
+
+
+class TestBuildWarningsRespectsGivenThreshold:
+    """_build_warnings uses whatever stale_threshold_seconds the caller
+    passes in (status() derives it per-repo/role via
+    _stale_threshold_seconds; issue #347 superseded the old single-interval
+    derivation that used to live inside _build_warnings itself, issue #187).
+    """
+
+    def test_warns_when_age_exceeds_given_threshold(self):
+        info = {"age_seconds": 400}
+        result = _build_warnings(info, {}, 0, {"docs": "x"}, 300)
         assert any("hours since last sync" in w for w in result)
 
-    def test_no_warning_within_derived_threshold(self):
-        """導出した閾値の内側では警告が出ない。"""
+    def test_no_warning_within_given_threshold(self):
         info = {"age_seconds": 100}
-        with patch("shiori.tools.status.settings") as mock_settings:
-            mock_settings.sync_interval_seconds = 10  # threshold = 300
-            result = _build_warnings(info, {}, 0, {"docs": "x"})
+        result = _build_warnings(info, {}, 0, {"docs": "x"}, 300)
         assert not any("hours since last sync" in w for w in result)
 
 
@@ -212,7 +237,7 @@ class TestBuildWarningsIntervalDerivedThreshold:
 
 
 class TestConsecutiveFailuresWarning:
-    """_build_warnings: 連続失敗カウンタからの警告（issue #187）。"""
+    """_build_warnings: 連続失敗カウンタからの警告(issue #187)。"""
 
     def test_warns_when_consecutive_failures_positive(self):
         """consecutive_failures > 0 のとき last_error を含む警告を出す。"""
@@ -221,20 +246,20 @@ class TestConsecutiveFailuresWarning:
             "consecutive_failures": 5,
             "last_error": "git fetch failed (exit 128): Invalid username or token",
         }
-        result = _build_warnings(info, {}, 0, {"docs": "x"})
+        result = _build_warnings(info, {}, 0, {"docs": "x"}, _THRESHOLD)
         assert any("5 consecutive sync failures" in w for w in result)
         assert any("Invalid username or token" in w for w in result)
 
     def test_no_warning_when_consecutive_failures_zero(self):
         """consecutive_failures=0 では警告なし。"""
         info = {"age_seconds": 100, "consecutive_failures": 0, "last_error": None}
-        result = _build_warnings(info, {}, 0, {"docs": "x"})
+        result = _build_warnings(info, {}, 0, {"docs": "x"}, _THRESHOLD)
         assert not any("consecutive sync failures" in w for w in result)
 
     def test_no_warning_when_consecutive_failures_absent(self):
-        """consecutive_failures キー自体が無い（未同期リポジトリ）場合も警告なし。"""
+        """consecutive_failures キー自体が無い(未同期リポジトリ)場合も警告なし。"""
         info = {"age_seconds": 100}
-        result = _build_warnings(info, {}, 0, {"docs": "x"})
+        result = _build_warnings(info, {}, 0, {"docs": "x"}, _THRESHOLD)
         assert not any("consecutive sync failures" in w for w in result)
 
 
@@ -250,18 +275,18 @@ class TestTokenProviderErrorWarning:
             "age_seconds": 100,
             "token_provider_error": "GitHub App configuration is incomplete...",
         }
-        result = _build_warnings(info, {}, 0, {"docs": "x"})
+        result = _build_warnings(info, {}, 0, {"docs": "x"}, _THRESHOLD)
         assert any("token_provider could not be determined" in w for w in result)
         assert any("GitHub App configuration is incomplete" in w for w in result)
 
     def test_no_warning_when_error_absent(self):
         """token_provider_error が None のときは警告なし。"""
         info = {"age_seconds": 100, "token_provider_error": None}
-        result = _build_warnings(info, {}, 0, {"docs": "x"})
+        result = _build_warnings(info, {}, 0, {"docs": "x"}, _THRESHOLD)
         assert not any("token_provider could not be determined" in w for w in result)
 
     def test_no_warning_when_error_key_absent(self):
         """token_provider_error キー自体が無い場合も警告なし。"""
         info = {"age_seconds": 100}
-        result = _build_warnings(info, {}, 0, {"docs": "x"})
+        result = _build_warnings(info, {}, 0, {"docs": "x"}, _THRESHOLD)
         assert not any("token_provider could not be determined" in w for w in result)

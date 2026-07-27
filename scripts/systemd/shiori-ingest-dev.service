@@ -1,0 +1,12 @@
+[Unit]
+Description=shiori steady sync: dev repos (issue #347)
+# Cross-lane overlap with the ref lane (shiori-ingest-ref) is handled by the
+# per-repo PostgreSQL advisory locks (issue #307), not by systemd -- both
+# timers may fire concurrently without stepping on each other's repos.
+
+[Service]
+Type=oneshot
+# Type=oneshot gives free self-overlap protection: systemd will not start a
+# second instance of this unit while a previous run is still executing.
+WorkingDirectory=@SHIORI_DIR@
+ExecStart=@SHIORI_DIR@/scripts/ingest.sh run --only-dev

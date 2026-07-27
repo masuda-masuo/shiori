@@ -226,36 +226,109 @@ See `docs/guides/setup.md` for onboarding instructions for each role.
 
 ---
 
-## 11. Ingest Strategy (Issue #268)
+## 11. Steady Sync: Host-Level Timers (Issue #347, supersedes #268)
 
-### Current strategy: on-demand pull-type ingest
+Issue #268 originally decided **against** periodic automation (see "Prior
+decision" below); **issue #347 supersedes that decision**. The trigger was an
+in-server auto-sync loop design that caused a memory-99% incident — the fix
+is process isolation, not more in-process scheduling, so the adopted design
+moves periodic freshness entirely outside the server process.
 
-As of the architecture rewrite (Issues #305–#316), Shiori uses **on-demand (pull-type) ingest** — there is no periodic timer, no background sync loop, and no webhook listener:
+### Two-timer design
 
-| Trigger | Mechanism | When |
+Freshness is maintained by **two host-level systemd user timers** calling the
+existing CLI. There is no in-server sync loop, no webhook listener, and no
+component inside the container/server observes a schedule:
+
+| Timer | Cadence | Command |
 |---|---|---|
-| Human operator | `./scripts/ingest.sh` (or direct CLI) | When freshness is needed |
-| AI agent (MCP) | `shiori_ingest` tool | When the agent detects stale state |
-| Startup | MCP server calls `_trigger_phase2` | Fire-and-forget on server start |
+| `shiori-ingest-dev.timer` | Every ~15 minutes | `ingest.sh run --only-dev` |
+| `shiori-ingest-ref.timer` | Daily (04:00) | `ingest.sh run --only-ref` |
 
-#### Why no periodic automation
+`Type=oneshot` on both `.service` units gives free self-overlap protection
+(systemd will not start a second instance of a unit while the previous run is
+still executing). Cross-lane overlap — the dev timer firing while the ref
+lane is mid-run, or vice versa — is *not* handled by systemd at all; it is
+handled the same way any two concurrent ingest invocations already are, by
+the per-repo PostgreSQL advisory locks (§5, issue #307). The unit files carry
+this as an inline comment.
 
-Periodic timers (systemd timer, cron) were deliberately **not adopted**. The reasoning:
+### Role selectors (`--only-dev` / `--only-ref`)
 
-1. **Embedding is expensive**: Running the embedding model on every repo every hour burns CPU/GPU cycles. For reference repos (frozen after one-shot ingest), periodic sync is pure waste.
-2. **Dev repos need freshness, not frequency**: A timer would sync even when no change has occurred. On-demand triggers let operators sync exactly when needed.
-3. **Parallel containers replace kill-and-restart**: The old problem (cannot sync a small repo without waiting for a large backfill) is solved by per-repo locks (§5), not by automation.
+The CLI's `ingest fetch|index|run` subcommands accept `--only-dev` and
+`--only-ref` (issue #347), which resolve to the configured dev repos
+(`SHIORI_DEV_REPOS`) or their complement within `SHIORI_REPOS`, preserving
+`SHIORI_REPOS` order. This means the timer units never hardcode a repo list:
+adding or removing a repo from `SHIORI_DEV_REPOS`/`SHIORI_REPOS` changes what
+each timer covers with no unit-file edit. The selectors satisfy the
+"`--repo` required" guard from issue #338 (a selector *is* a repo selection)
+and are mutually exclusive with `--repo`, with each other, and with
+`index --all`.
 
-The question of automation (timer, webhook) is explicitly **deferred** and remains tracked in Issue #268.
+### Backfill stays manual
 
-### Future options (tracked in #268)
+Initial backfill for a newly added repo (§8, bounded backfill via
+`--backfill-since` / `SHIORI_REF_BACKFILL_SINCE`) is **not** part of either
+steady lane and must still be run by hand. A large first-time backfill can
+take hours; folding it into a 15-minute or daily timer would either block
+that lane's *other* repos behind it (head-of-line blocking) or require the
+timer to somehow distinguish "already backfilled" from "still backfilling"
+repos, which the steady-sync design deliberately does not attempt.
 
-| Option | Description |
-|---|---|
-| **A. systemd timer / cron** | `scripts/ingest.sh` scheduled hourly/daily. Simple but wasteful for frozen ref repos. |
-| **B. Sync-before-search** | Wait for unfinished sync to complete before serving a search query. Risks high latency during large backfills. |
-| **C. Role-based sync strategy** | Dev repos sync on every search trigger; ref repos never auto-sync. Partial implementation exists (dev-first ordering, ref-repo skip). |
-| **D. GitHub Push webhook** | Receive push/issue events via webhook, ingest only the affected repo. Real-time but adds operational complexity. |
+### Interplay with reindex drains (issue #352)
+
+A scoped run — which is what `--only-dev`/`--only-ref` always produce,
+since neither one is guaranteed to cover every repo in `SHIORI_REPOS` — stays
+on the deferred-index bulk path and defers the heavy-index (HNSW/pgroonga)
+rebuild whenever `_is_bulk_path()` is already true (§17, e.g. mid-drain from
+a `reindex`). Concretely: if a timer fires while a `reindex` drain is in
+progress, that timer's run does not resurrect the heavy indexes early and
+does not flip the drain off the fast bulk path — it is treated exactly like
+any other scoped bulk run during a drain (§17, "Avoiding heavy-index
+resurrection mid-drain"). Only a run that completes and covers every
+configured repo rebuilds the heavy indexes.
+
+### Status staleness semantics
+
+`shiori_status` reports a role-aware staleness threshold per repo: **2x the
+expected timer cadence** for that repo's role (`SHIORI_DEV_SYNC_INTERVAL_SECONDS`,
+default 900s, for dev repos; `SHIORI_REF_SYNC_INTERVAL_SECONDS`, default
+86400s, for ref repos), floored at 300s. These env vars document the
+*expected* host-timer cadence — they configure nothing at runtime inside the
+server; only `shiori_status`'s own staleness math reads them. Each repo's
+payload carries `expected_sync_interval_seconds`; the top-level payload
+carries `sync_intervals: {dev, ref}` and `clone_refresh_debounce_seconds`
+(the renamed `sync_interval_seconds`, which has always been the Phase-1
+clone-refresh debounce, §"Synchronization Strategy", not an index sync
+cadence — the old top-level `sync_interval_seconds` key in the status
+payload described a cadence that did not exist, and is dropped rather than
+kept under its old, misleading name).
+
+### Installing the timers (host, post-merge)
+
+Shipping the unit templates is separate from installing them — installation
+is a host operation, done once per machine after this repo is deployed.
+`scripts/install-systemd.sh` installs and enables them alongside
+`shiori.service`, substituting the `@SHIORI_DIR@` placeholder in the
+`.service` templates with the repo's absolute path (same mechanism as
+`shiori.service` — the units must not hardcode where the repo is cloned):
+
+```bash
+./scripts/install-systemd.sh
+systemctl --user list-timers 'shiori-ingest-*'   # verify both timers armed
+```
+
+### Prior decision (issue #268, superseded)
+
+Issue #268 had decided **against** periodic automation, reasoning that (1)
+embedding is expensive and ref repos are frozen after one-shot ingest, so a
+timer would waste cycles; (2) dev repos need freshness, not blind frequency;
+(3) parallel containers with per-repo locks already solved the
+kill-and-restart problem instead of automation. Those tradeoffs are
+addressed by the two-timer design above: the dev lane's 15-minute cadence is
+freshness-oriented (matches active development, not a blind poll), and the
+ref lane's daily cadence keeps embedding cost bounded for frozen reference
+repos rather than eliminating periodic sync altogether.
 
 ---
 
