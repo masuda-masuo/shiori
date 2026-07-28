@@ -501,12 +501,35 @@ def create_heavy_indexes(conn: psycopg.Connection, settings: Settings) -> None:
 
 
 def drop_heavy_indexes(conn: psycopg.Connection) -> None:
-    """Drop HNSW and pgroonga indexes (issue #72). Temporarily dropped during bulk load for performance."""
+    """Drop HNSW and pgroonga indexes (issue #72). Temporarily dropped during bulk load for performance.
+
+    Bounded by the same ``lock_timeout`` as ``migrate_light`` (issue #362,
+    extended to this call by #364): DROP INDEX takes a table-level ACCESS
+    EXCLUSIVE lock, and Postgres lock queues are FIFO -- a caller that
+    reaches this while another lane holds (or is about to hold) a lock on
+    ``chunks`` must crash loudly within seconds instead of queuing behind
+    it and blocking every later request, including plain reads. This is
+    the second defence layer: the call-site gates (issue #364, only
+    ``rebuild=True`` or a covering bulk run may call this) keep an
+    unrelated scoped run from calling it at all, but even a legitimate
+    covering run must not sit at the head of the lock queue indefinitely.
+    On timeout the psycopg error propagates unmodified: no retry, no
+    swallow -- this repo prefers crash-early over a defensive fallback.
+    RESET only runs on the success path, mirroring ``migrate_light``.
+    """
+    with conn.cursor() as cur:
+        cur.execute(sql.SQL("SET lock_timeout = {}").format(sql.Literal(_DDL_LOCK_TIMEOUT)))
+    conn.commit()
+
     for idx in (_HNSW_INDEX, _PGROONGA_CONTENT_INDEX, _PGROONGA_SYMBOLS_INDEX):
         with conn.cursor() as cur:
             cur.execute(f"DROP INDEX IF EXISTS {idx}")  # type: ignore[arg-type]
         conn.commit()
         log.info("dropped index: %s", idx)
+
+    with conn.cursor() as cur:
+        cur.execute("RESET lock_timeout")
+    conn.commit()
 
 
 def migrate(conn: psycopg.Connection, settings: Settings) -> None:

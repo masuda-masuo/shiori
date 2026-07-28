@@ -438,8 +438,15 @@ class TestBulkHeavyIndexCoverageGate:
     or CLI `index --repo X` during a drain would otherwise rebuild the heavy
     indexes early and flip later invocations off the fast bulk path)."""
 
-    def _run_index(self, repos_arg, configured):
+    def _run_index(self, repos_arg, configured, lock_fails_for=None):
+        """*lock_fails_for*: repo names for which _acquire_repo_lock returns
+        False (issue #365 -- simulates a per-repo advisory-lock skip)."""
         from shiori.ingest import run_index
+
+        lock_fails_for = lock_fails_for or set()
+
+        def _lock(conn, repo):
+            return repo not in lock_fails_for
 
         mock_conn = MagicMock()
         settings = MagicMock()
@@ -448,9 +455,9 @@ class TestBulkHeavyIndexCoverageGate:
         with (
             patch("shiori.ingest.db.connect", return_value=mock_conn),
             patch("shiori.ingest.schema.migrate_light"),
-            patch("shiori.ingest.schema.drop_heavy_indexes"),
+            patch("shiori.ingest.schema.drop_heavy_indexes") as mock_drop,
             patch("shiori.ingest.schema.create_heavy_indexes") as mock_create,
-            patch("shiori.ingest._acquire_repo_lock", return_value=True),
+            patch("shiori.ingest._acquire_repo_lock", side_effect=_lock),
             patch("shiori.ingest._release_repo_lock"),
             patch("shiori.ingest._is_bulk_path", return_value=True),
             patch("shiori.ingest.build_token_provider", return_value=MagicMock()),
@@ -464,18 +471,18 @@ class TestBulkHeavyIndexCoverageGate:
             patch("shiori.ingest.db.record_sync_attempt"),
         ):
             run_index(settings=settings, repos=repos_arg)
-        return mock_create
+        return mock_create, mock_drop
 
     def test_scoped_bulk_run_defers_heavy_indexes(self):
-        mock_create = self._run_index(["o/a"], ["o/a", "o/b"])
+        mock_create, _ = self._run_index(["o/a"], ["o/a", "o/b"])
         mock_create.assert_not_called()
 
     def test_unscoped_bulk_run_creates_heavy_indexes(self):
-        mock_create = self._run_index(None, ["o/a", "o/b"])
+        mock_create, _ = self._run_index(None, ["o/a", "o/b"])
         assert mock_create.called
 
     def test_explicit_full_repo_list_creates_heavy_indexes(self):
-        mock_create = self._run_index(["o/b", "o/a"], ["o/a", "o/b"])
+        mock_create, _ = self._run_index(["o/b", "o/a"], ["o/a", "o/b"])
         assert mock_create.called
 
     def test_covers_all_helper(self):
@@ -487,6 +494,59 @@ class TestBulkHeavyIndexCoverageGate:
         assert not _bulk_covers_all_repos(["o/a"], settings)
         settings.repos = []
         assert not _bulk_covers_all_repos([], settings)
+
+    # ---------------------------------------------------------------
+    # issue #364: the DROP side must be gated the same way as CREATE
+    # ---------------------------------------------------------------
+
+    def test_scoped_bulk_run_never_drops_heavy_indexes(self):
+        """A scoped bulk run must not touch the DROP side either: during a
+        genuine drain the indexes are already absent, and if they exist,
+        dropping them is exactly the #364 accident (a scoped dev-lane run
+        destroying another lane's in-progress or just-finished HNSW
+        build)."""
+        _, mock_drop = self._run_index(["o/a"], ["o/a", "o/b"])
+        mock_drop.assert_not_called()
+
+    def test_unscoped_bulk_run_drops_heavy_indexes(self):
+        _, mock_drop = self._run_index(None, ["o/a", "o/b"])
+        assert mock_drop.called
+
+    # ---------------------------------------------------------------
+    # issue #365: CREATE gates on repos that actually completed, not the
+    # intended target list
+    # ---------------------------------------------------------------
+
+    def test_lock_skip_defers_create_despite_full_target_list(self):
+        """The coverage gate on the *intended* target list (o/a, o/b) still
+        passes, but o/b never actually completed (advisory-lock skip) --
+        create_heavy_indexes must not run over the resulting partial data.
+        The DROP side gates on intention only (it runs before the loop, so
+        completion isn't knowable yet), so an unscoped run still drops."""
+        mock_create, mock_drop = self._run_index(
+            None, ["o/a", "o/b"], lock_fails_for={"o/b"}
+        )
+        mock_create.assert_not_called()
+        assert mock_drop.called
+
+    def test_lock_skip_logs_reason_distinct_from_scoped_defer(self, caplog):
+        import logging
+
+        with caplog.at_level(logging.INFO, logger="shiori.ingest"):
+            self._run_index(None, ["o/a", "o/b"], lock_fails_for={"o/b"})
+        messages = [r.getMessage() for r in caplog.records]
+        assert any("advisory lock" in m and "o/b" in m for m in messages)
+        assert not any("scoped bulk run" in m for m in messages)
+
+    def test_completed_all_helper(self):
+        from shiori.ingest import _bulk_run_completed_all_repos
+
+        settings = MagicMock()
+        settings.repos = ["o/a", "o/b"]
+        assert _bulk_run_completed_all_repos(["o/a", "o/b"], settings)
+        assert not _bulk_run_completed_all_repos(["o/a"], settings)
+        settings.repos = []
+        assert not _bulk_run_completed_all_repos([], settings)
 
 
 # ===================================================================
@@ -514,3 +574,163 @@ class TestCliIndexAll:
         with pytest.raises(SystemExit) as exc:
             self._run(["ingest", "index", "--all", "--repo", "a/b"])
         assert exc.value.code == 2
+
+
+# ===================================================================
+# Bulk-path heavy index drop/create gating at the run_ingest call site
+# (issues #364/#365 -- extends TestBulkHeavyIndexCoverageGate's fixture
+# style to the fetch+index-combined entry point)
+# ===================================================================
+
+
+class TestRunIngestBulkHeavyIndexGates:
+    """Same gates as run_index (#364 DROP gate, #365 completed-set CREATE
+    gate), exercised through run_ingest's fetch-then-index path."""
+
+    def _mock_conn(self):
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_cursor.fetchone.return_value = (True,)
+        mock_cursor.fetchall.return_value = []
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+        return mock_conn
+
+    def _run(self, repos_arg, configured, lock_fails_for=None):
+        """*lock_fails_for*: repo names for which _acquire_repo_lock returns
+        False in both the fetch and index phases (issue #365)."""
+        from shiori.ingest import run_ingest
+
+        lock_fails_for = lock_fails_for or set()
+
+        def _lock(conn, repo):
+            return repo not in lock_fails_for
+
+        mock_conn = self._mock_conn()
+        mock_settings = MagicMock()
+        mock_settings.repos = configured
+        mock_settings.dev_repos = set()
+        mock_settings.fetch_concurrency = 4
+
+        with (
+            patch("shiori.ingest.db.connect", return_value=mock_conn),
+            patch("shiori.ingest.schema.migrate_light"),
+            patch("shiori.ingest.schema.migrate"),
+            patch("shiori.ingest.schema.drop_heavy_indexes") as mock_drop,
+            patch("shiori.ingest.schema.create_heavy_indexes") as mock_create,
+            patch("shiori.ingest._is_bulk_path", return_value=True),
+            patch("shiori.ingest._acquire_repo_lock", side_effect=_lock),
+            patch("shiori.ingest._release_repo_lock"),
+            patch("shiori.ingest.ChunkBuffer", return_value=MagicMock()),
+            patch("shiori.ingest.build_token_provider", return_value=MagicMock()),
+            patch("shiori.ingest.Embedder", return_value=MagicMock()),
+            patch("shiori.ingest.fetch_docs", return_value="abc123"),
+            patch("shiori.ingest.fetch_issues", return_value=5),
+            patch("shiori.ingest.index_docs", return_value=1),
+            patch("shiori.ingest.index_issues", return_value=2),
+            patch("shiori.ingest.index_code", return_value=3),
+            patch(
+                "shiori.ingest.db.record_sync_run",
+                return_value=MagicMock(isoformat=lambda: "2026-01-01T00:00:00+00:00"),
+            ),
+            patch("shiori.ingest.db.record_sync_attempt"),
+        ):
+            run_ingest(settings=mock_settings, repos=repos_arg)
+        return mock_create, mock_drop
+
+    def test_scoped_bulk_run_never_drops_or_creates(self):
+        mock_create, mock_drop = self._run(
+            ["owner/repo1"], ["owner/repo1", "owner/repo2"]
+        )
+        mock_drop.assert_not_called()
+        mock_create.assert_not_called()
+
+    def test_unscoped_bulk_run_drops_and_creates(self):
+        mock_create, mock_drop = self._run(None, ["owner/repo1", "owner/repo2"])
+        assert mock_drop.called
+        assert mock_create.called
+
+    def test_lock_skip_drops_but_defers_create(self):
+        """DROP gates on intention (runs before the loop, so completion
+        isn't knowable yet): an unscoped run still drops. CREATE gates on
+        completion (#365): a repo skipped via advisory lock in the index
+        phase must not be counted, so create_heavy_indexes must not run."""
+        mock_create, mock_drop = self._run(
+            None, ["owner/repo1", "owner/repo2"], lock_fails_for={"owner/repo2"}
+        )
+        assert mock_drop.called
+        mock_create.assert_not_called()
+
+
+# ===================================================================
+# Bulk-path heavy index drop/create gating at the pipeline sync mirror
+# (issues #364/#365 -- shiori.pipeline._do_sync duplicates ingest.py's
+# gating rather than importing it, see the comment near pipeline.py:55)
+# ===================================================================
+
+
+class TestDoSyncBulkHeavyIndexGates:
+    def _mock_conn_cm(self):
+        mock_conn = MagicMock()
+        mock_conn.__enter__.return_value = mock_conn
+        mock_conn.__exit__.return_value = False
+        mock_cursor = MagicMock()
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+        return mock_conn
+
+    def _run(self, repos_arg, configured, lock_fails_for=None):
+        from shiori.pipeline import _do_sync
+
+        lock_fails_for = lock_fails_for or set()
+
+        def _lock(conn, repo):
+            return repo not in lock_fails_for
+
+        mock_conn = self._mock_conn_cm()
+
+        with (
+            patch("shiori.pipeline.settings") as mock_settings,
+            patch("shiori.pipeline._sync_lock") as mock_lock,
+            patch("shiori.pipeline.build_token_provider", return_value=MagicMock()),
+            patch("shiori.pipeline._get_embedder", return_value=MagicMock()),
+            patch("shiori.pipeline._conn", return_value=mock_conn),
+            patch("shiori.pipeline._is_bulk_path", return_value=True),
+            patch("shiori.pipeline.schema.migrate_light"),
+            patch("shiori.pipeline.schema.drop_heavy_indexes") as mock_drop,
+            patch("shiori.pipeline.schema.create_heavy_indexes") as mock_create,
+            patch("shiori.pipeline.ChunkBuffer", return_value=MagicMock()),
+            patch("shiori.pipeline._acquire_repo_lock", side_effect=_lock),
+            patch("shiori.pipeline._release_repo_lock"),
+            patch("shiori.pipeline.sync_docs", return_value=1),
+            patch("shiori.pipeline.sync_issues", return_value=2),
+            patch("shiori.pipeline.sync_code", return_value=3),
+            patch(
+                "shiori.pipeline.db.record_sync_run",
+                return_value=MagicMock(isoformat=lambda: "2026-01-01T00:00:00+00:00"),
+            ),
+            patch("shiori.pipeline.db.record_sync_attempt"),
+        ):
+            mock_settings.repos = configured
+            mock_settings.fetch_concurrency = 4
+            mock_lock.acquire.return_value = True
+
+            _do_sync(repos=repos_arg)
+        return mock_create, mock_drop
+
+    def test_scoped_bulk_sync_never_drops_or_creates(self):
+        mock_create, mock_drop = self._run(
+            ["owner/repo1"], ["owner/repo1", "owner/repo2"]
+        )
+        mock_drop.assert_not_called()
+        mock_create.assert_not_called()
+
+    def test_unscoped_bulk_sync_drops_and_creates(self):
+        mock_create, mock_drop = self._run(None, ["owner/repo1", "owner/repo2"])
+        assert mock_drop.called
+        assert mock_create.called
+
+    def test_lock_skip_drops_but_defers_create(self):
+        mock_create, mock_drop = self._run(
+            None, ["owner/repo1", "owner/repo2"], lock_fails_for={"owner/repo2"}
+        )
+        assert mock_drop.called
+        mock_create.assert_not_called()

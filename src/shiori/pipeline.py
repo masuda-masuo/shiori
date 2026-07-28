@@ -206,13 +206,30 @@ def _do_sync(
                         log.warning("rebuild: discarding existing index and sync cursors")
                         schema.truncate_all_repos(conn)
                         conn.commit()
-                    schema.drop_heavy_indexes(conn)
+                    # Issue #364: only rebuild or a sync that intends to
+                    # cover every configured repo may drop the heavy
+                    # indexes (mirrors ingest._bulk_covers_all_repos --
+                    # this module deliberately duplicates rather than
+                    # imports, see the comment near _is_bulk_path above).
+                    # A scoped sync neither drops nor creates them: during
+                    # a genuine drain they're already absent, and if they
+                    # exist the drop is exactly the #364 accident.
+                    if rebuild or (
+                        bool(settings.repos) and set(targets) >= set(settings.repos)
+                    ):
+                        schema.drop_heavy_indexes(conn)
+                    else:
+                        log.info(
+                            "heavy indexes drop skipped: scoped bulk sync (%d/%d repos)",
+                            len(targets), len(settings.repos),
+                        )
 
                 buffer: ChunkBuffer | None = None
                 if is_bulk:
                     buffer = ChunkBuffer(conn, embedder, batch_size=_BULK_BUFFER_SIZE)
 
                 failed_repos: dict[str, str] = {}
+                completed: list[str] = []
                 for repo in targets:
                     # Per-repo PG advisory lock (issue #307)
                     try:
@@ -266,6 +283,7 @@ def _do_sync(
                             "synced %s: docs=%d issues=%d code=%d (route=%s)",
                             repo, n_docs, n_items, n_code, route,
                         )
+                        completed.append(repo)
                     except Exception as exc:
                         need_reconnect = False
                         try:
@@ -304,11 +322,23 @@ def _do_sync(
                         _release_repo_lock(conn, repo)
 
                 if is_bulk:
-                    # Mirrors ingest._bulk_covers_all_repos (issue #352): a
-                    # scoped bulk sync during a reindex drain must not rebuild
-                    # the heavy indexes early.
-                    if set(targets) >= set(settings.repos):
+                    # Mirrors ingest._bulk_run_completed_all_repos (issue
+                    # #365): gate on repos that actually completed, not the
+                    # intended target list -- a per-repo advisory-lock skip
+                    # can leave the coverage check passing on intention
+                    # while a repo was never re-indexed. A scoped bulk sync
+                    # during a reindex drain must also not rebuild the
+                    # heavy indexes early (issue #352).
+                    if bool(settings.repos) and set(completed) >= set(settings.repos):
                         schema.create_heavy_indexes(conn, settings)
+                    elif bool(settings.repos) and set(targets) >= set(settings.repos):
+                        skipped = sorted(set(targets) - set(completed))
+                        log.info(
+                            "heavy indexes deferred: %d repo(s) skipped via "
+                            "advisory lock during a sync that intended to "
+                            "cover all repos (%s); rerun once they are free",
+                            len(skipped), ", ".join(skipped),
+                        )
                     else:
                         log.info(
                             "heavy indexes deferred: scoped bulk sync (%d/%d repos)",

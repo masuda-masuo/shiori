@@ -23,7 +23,7 @@ import pytest
 
 from shiori import schema
 from shiori.config import Settings
-from shiori.schema import create_heavy_indexes, migrate_light
+from shiori.schema import create_heavy_indexes, drop_heavy_indexes, migrate_light
 
 
 class _FakeCursor:
@@ -330,4 +330,50 @@ class TestLockTimeoutScoping:
 
         # The RESET at the end of migrate_light must not have run -- the
         # exception propagated straight out instead of being swallowed.
+        assert not any("RESET lock_timeout" in s for s in cursor.executed)
+
+
+class TestDropHeavyIndexesLockTimeout:
+    """drop_heavy_indexes gets the same lock_timeout bound as migrate's DDL
+    (issue #362), extended to this call by issue #364: DROP INDEX takes an
+    ACCESS EXCLUSIVE lock, and the #364 incident was exactly a DROP queuing
+    (FIFO) behind a multi-hour CREATE INDEX and then blocking every reader.
+    """
+
+    def test_sets_lock_timeout_before_drops_and_resets_after(self):
+        cursor = _FakeCursor()
+        conn = _FakeConn(cursor)
+
+        drop_heavy_indexes(conn)
+
+        set_indices = [
+            i for i, s in enumerate(cursor.executed) if "lock_timeout" in s and "RESET" not in s
+        ]
+        reset_indices = [i for i, s in enumerate(cursor.executed) if s == "RESET lock_timeout"]
+        assert len(set_indices) == 1
+        assert len(reset_indices) == 1
+        assert set_indices[0] == 0
+        assert reset_indices[0] == len(cursor.executed) - 1
+        drop_calls = [s for s in cursor.executed if "DROP INDEX IF EXISTS" in s]
+        assert len(drop_calls) == 3
+        # SET precedes every DROP; RESET follows every DROP.
+        drop_indices = [i for i, s in enumerate(cursor.executed) if "DROP INDEX IF EXISTS" in s]
+        assert set_indices[0] < min(drop_indices)
+        assert reset_indices[0] > max(drop_indices)
+
+    def test_lock_timeout_error_propagates_and_skips_reset(self):
+        class _FakeLockTimeout(psycopg.errors.QueryCanceled):
+            pass
+
+        cursor = _FakeCursor(
+            raise_on_execute_containing="DROP INDEX IF EXISTS",
+            error_to_raise=_FakeLockTimeout("canceling statement due to lock timeout"),
+        )
+        conn = _FakeConn(cursor)
+
+        with pytest.raises(_FakeLockTimeout, match="lock timeout"):
+            drop_heavy_indexes(conn)
+
+        # No RESET should have run -- the failure propagates unmodified,
+        # no retry, no swallow (this repo prefers crash-early).
         assert not any("RESET lock_timeout" in s for s in cursor.executed)
