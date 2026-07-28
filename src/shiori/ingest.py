@@ -73,15 +73,32 @@ def _is_bulk_path(conn, rebuild: bool) -> bool:
 
 
 def _bulk_covers_all_repos(targets: list[str], settings: Settings) -> bool:
-    """True when a bulk run covered every configured repo (issue #352).
+    """True when a bulk run *intended* to cover every configured repo (issue #352).
 
-    Only such a run may rebuild the heavy indexes at its end: a scoped bulk
-    run during a drain (e.g. refreshing one dev repo while a reindex works
-    through a large ref backlog) must keep deferring them -- rebuilding
-    early triggers an hours-long index build over partial data and flips
-    every later invocation off the fast bulk path.
+    Checked before the per-repo loop runs, so it only knows the target
+    list -- not whether every repo actually completed. Used to gate the
+    DROP side (``drop_heavy_indexes`` happens before the loop, so
+    completion isn't known yet) and, on its own, is NOT sufficient to gate
+    the CREATE side -- see ``_bulk_run_completed_all_repos`` (issue #365).
     """
     return bool(settings.repos) and set(targets) >= set(settings.repos)
+
+
+def _bulk_run_completed_all_repos(completed: list[str], settings: Settings) -> bool:
+    """True when every configured repo actually finished successfully during
+    a bulk run (issue #365).
+
+    Only such a run may rebuild the heavy indexes at its end. Checking the
+    *intended* target list (``_bulk_covers_all_repos``) is not enough: a
+    per-repo advisory-lock skip (``continue`` when ``_acquire_repo_lock``
+    fails), or in ``run_ingest`` a circuit-breaker pre-skip, can leave a
+    repo unprocessed while the intended-coverage check still passes.
+    Rebuilding on that partial data triggers an hours-long index build and
+    flips every later invocation off the fast bulk path with a backlog
+    remaining -- the same failure mode #352 fixed for the scoped-by-design
+    case, but reached via a skip instead of an explicit scope.
+    """
+    return bool(settings.repos) and set(completed) >= set(settings.repos)
 
 
 def run_forget(
@@ -440,7 +457,20 @@ def run_index(
             log.warning("rebuild: discarding existing index and sync cursors")
             schema.truncate_all_repos(conn)
             conn.commit()
-        schema.drop_heavy_indexes(conn)
+        # Issue #364: only rebuild or a run that intends to cover every
+        # configured repo may drop the heavy indexes. A scoped bulk run
+        # (e.g. refreshing one dev repo) neither drops nor creates them --
+        # during a genuine drain they're already absent, and if they exist
+        # the drop is exactly the #364 accident (a scoped run destroying
+        # another lane's in-progress or just-finished HNSW build).
+        if rebuild or _bulk_covers_all_repos(targets, settings):
+            schema.drop_heavy_indexes(conn)
+        else:
+            log.info(
+                "heavy indexes drop skipped: scoped bulk run (%d/%d repos); "
+                "indexes are left as-is for another lane's drain",
+                len(targets), len(settings.repos),
+            )
 
     embedder = Embedder()
     buffer: ChunkBuffer | None = None
@@ -449,6 +479,7 @@ def run_index(
 
     t_total = time.monotonic()
     failed_repos: dict[str, str] = {}
+    completed: list[str] = []
 
     for repo in targets:
         log.info("=== index %s ===", repo)
@@ -505,6 +536,7 @@ def run_index(
             db.record_sync_attempt(conn, repo, success=True)
             synced_ts = finished_at.isoformat() if finished_at is not None else "?"
             log.info("indexed at %s (route=%s)", synced_ts, route)
+            completed.append(repo)
         except Exception as exc:
             conn.rollback()
             db.record_sync_attempt(conn, repo, success=False, error=str(exc))
@@ -519,12 +551,23 @@ def run_index(
             _release_repo_lock(conn, repo)
 
     # --- Bulk path: create heavy indexes in batch ---
+    # Issue #365: gate on repos that actually completed, not the intended
+    # target list -- a per-repo advisory-lock skip can leave the coverage
+    # check passing on intention while a repo was never re-indexed.
     if is_bulk:
-        if _bulk_covers_all_repos(targets, settings):
+        if _bulk_run_completed_all_repos(completed, settings):
             t0 = time.monotonic()
             schema.create_heavy_indexes(conn, settings)
             t_idx = time.monotonic() - t0
             log.info("heavy indexes created (%.1fs)", t_idx)
+        elif _bulk_covers_all_repos(targets, settings):
+            skipped = sorted(set(targets) - set(completed))
+            log.info(
+                "heavy indexes deferred: %d repo(s) skipped via advisory lock "
+                "during a run that intended to cover all repos (%s); rerun "
+                "once they are free",
+                len(skipped), ", ".join(skipped),
+            )
         else:
             log.info(
                 "heavy indexes deferred: scoped bulk run (%d/%d repos); "
@@ -668,7 +711,17 @@ def run_ingest(
             log.warning("rebuild: discarding existing index and sync cursors")
             schema.truncate_all_repos(conn)
             conn.commit()
-        schema.drop_heavy_indexes(conn)
+        # Issue #364: only rebuild or a run that intends to cover every
+        # configured repo may drop the heavy indexes -- see run_index for
+        # the full rationale (same gate, same predicate).
+        if rebuild or _bulk_covers_all_repos(targets, settings):
+            schema.drop_heavy_indexes(conn)
+        else:
+            log.info(
+                "heavy indexes drop skipped: scoped bulk run (%d/%d repos); "
+                "indexes are left as-is for another lane's drain",
+                len(targets), len(settings.repos),
+            )
 
     # ========================================================================
     # Phase 1: Parallel fetch (ThreadPoolExecutor)
@@ -784,6 +837,7 @@ def run_ingest(
 
     t_total = time.monotonic()
     index_failed: dict[str, str] = {}
+    completed: list[str] = []
 
     for repo in _active_targets:
         if repo in fetch_failed:
@@ -843,6 +897,7 @@ def run_ingest(
             db.record_sync_attempt(conn, repo, success=True)
             synced_ts = finished_at.isoformat() if finished_at is not None else "?"
             log.info("synced at %s (route=%s)", synced_ts, route)
+            completed.append(repo)
         except Exception as exc:
             conn.rollback()
             db.record_sync_attempt(conn, repo, success=False, error=str(exc))
@@ -857,12 +912,25 @@ def run_ingest(
             _release_repo_lock(conn, repo)
 
     # --- Bulk path: create heavy indexes in batch ---
+    # Issue #365: gate on repos that actually completed, not the intended
+    # target list. A per-repo advisory-lock skip, or a circuit-breaker
+    # pre-skip (a cb-skipped repo is never in _active_targets, so it can
+    # never land in `completed` either), can leave the coverage check
+    # passing on intention while a repo was never re-indexed.
     if is_bulk:
-        if _bulk_covers_all_repos(targets, settings):
+        if _bulk_run_completed_all_repos(completed, settings):
             t0 = time.monotonic()
             schema.create_heavy_indexes(conn, settings)
             t_idx = time.monotonic() - t0
             log.info("heavy indexes created (%.1fs)", t_idx)
+        elif _bulk_covers_all_repos(targets, settings):
+            skipped = sorted(set(targets) - set(completed))
+            log.info(
+                "heavy indexes deferred: %d repo(s) skipped via advisory lock "
+                "or circuit breaker during a run that intended to cover all "
+                "repos (%s); rerun once they are free",
+                len(skipped), ", ".join(skipped),
+            )
         else:
             log.info(
                 "heavy indexes deferred: scoped bulk run (%d/%d repos); "
