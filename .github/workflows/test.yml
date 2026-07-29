@@ -20,6 +20,13 @@ on:
       - "pyproject.toml"
       - ".github/workflows/test.yml"
 
+# GITHUB_TOKEN を最小権限に固定する。リポジトリ既定は既に read-only だが、
+# 明示しておけば既定が変わってもこのワークフローは最小のままになる
+# (CodeQL actions/missing-workflow-permissions)。checkout してテストを
+# 走らせるだけなので contents: read で足りる。
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
