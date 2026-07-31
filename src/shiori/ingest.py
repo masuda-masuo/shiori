@@ -45,16 +45,40 @@ SYNC_LOCK_KEY = 0x5348494F
 _BULK_BUFFER_SIZE = 500
 
 
-def _is_bulk_path(conn, rebuild: bool) -> bool:
-    """Determine if bulk path: rebuild=True, chunks table empty/missing, or
-    the HNSW index is absent (issue #352).
+def _is_bulk_path(
+    conn,
+    rebuild: bool,
+    targets: list[str] | None = None,
+    settings: Settings | None = None,
+) -> bool:
+    """Determine if bulk path: rebuild=True, chunks table empty/missing, the
+    HNSW index is absent (issue #352), or the pending indexing volume for the
+    targeted repos reaches the configured threshold (issue #376).
 
     Heavy-index absence is the persistent, DB-derived marker of a drain in
     progress (e.g. a ``reindex`` that dropped the heavy indexes and is
     working through the bulk chunk/embed pass, possibly across several
     invocations). While it is absent, every ``index``/``run`` invocation
     stays on the bulk path (deferred heavy indexes); only a run that
-    completes successfully rebuilds them once, at the end.
+    completes successfully rebuilds them once, at the end. A volume-triggered
+    bulk run reuses this same marker as its resume mechanism -- nothing new
+    is built for it (issue #376): if a covering run is interrupted after
+    dropping the heavy indexes, later invocations stay on the bulk path via
+    the absent-index check; a scoped run (which never drops them) stays on
+    it via the volume check itself as long as the backlog remains.
+
+    The volume check is a single COUNT over ``issue_items`` scoped to the
+    targeted repos, using the same pending predicate ``index_issues`` applies
+    (``indexed_at IS NULL OR updated_at > indexed_at``) -- issue_items is the
+    only SQL-side proxy for pending chunk/embed work (doc/code re-chunking
+    is sha-driven off the on-disk clone and not countable in SQL). No rows
+    are fetched, no per-repo loop runs, and nothing is truncated or reset:
+    the bulk path only batches; discarding is exclusive to ``rebuild=True``.
+
+    ``targets``/``settings`` are optional for backward compatibility with
+    callers that predate the volume check (e.g. tests, and the duplicated
+    ``shiori.pipeline._is_bulk_path``): when either is missing the volume
+    check is skipped and the pre-#376 behaviour is exactly preserved.
     """
     if rebuild:
         return True
@@ -69,7 +93,24 @@ def _is_bulk_path(conn, rebuild: bool) -> bool:
             return True
         cur.execute("SELECT to_regclass('chunks_embedding_hnsw')")
         row = cur.fetchone()
-        return row is not None and row[0] is None
+        if row is not None and row[0] is None:
+            return True
+        # Issue #376: pending volume across the targeted repos. Defensive
+        # settings access (MagicMock in tests must not crash the check,
+        # mirroring _should_skip_repo).
+        if targets and settings is not None:
+            threshold = getattr(settings, "bulk_pending_threshold", 0)
+            if isinstance(threshold, (int, float)) and threshold > 0:
+                cur.execute(
+                    "SELECT count(*) FROM issue_items WHERE repo = ANY(%s) "
+                    "AND (indexed_at IS NULL "
+                    "OR (updated_at IS NOT NULL AND updated_at > indexed_at))",
+                    (list(targets),),
+                )
+                row = cur.fetchone()
+                if row is not None and row[0] >= threshold:
+                    return True
+    return False
 
 
 def _bulk_covers_all_repos(targets: list[str], settings: Settings) -> bool:
@@ -443,7 +484,9 @@ def run_index(
     route = _route()
 
     conn = db.connect(settings)
-    is_bulk = _is_bulk_path(conn, rebuild)
+    # Issue #376: the pending-volume threshold is scoped to the targeted
+    # repos, so targets/settings are passed into the bulk-path decision.
+    is_bulk = _is_bulk_path(conn, rebuild, targets, settings)
 
     if is_bulk:
         log.info("bulk path detected (rebuild=%s), using light schema + deferred indexes", rebuild)
@@ -696,7 +739,9 @@ def run_ingest(
     conn = db.connect(settings)
 
     # --- Bulk path detection (detect before lock. Handles fresh DB. Issue #72) ---
-    is_bulk = _is_bulk_path(conn, rebuild)
+    # Issue #376: the pending-volume threshold is scoped to the targeted
+    # repos, so targets/settings are passed into the bulk-path decision.
+    is_bulk = _is_bulk_path(conn, rebuild, targets, settings)
 
     # --- Schema prep: migrate_light is idempotent, safe outside lock ---
     if is_bulk:
