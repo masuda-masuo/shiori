@@ -22,7 +22,7 @@ from shiori.github_sync import (
     _git_delete_ref,
     _git_fetch_ref,
     _is_bot,
-    _propagate_issue_state,
+    _propagate_issue_states,
     _should_index,
     _sync_pr_reviews,
     sync_issues,
@@ -209,25 +209,57 @@ class TestIsBot:
 
 
 # ===================================================================
-# _propagate_issue_state（issue #56）
+# _propagate_issue_states（issue #56, #378）
 # ===================================================================
 
 
-class TestPropagateIssueState:
-    """_propagate_issue_state behavior."""
+class TestPropagateIssueStates:
+    """_propagate_issue_states behavior.
 
-    def test_updates_all_chunks_for_repo_and_issue(self):
+    Issue #378: state propagation is a single set-based UPDATE per repo
+    (one round-trip regardless of issue count) that only rewrites chunks
+    whose state actually changed, so an unchanged repo produces no row
+    rewrites in chunks.
+    """
+
+    def test_single_set_based_update_joins_body_rows(self):
+        """One UPDATE for the whole repo, joining chunks to the
+        comment_id = 0 body rows of issue_items."""
         conn = MagicMock()
         cursor = MagicMock()
         cursor.rowcount = 3
         conn.cursor.return_value.__enter__.return_value = cursor
 
-        _propagate_issue_state(conn, "o/r", 42, "closed")
+        _propagate_issue_states(conn, "o/r")
 
-        cursor.execute.assert_called_once_with(
-            "UPDATE chunks SET state = %s WHERE repo = %s AND issue_no = %s",
-            ("closed", "o/r", 42),
-        )
+        cursor.execute.assert_called_once()
+        sql, params = cursor.execute.call_args[0]
+        # One round-trip per repo: the whole repo in a single statement
+        assert params == ("o/r",)
+        # Set-based join to body rows (not a per-issue WHERE)
+        assert "UPDATE chunks AS c" in sql
+        assert "FROM issue_items AS b" in sql
+        assert "b.comment_id = 0" in sql
+        assert "c.repo = b.repo" in sql
+        assert "c.issue_no = b.issue_no" in sql
+        # Unchanged states must not rewrite rows (IS DISTINCT FROM, not <>:
+        # state is nullable)
+        assert "IS DISTINCT FROM" in sql
+
+    def test_no_changed_states_means_no_writes(self):
+        """The statement must be a no-op for a repo whose states are all
+        unchanged -- the steady state (issue #378 outcome 1).  This is
+        guaranteed by the IS DISTINCT FROM predicate, so the test pins
+        that the predicate is present."""
+        conn = MagicMock()
+        cursor = MagicMock()
+        cursor.rowcount = 0
+        conn.cursor.return_value.__enter__.return_value = cursor
+
+        _propagate_issue_states(conn, "o/r")
+
+        sql, _ = cursor.execute.call_args[0]
+        assert "c.state IS DISTINCT FROM b.state" in sql
 
     def test_zero_rowcount_does_not_log(self):
         """No exception when rowcount=0."""
@@ -236,7 +268,7 @@ class TestPropagateIssueState:
         cursor.rowcount = 0
         conn.cursor.return_value.__enter__.return_value = cursor
 
-        _propagate_issue_state(conn, "o/r", 42, "open")
+        _propagate_issue_states(conn, "o/r")
 
 
 
@@ -944,7 +976,7 @@ class TestSyncIssuesCursor:
             patch("shiori.sync_issues._api_pages_gen", return_value=iter([page])),
             patch("shiori.sync_issues.get_cursor", return_value=None),
             patch("shiori.sync_issues._upsert_issue_item"),
-            patch("shiori.sync_issues._propagate_issue_state"),
+            patch("shiori.sync_issues._propagate_issue_states"),
             patch("shiori.sync_issues._should_index", return_value=False),
             patch("shiori.sync_issues.set_cursor") as mock_set,
         ):
@@ -990,7 +1022,7 @@ class TestSyncIssuesPrReviewGuard:
     @patch("shiori.sync_issues.get_cursor", return_value=None)
     @patch("shiori.sync_issues._api_pages_gen")
     @patch("shiori.sync_issues._upsert_issue_item")
-    @patch("shiori.sync_issues._propagate_issue_state")
+    @patch("shiori.sync_issues._propagate_issue_states")
     @patch("shiori.sync_issues._should_index", return_value=False)
     @patch("shiori.sync_issues._sync_pr_reviews")
     @patch("shiori.sync_issues.set_cursor")
@@ -1008,7 +1040,7 @@ class TestSyncIssuesPrReviewGuard:
     @patch("shiori.sync_issues.get_cursor", return_value=None)
     @patch("shiori.sync_issues._api_pages_gen")
     @patch("shiori.sync_issues._upsert_issue_item")
-    @patch("shiori.sync_issues._propagate_issue_state")
+    @patch("shiori.sync_issues._propagate_issue_states")
     @patch("shiori.sync_issues._should_index", return_value=False)
     @patch("shiori.sync_issues._sync_pr_reviews")
     @patch("shiori.sync_issues.set_cursor")
@@ -1027,7 +1059,7 @@ class TestSyncIssuesPrReviewGuard:
     @patch("shiori.sync_issues.get_cursor", return_value=None)
     @patch("shiori.sync_issues._api_pages_gen")
     @patch("shiori.sync_issues._upsert_issue_item")
-    @patch("shiori.sync_issues._propagate_issue_state")
+    @patch("shiori.sync_issues._propagate_issue_states")
     @patch("shiori.sync_issues._should_index", return_value=False)
     @patch("shiori.sync_issues._sync_pr_reviews")
     @patch("shiori.sync_issues.set_cursor")
@@ -1355,8 +1387,13 @@ class TestIndexIssuesIncremental:
             "embedder must be called for remaining items"
 
     def test_propagate_state_covers_all_body_rows(self):
-        """_propagate_issue_state runs for ALL body rows, not just
-        the filtered subset (state propagation unchanged, outcome 6)."""
+        """State propagation covers ALL body rows -- issue 1 (body-only,
+        not re-indexed) and issue 2 (re-indexed) -- in a single set-based
+        statement (state propagation unchanged, outcome 6 of #56).
+
+        One call for the whole repo: the number of round-trips must not
+        scale with the number of issues (issue #378 outcome 2).
+        """
         settings = Settings()
         embedder = MagicMock()
         embedder.embed_passages.return_value = [[0.1, 0.2]]
@@ -1367,16 +1404,32 @@ class TestIndexIssuesIncremental:
         ]
         filtered = [self._make_item_row(2, body="new body")]
 
-        with patch("shiori.sync_issues._propagate_issue_state") as mock_prop:
+        with patch("shiori.sync_issues._propagate_issue_states") as mock_prop:
             conn = self._make_conn(body, filtered)
             n = index_issues(settings, conn, embedder, "o/r")
 
         assert n == 1
-        # Both issues must have state propagated
-        assert mock_prop.call_count == 2
-        issues_propagated = {call[0][2] for call in mock_prop.call_args_list}
-        assert 1 in issues_propagated, "issue 1 (body-only, not re-indexed) must get state propagation"
-        assert 2 in issues_propagated, "issue 2 (re-indexed) must get state propagation"
+        # A single statement covers both issues, not one call per issue
+        mock_prop.assert_called_once_with(conn, "o/r")
+
+    def test_propagate_states_when_nothing_to_index(self):
+        """When nothing needs indexing, state propagation still runs --
+        as a single set-based statement, not one call per issue
+        (issue #378: both call sites must be set-based)."""
+        settings = Settings()
+        embedder = MagicMock()
+        body = [
+            (1, "issue", "open"),
+            (2, "issue", "closed"),
+        ]
+        filtered = []  # everything already indexed
+
+        with patch("shiori.sync_issues._propagate_issue_states") as mock_prop:
+            conn = self._make_conn(body, filtered)
+            n = index_issues(settings, conn, embedder, "o/r")
+
+        assert n == 0
+        mock_prop.assert_called_once_with(conn, "o/r")
 
     def test_signature_backward_compatible(self):
         """index_issues signature unchanged: callers in pipeline.py and

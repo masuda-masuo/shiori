@@ -27,7 +27,7 @@ from .sync_docs import sync_docs, fetch_docs, index_docs
 from .sync_issues import (
     _index_item,
     _issue_title_state_kind,
-    _propagate_issue_state,
+    _propagate_issue_states,
     _sync_pr_reviews,
     _upsert_issue_item,
     sync_issues,
@@ -44,6 +44,6 @@ __all__ = [  # re-export (ruff F401 avoidance)
     "fetch_docs", "index_docs",
     "fetch_issues", "index_issues",
     "index_code",
-    "_upsert_issue_item", "_issue_title_state_kind", "_propagate_issue_state",
+    "_upsert_issue_item", "_issue_title_state_kind", "_propagate_issue_states",
     "_index_item", "_sync_pr_reviews",
 ]
