@@ -180,7 +180,7 @@ def index_code(
             )
         if buffer is None:
             conn.commit()
-        log.info("indexed code %s (%d chunks, %s)", path, len(chunks), prog_lang or "?")
+        log.debug("indexed code %s (%d chunks, %s)", path, len(chunks), prog_lang or "?")
 
     if buffer is None:
         conn.commit()

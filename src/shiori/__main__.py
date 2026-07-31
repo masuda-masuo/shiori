@@ -2,13 +2,43 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
+
+log = logging.getLogger(__name__)
+
+
+def log_level_from_env() -> int:
+    """Resolve the root log level from the SHIORI_LOG_LEVEL env var.
+
+    Recognised values (case-insensitive): DEBUG, INFO, WARNING, ERROR,
+    CRITICAL.  Unset, empty, or unrecognised values fall back to INFO --
+    the previous hard-coded default -- so a bad value never stops the
+    process from starting.
+    """
+    raw = os.environ.get("SHIORI_LOG_LEVEL", "").strip()
+    if not raw:
+        return logging.INFO
+    level = logging.getLevelName(raw.upper())
+    if not isinstance(level, int):
+        log.warning(
+            "SHIORI_LOG_LEVEL=%r not recognised "
+            "(use DEBUG/INFO/WARNING/ERROR/CRITICAL); using INFO",
+            raw,
+        )
+        return logging.INFO
+    return level
 
 
 def main() -> None:
     logging.basicConfig(
-        level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s"
+        level=log_level_from_env(),
+        format="%(asctime)s %(name)s %(levelname)s %(message)s",
     )
-    parser = argparse.ArgumentParser(prog="shiori")
+    parser = argparse.ArgumentParser(
+        prog="shiori",
+        epilog="Environment: SHIORI_LOG_LEVEL sets the log level "
+        "(DEBUG/INFO/WARNING/ERROR/CRITICAL, default INFO).",
+    )
     sub = parser.add_subparsers(dest="command", required=True)
 
     # ── ingest (with subcommands) ──────────────────────────────────────

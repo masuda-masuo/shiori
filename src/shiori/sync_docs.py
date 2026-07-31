@@ -155,7 +155,7 @@ def index_docs(
             )
         if buffer is None:
             conn.commit()
-        log.info("indexed doc %s (%d chunks)", path, len(chunks))
+        log.debug("indexed doc %s (%d chunks)", path, len(chunks))
 
     if buffer is None:
         conn.commit()
@@ -279,7 +279,7 @@ def sync_docs(
             )
         if buffer is None:
             conn.commit()
-        log.info("indexed doc %s (%d chunks)", path, len(chunks))
+        log.debug("indexed doc %s (%d chunks)", path, len(chunks))
 
     if buffer is None:
         conn.commit()
