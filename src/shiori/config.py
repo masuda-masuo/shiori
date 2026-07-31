@@ -55,6 +55,30 @@ def _allow_rebuild_from_env() -> bool:
     )
 
 
+#: Default pending-work volume that triggers the bulk path (issue #376).
+#: A backlog of this many un-indexed/stale items across the targeted repos
+#: means batching (ChunkBuffer) pays off; routine incremental runs stay far
+#: below it and keep today's item-at-a-time path.
+DEFAULT_BULK_PENDING_THRESHOLD: int = 10_000
+
+
+def _bulk_pending_threshold_from_env() -> int:
+    """Return SHIORI_BULK_PENDING_THRESHOLD as a positive int (issue #376).
+
+    Unset, empty, unparseable, or non-positive values fall back to
+    ``DEFAULT_BULK_PENDING_THRESHOLD`` -- the process must never crash on a
+    bad value.
+    """
+    raw = os.environ.get("SHIORI_BULK_PENDING_THRESHOLD", "").strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        return DEFAULT_BULK_PENDING_THRESHOLD
+    if value <= 0:
+        return DEFAULT_BULK_PENDING_THRESHOLD
+    return value
+
+
 # Default embedding model baked into the image (docker/app/Dockerfile).
 # To change, fork the image and rebuild. Runtime env var override removed (#255).
 DEFAULT_EMBEDDING_MODEL = "intfloat/multilingual-e5-small"
@@ -215,6 +239,14 @@ class Settings:
         default_factory=lambda: int(
             os.environ.get("SHIORI_MAX_PARALLEL_MAINTENANCE_WORKERS", "0")
         )
+    )
+    # --- Bulk-path trigger (issue #376) ---
+    # Pending (not-yet-indexed) items across the targeted repos at or above
+    # which the invocation takes the bulk (batched) path. A single COUNT
+    # over issue_items decides; nothing is truncated or re-fetched.
+    # Unset/empty/unparseable/non-positive values fall back to the default.
+    bulk_pending_threshold: int = field(
+        default_factory=_bulk_pending_threshold_from_env
     )
 
     def repo_dir(self, repo: str) -> str:

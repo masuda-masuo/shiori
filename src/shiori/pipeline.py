@@ -52,9 +52,17 @@ def _is_bulk_path(conn, rebuild: bool) -> bool:
     """Determine bulk path: rebuild=True, chunks table empty/missing, or the
     HNSW index absent (issue #72; HNSW-absence check added by issue #352).
 
-    Kept in sync with ``shiori.ingest._is_bulk_path`` (duplicated rather than
-    imported -- this module predates the shared-helper extraction, see
-    issue #281). Heavy-index absence is the persistent, DB-derived marker of
+    Duplicated from ``shiori.ingest._is_bulk_path`` rather than imported --
+    this module predates the shared-helper extraction, see issue #281.
+
+    **The two copies have diverged (issue #376).** The CLI copy also enters
+    the bulk path when the pending work for the targeted repos exceeds
+    ``SHIORI_BULK_PENDING_THRESHOLD``; this one does not, so an MCP
+    ``ingest()`` call still takes the item-at-a-time path on a large
+    backlog. Deliberate: the volume trigger was measured on the CLI only.
+    Do not describe these as in sync until that is fixed.
+
+    Heavy-index absence is the persistent, DB-derived marker of
     a drain in progress (e.g. a CLI ``reindex``): while it lasts, an MCP
     ``ingest()`` call must stay on the deferred-index bulk path too, or it
     would resurrect the heavy indexes mid-drain via a plain ``schema.migrate``.
