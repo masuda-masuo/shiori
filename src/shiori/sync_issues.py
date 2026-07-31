@@ -63,20 +63,34 @@ def _issue_title_state_kind(
     return (row[0], row[1], row[2]) if row else (None, None, None)
 
 
-def _propagate_issue_state(
-    conn: psycopg.Connection, repo: str, issue_no: int, state: str | None
-) -> None:
-    """Propagate issue_items state changes to chunks (issue #56).
+def _propagate_issue_states(conn: psycopg.Connection, repo: str) -> None:
+    """Propagate issue_items body-row states to chunks (issue #56).
+
+    Single set-based UPDATE joining chunks to the comment_id = 0 body
+    rows of issue_items, so the number of round-trips does not scale
+    with the number of issues (issue #378).  Uses IS DISTINCT FROM (not
+    ``<>``: state is nullable) so a chunk whose state is unchanged is
+    not rewritten -- PostgreSQL would otherwise create a new row version
+    plus index entries for every chunk on every ingest run.
     """
     with conn.cursor() as cur:
         cur.execute(
-            "UPDATE chunks SET state = %s WHERE repo = %s AND issue_no = %s",
-            (state, repo, issue_no),
+            """
+            UPDATE chunks AS c
+            SET state = b.state
+            FROM issue_items AS b
+            WHERE b.repo = %s
+              AND b.comment_id = 0
+              AND c.repo = b.repo
+              AND c.issue_no = b.issue_no
+              AND c.state IS DISTINCT FROM b.state
+            """,
+            (repo,),
         )
         if cur.rowcount:
             log.debug(
-                "propagated state=%s to %d chunks (repo=%s, issue_no=%d)",
-                state, cur.rowcount, repo, issue_no,
+                "propagated states to %d chunks (repo=%s)",
+                cur.rowcount, repo,
             )
 
 
@@ -555,23 +569,7 @@ def index_issues(
 
     Returns the number of items indexed.
     """
-    # --- Step 1: fetch ALL body rows for state propagation ---
-    # This must see every body row regardless of indexed_at so that
-    # close/reopen state changes are propagated to chunks even for
-    # otherwise-unchanged issues (outcome 6).
-    with conn.cursor() as cur:
-        cur.execute(
-            "SELECT issue_no, kind, state FROM issue_items "
-            "WHERE repo = %s AND comment_id = 0",
-            (repo,),
-        )
-        body_rows = cur.fetchall()
-
-    issue_bodies: dict[int, tuple[str | None, str | None]] = {}
-    for r in body_rows:
-        issue_bodies[r[0]] = (r[1], r[2])  # kind, state from body row
-
-    # --- Step 2: select only items that need (re)indexing ---
+    # --- Step 1: select only items that need (re)indexing ---
     with conn.cursor() as cur:
         cur.execute(
             """SELECT issue_no, comment_id, kind, title, author, is_bot,
@@ -586,10 +584,27 @@ def index_issues(
         rows = cur.fetchall()
 
     if not rows:
-        # Only propagate states -- no items to index
-        for issue_no, (_, st) in issue_bodies.items():
-            _propagate_issue_state(conn, repo, issue_no, st)
+        # Nothing to index -- propagate states and stop before reading the
+        # body rows, which are only needed by the indexing loop below.
+        # In the steady state this is the whole of the work (issue #378).
+        _propagate_issue_states(conn, repo)
         return 0
+
+    # --- Step 2: fetch ALL body rows for the indexing loop ---
+    # This must see every body row regardless of indexed_at so that an
+    # item being reindexed picks up its parent issue's kind and state
+    # even when the body row itself is unchanged (outcome 6).
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT issue_no, kind, state FROM issue_items "
+            "WHERE repo = %s AND comment_id = 0",
+            (repo,),
+        )
+        body_rows = cur.fetchall()
+
+    issue_bodies: dict[int, tuple[str | None, str | None]] = {}
+    for r in body_rows:
+        issue_bodies[r[0]] = (r[1], r[2])  # kind, state from body row
 
     n_indexed = 0
 
@@ -682,8 +697,7 @@ def index_issues(
         conn.commit()
 
     # Propagate states to chunks (over ALL body rows, not just indexed)
-    for issue_no, (_, st) in issue_bodies.items():
-        _propagate_issue_state(conn, repo, issue_no, st)
+    _propagate_issue_states(conn, repo)
 
     return n_indexed
 
