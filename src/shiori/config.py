@@ -123,20 +123,49 @@ class IndexBudget:
 DEFAULT_BULK_PENDING_THRESHOLD: int = 10_000
 
 
-def _bulk_pending_threshold_from_env() -> int:
-    """Return SHIORI_BULK_PENDING_THRESHOLD as a positive int (issue #376).
+def _int_from_env(name: str, default: int, minimum: int | None = None) -> int:
+    """Return env var *name* as an int, with a per-setting range policy (#397).
 
-    Unset, empty, unparseable, or non-positive values fall back to
-    ``DEFAULT_BULK_PENDING_THRESHOLD`` -- the process must never crash on a
-    bad value.
+    Unset, empty (the plain ``${VAR:-}`` compose form), whitespace-only, or
+    unparseable values fall back to *default* -- the process must never
+    crash on a bad value (``int("")`` raises, which is exactly the trap of
+    the ``${VAR:-}`` compose expansion).
+
+    *minimum* is inclusive: a parsed value below it also falls back to
+    *default*; ``None`` accepts any parsed integer.  Zero and negative
+    values mean different things for different settings (0 is a documented
+    value for some), so each caller must derive *minimum* from the code
+    that consumes the setting -- see the per-field comments in
+    :class:`Settings`.
     """
-    raw = os.environ.get("SHIORI_BULK_PENDING_THRESHOLD", "").strip()
+    raw = os.environ.get(name, "").strip()
     try:
         value = int(raw)
     except ValueError:
-        return DEFAULT_BULK_PENDING_THRESHOLD
-    if value <= 0:
-        return DEFAULT_BULK_PENDING_THRESHOLD
+        return default
+    if minimum is not None and value < minimum:
+        return default
+    return value
+
+
+def _float_from_env(
+    name: str, default: float, minimum: float | None = None
+) -> float:
+    """Return env var *name* as a float; same contract as ``_int_from_env``.
+
+    The ``_cb_*_backoff_from_env`` helpers below are deliberately NOT
+    expressed through this one: they reject non-positive values (an
+    *exclusive* zero bound), which no caller of this helper needs --
+    growing an exclusive-minimum option for those three alone is not worth
+    the extra surface.
+    """
+    raw = os.environ.get(name, "").strip()
+    try:
+        value = float(raw)
+    except ValueError:
+        return default
+    if minimum is not None and value < minimum:
+        return default
     return value
 
 
@@ -145,52 +174,14 @@ def _bulk_pending_threshold_from_env() -> int:
 #: compose form), unparseable, or non-positive.
 DEFAULT_FETCH_CONCURRENCY: int = 4
 
-
-def _fetch_concurrency_from_env() -> int:
-    """Return SHIORI_FETCH_CONCURRENCY as a positive int.
-
-    Unset, empty (the plain ``${VAR:-}`` compose form), unparseable, or
-    non-positive values fall back to ``DEFAULT_FETCH_CONCURRENCY`` -- the
-    process must never crash on a bad value.
-    """
-    raw = os.environ.get("SHIORI_FETCH_CONCURRENCY", "").strip()
-    try:
-        value = int(raw)
-    except ValueError:
-        return DEFAULT_FETCH_CONCURRENCY
-    if value <= 0:
-        return DEFAULT_FETCH_CONCURRENCY
-    return value
-
-
 #: Default circuit-breaker consecutive-failure threshold (issue #345).
 #: Used when SHIORI_CB_THRESHOLD is unset, empty (the plain ``${VAR:-}``
-#: compose form), unparseable, or negative.
+#: compose form), unparseable, or negative.  ``0`` is *not* a bad value: it
+#: is the documented off-switch (``ingest._should_skip_repo`` disables the
+#: breaker on ``cb_threshold <= 0``) and is returned as-is -- folding it
+#: into the default would turn a working knob into a silent no-op now that
+#: this setting really reaches the container (issue #371).
 DEFAULT_CB_THRESHOLD: int = 5
-
-
-def _cb_threshold_from_env() -> int:
-    """Return SHIORI_CB_THRESHOLD as a non-negative int.
-
-    Unset, empty (the plain ``${VAR:-}`` compose form), unparseable, or
-    negative values fall back to ``DEFAULT_CB_THRESHOLD`` -- the process
-    must never crash on a bad value.
-
-    ``0`` is *not* a bad value: it is the documented off-switch and is
-    returned as-is, because ``ingest._should_skip_repo`` disables the
-    breaker on ``cb_threshold <= 0``.  Folding it into the default would
-    turn a working knob into a silent no-op now that this setting really
-    reaches the container (issue #371).
-    """
-    raw = os.environ.get("SHIORI_CB_THRESHOLD", "").strip()
-    try:
-        value = int(raw)
-    except ValueError:
-        return DEFAULT_CB_THRESHOLD
-    if value < 0:
-        return DEFAULT_CB_THRESHOLD
-    return value
-
 
 #: Default circuit-breaker base backoff in seconds (issue #345). Used when
 #: SHIORI_CB_BASE_BACKOFF is unset, empty (the plain ``${VAR:-}`` compose
@@ -300,22 +291,40 @@ class Settings:
         default_factory=lambda: os.environ.get("SHIORI_DATA_DIR", "/data")
     )
     # Max chunk characters (character-based. See detailed design/02 decisions).
+    # Positive only: with max_chars <= 0 chunking._split_long_text cannot
+    # advance (_find_breakpoint returns 0, so the cut never shrinks the
+    # remainder -- an infinite loop, not a documented behaviour).
     chunk_max_chars: int = field(
-        default_factory=lambda: int(os.environ.get("SHIORI_CHUNK_MAX_CHARS", "1200"))
+        default_factory=lambda: _int_from_env(
+            "SHIORI_CHUNK_MAX_CHARS", 1200, minimum=1
+        )
     )
     # Search result defaults (see detailed design/05 and 06 decisions).
+    # Positive only: 0 would make every search return no hits (search.py
+    # truncates with ranked[:k]) and a negative k would slice from the
+    # tail; neither is a documented behaviour.
     default_top_k: int = field(
-        default_factory=lambda: int(os.environ.get("SHIORI_TOP_K", "8"))
+        default_factory=lambda: _int_from_env("SHIORI_TOP_K", 8, minimum=1)
     )
+    # Positive only: search._row_to_hit slices content[:snippet_chars], so
+    # 0 turns every snippet into a bare ellipsis and a negative value
+    # drops the *end* of the content; neither is a documented behaviour.
     snippet_chars: int = field(
-        default_factory=lambda: int(os.environ.get("SHIORI_SNIPPET_CHARS", "400"))
+        default_factory=lambda: _int_from_env(
+            "SHIORI_SNIPPET_CHARS", 400, minimum=1
+        )
     )
     # Pull-type sync debounce interval (seconds). Max seconds between Phase 1
     # (clone refresh) pulls for the same repo. 0 disables (always pull).
     # Formerly the background auto-sync interval; repurposed in #236.
+    # 0 is the documented "always pull" value and the default; it must pass
+    # through (pipeline._ensure_phase1 clamps the debounce with
+    # max(interval, _PHASE1_MIN_DEBOUNCE)). A negative value behaves
+    # exactly like 0 there, so falling back to the default (0) on negative
+    # input is behaviour-neutral.
     sync_interval_seconds: int = field(
-        default_factory=lambda: int(
-            os.environ.get("SHIORI_SYNC_INTERVAL_SECONDS", "0")
+        default_factory=lambda: _int_from_env(
+            "SHIORI_SYNC_INTERVAL_SECONDS", 0, minimum=0
         )
     )
     # --- Steady sync (issue #347): EXPECTED host-timer cadence ---
@@ -324,22 +333,30 @@ class Settings:
     # there is no in-server sync loop reading these values on a schedule.
     # shiori_status uses them only to derive a role-aware staleness
     # threshold (2x the expected interval; see tools/status.py).
+    # Any parsed integer passes through (no minimum): the only consumer,
+    # tools/status.py, floors the derived staleness threshold at
+    # _STALE_SECONDS_FLOOR and otherwise just reports the raw value, so
+    # zero/negative are already defended there and their meaning is
+    # preserved rather than silently rewritten here.
     dev_sync_interval_seconds: int = field(
-        default_factory=lambda: int(
-            os.environ.get("SHIORI_DEV_SYNC_INTERVAL_SECONDS", "900")
+        default_factory=lambda: _int_from_env(
+            "SHIORI_DEV_SYNC_INTERVAL_SECONDS", 900
         )
     )
     ref_sync_interval_seconds: int = field(
-        default_factory=lambda: int(
-            os.environ.get("SHIORI_REF_SYNC_INTERVAL_SECONDS", "86400")
+        default_factory=lambda: _int_from_env(
+            "SHIORI_REF_SYNC_INTERVAL_SECONDS", 86400
         )
     )
     # MCP server (streamable HTTP)
     mcp_host: str = field(
         default_factory=lambda: os.environ.get("SHIORI_MCP_HOST", "0.0.0.0")
     )
+    # Positive only: this is a served endpoint (tools/registry.py passes it
+    # to FastMCP(port=...)), so 0 (bind an ephemeral random port) and
+    # negative (bind error) have no useful meaning here.
     mcp_port: int = field(
-        default_factory=lambda: int(os.environ.get("SHIORI_MCP_PORT", "8765"))
+        default_factory=lambda: _int_from_env("SHIORI_MCP_PORT", 8765, minimum=1)
     )
     # Allowlist for indexing bot logins (comma-separated. Issue #25).
     # Posts via GitHub App get [bot] suffix, but bots acting on
@@ -363,7 +380,11 @@ class Settings:
     # Fetch-phase concurrency cap. Max number of repos fetched simultaneously.
     # The actual worker count is max(1, min(len(targets), this value)).
     # Unset/empty/unparseable/non-positive values fall back to the default.
-    fetch_concurrency: int = field(default_factory=_fetch_concurrency_from_env)
+    fetch_concurrency: int = field(
+        default_factory=lambda: _int_from_env(
+            "SHIORI_FETCH_CONCURRENCY", DEFAULT_FETCH_CONCURRENCY, minimum=1
+        )
+    )
     # Backfill seed for ref repos (not in SHIORI_DEV_REPOS) whose cursor is None.
     # YYYY-MM-DD format. CLI --backfill-since overrides this for all targets.
     # Dev repos are never seeded by this env var (always full backfill).
@@ -375,7 +396,13 @@ class Settings:
     # built-in defaults (the process must never crash on a bad value; see
     # the *_from_env helpers above).
     # Set SHIORI_CB_THRESHOLD=0 to disable the circuit breaker entirely.
-    cb_threshold: int = field(default_factory=_cb_threshold_from_env)
+    # minimum=0, NOT 1: zero is the documented off-switch and must pass
+    # through (see DEFAULT_CB_THRESHOLD); only negative values fall back.
+    cb_threshold: int = field(
+        default_factory=lambda: _int_from_env(
+            "SHIORI_CB_THRESHOLD", DEFAULT_CB_THRESHOLD, minimum=0
+        )
+    )
     # Base backoff in seconds. The actual backoff grows exponentially:
     #   min(cap, cb_base_backoff * 2^(failures - 1))
     cb_base_backoff: float = field(default_factory=_cb_base_backoff_from_env)
@@ -394,16 +421,26 @@ class Settings:
     # Maximum seconds to wait on a rate-limit response (Retry-After or
     # x-ratelimit-reset). A bogus reset value cannot park the process
     # beyond this cap.
+    # 0 is meaningful ("never sleep, retry immediately"):
+    # github_errors.compute_wait_seconds clamps every wait with
+    # min(..., max_wait), and time.sleep(0) is legal. A negative cap would
+    # propagate into api_utils' time.sleep() and raise ValueError mid-sync,
+    # so only negative values fall back.
     rate_limit_max_wait: float = field(
-        default_factory=lambda: float(
-            os.environ.get("SHIORI_RATE_LIMIT_MAX_WAIT", "60")
+        default_factory=lambda: _float_from_env(
+            "SHIORI_RATE_LIMIT_MAX_WAIT", 60.0, minimum=0.0
         )
     )
     # Maximum number of retries when rate-limited before giving up and
     # recording a failure.
+    # 0 is meaningful ("do not retry"): api_utils._api_pages_gen raises
+    # RateLimitExhausted once retries (starting at 0) >= max_retries. A
+    # negative value would behave identically to 0 but is treated as a
+    # misconfiguration and falls back, matching SHIORI_CB_THRESHOLD's
+    # non-negative convention.
     rate_limit_max_retries: int = field(
-        default_factory=lambda: int(
-            os.environ.get("SHIORI_RATE_LIMIT_MAX_RETRIES", "3")
+        default_factory=lambda: _int_from_env(
+            "SHIORI_RATE_LIMIT_MAX_RETRIES", 3, minimum=0
         )
     )
     # --- Heavy index build knobs (issue #352) ---
@@ -416,9 +453,13 @@ class Settings:
     # a serial HNSW build: PARALLEL HNSW allocates ~maintenance_work_mem of
     # DSM in /dev/shm, and Docker's 64MB default there overflows it ("could
     # not resize shared memory segment ... No space left on device").
+    # 0 is the documented default (serial build) and is injected verbatim
+    # into SET max_parallel_maintenance_workers (schema.create_heavy_indexes);
+    # it must pass through. Negative is outside the PostgreSQL GUC's range
+    # (0..1024), would fail the SET during the index build, and falls back.
     max_parallel_maintenance_workers: int = field(
-        default_factory=lambda: int(
-            os.environ.get("SHIORI_MAX_PARALLEL_MAINTENANCE_WORKERS", "0")
+        default_factory=lambda: _int_from_env(
+            "SHIORI_MAX_PARALLEL_MAINTENANCE_WORKERS", 0, minimum=0
         )
     )
     # --- Bulk-path trigger (issue #376) ---
@@ -427,7 +468,11 @@ class Settings:
     # over issue_items decides; nothing is truncated or re-fetched.
     # Unset/empty/unparseable/non-positive values fall back to the default.
     bulk_pending_threshold: int = field(
-        default_factory=_bulk_pending_threshold_from_env
+        default_factory=lambda: _int_from_env(
+            "SHIORI_BULK_PENDING_THRESHOLD",
+            DEFAULT_BULK_PENDING_THRESHOLD,
+            minimum=1,
+        )
     )
     # --- Index-run time budget (issue #377) ---
     # Maximum *working* seconds (time.monotonic: machine-suspend time does

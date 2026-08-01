@@ -90,7 +90,10 @@ services:
     environment:
       DATABASE_URL: postgresql://shiori:shiori@db:5432/shiori
       SHIORI_REPOS: ${SHIORI_REPOS:-}
-      SHIORI_SYNC_INTERVAL_SECONDS: ${SHIORI_SYNC_INTERVAL_SECONDS:-0}
+      # config.py が防御的にパースするため ${VAR:-} 形式で安全（空文字列・
+      # 不正値は組み込みデフォルトへフォールバック）。デフォルト値は
+      # config.py だけが持つ（#397。旧 :-0 は単一情報源ルール違反だった）。
+      SHIORI_SYNC_INTERVAL_SECONDS: ${SHIORI_SYNC_INTERVAL_SECONDS:-}
       SHIORI_INDEX_BOT_LOGINS: ${SHIORI_INDEX_BOT_LOGINS:-}
       SHIORI_INDEX_CODE: ${SHIORI_INDEX_CODE:-}
       SHIORI_DEV_REPOS: ${SHIORI_DEV_REPOS:-}

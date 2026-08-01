@@ -125,12 +125,23 @@ def _documented_settings() -> set[str]:
 
 
 def _settings_read_by_code() -> set[str]:
-    """SHIORI_* keys read via os.environ.get/os.getenv anywhere in src/."""
+    """SHIORI_* keys read via os.environ.get/os.getenv anywhere in src/.
+
+    Also matches the defensive numeric read form of #397:
+    ``_int_from_env("SHIORI_X", ...)`` / ``_float_from_env("SHIORI_X", ...)``
+    take the variable *name* and perform the ``os.environ.get`` internally,
+    so the literal scan alone can no longer see those reads.
+    """
     found: set[str] = set()
     for path in SRC_DIR.rglob("*.py"):
         text = path.read_text(encoding="utf-8")
         found.update(
             re.findall(r'os\.(?:environ\.get|getenv)\("(SHIORI_[A-Z0-9_]+)"', text)
+        )
+        found.update(
+            re.findall(
+                r'_(?:int|float)_from_env\(\s*"(SHIORI_[A-Z0-9_]+)"', text
+            )
         )
     return found
 
@@ -425,11 +436,6 @@ class TestEmptyStringSemantics:
         applies -- changing it there silently does nothing. That is the
         defect #386 removed for SHIORI_FETCH_CONCURRENCY; this keeps it
         from drifting back now that the code read is defensive.
-
-        SHIORI_SYNC_INTERVAL_SECONDS is the same defect class and is
-        deliberately left alone here (its compose entry still carries a
-        literal 0) -- listing it as a known gap keeps it visible instead of
-        silently exempt.
         """
         single_source = {
             "SHIORI_FETCH_CONCURRENCY",
@@ -440,8 +446,16 @@ class TestEmptyStringSemantics:
             "SHIORI_CB_BASE_BACKOFF",
             "SHIORI_CB_MAX_BACKOFF",
             "SHIORI_CB_REF_MAX_BACKOFF",
+            # Read became defensive in #397; the old ${VAR:-0} compose
+            # entry (the last known gap of this rule) is gone and the
+            # default (0) lives in config.py only.
+            "SHIORI_SYNC_INTERVAL_SECONDS",
         }
-        known_gaps = {"SHIORI_SYNC_INTERVAL_SECONDS"}
+        # Settings knowingly still carrying a literal default in compose.
+        # Empty since #397 (SHIORI_SYNC_INTERVAL_SECONDS was the last);
+        # the mechanism stays so a future gap is listed, not silently
+        # exempted.
+        known_gaps: set[str] = set()
         assert not (single_source & known_gaps)
 
         compose = _parse_compose(COMPOSE.read_text(encoding="utf-8"))
@@ -456,6 +470,18 @@ class TestEmptyStringSemantics:
                     f"${{{name}:-}} form so its default lives only in "
                     f"config.py, got {value!r}"
                 )
+
+
+def test_no_bare_numeric_env_reads_anywhere_in_src():
+    """No env read in src/ may be wrapped directly in int()/float() (#397).
+
+    Stronger than the compose-conjunction rule above: since #397 converted
+    the last ten bare reads, every numeric setting parses defensively, and
+    any new bare read would re-arm the ``int("")`` crash the moment someone
+    forwards the variable with the ``${VAR:-}`` form. Keep the invariant
+    absolute instead of waiting for the conjunction.
+    """
+    assert _bare_numeric_env_reads() == []
 
 
 def test_env_file_is_the_onnx_delivery_mechanism():
