@@ -1093,7 +1093,7 @@ class TestRunIndex:
         mock_index_issues = MagicMock()
         mock_index_code = MagicMock()
         with (
-            patch("shiori.ingest.db.connect", return_value=mock_conn),
+            patch("shiori.ingest.db.connect", return_value=mock_conn) as mock_connect,
             patch("shiori.ingest.schema.migrate"),
             patch("shiori.ingest._acquire_repo_lock", return_value=False),
             patch("shiori.ingest._release_repo_lock"),
@@ -1106,7 +1106,11 @@ class TestRunIndex:
         ):
             run_index(settings=self._mock_settings())
 
-        mock_conn.close.assert_called_once()
+        # Issue #373: run_index now opens a pre-flight connection and a separate
+        # one for the index loop. Pin the invariant that matters -- every
+        # connection opened is closed -- rather than a fixed count, so a future
+        # change to how many phases exist does not silently stop checking.
+        assert mock_conn.close.call_count == mock_connect.call_count
         mock_index_docs.assert_not_called()
         mock_index_issues.assert_not_called()
         mock_index_code.assert_not_called()
@@ -1117,7 +1121,7 @@ class TestRunIndex:
 
         mock_conn = MagicMock()
         with (
-            patch("shiori.ingest.db.connect", return_value=mock_conn),
+            patch("shiori.ingest.db.connect", return_value=mock_conn) as mock_connect,
             patch("shiori.ingest.schema.migrate"),
             patch("shiori.ingest._acquire_repo_lock", return_value=True),
             patch("shiori.ingest._release_repo_lock"),
@@ -1136,7 +1140,9 @@ class TestRunIndex:
         mock_index_docs.assert_called_once()
         mock_index_issues.assert_called_once()
         mock_index_code.assert_called_once()
-        mock_conn.close.assert_called_once()
+        # Issue #373: see test_lock_not_acquired_returns_early -- every
+        # connection opened must be closed, however many phases there are.
+        assert mock_conn.close.call_count == mock_connect.call_count
 
     def test_rebuild(self):
         """rebuild=True かつ bulk path 時、truncate_all_repos / drop_heavy_indexes が呼ばれる。"""

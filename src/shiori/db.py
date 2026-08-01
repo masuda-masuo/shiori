@@ -7,6 +7,8 @@ pgroonga for JP/EN full-text search (TokenMecab/Mecab preferred).
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime
 
 import psycopg
@@ -18,6 +20,38 @@ log = logging.getLogger(__name__)
 
 def connect(settings: Settings) -> psycopg.Connection:
     return psycopg.connect(settings.database_url, autocommit=False)
+
+
+@contextmanager
+def connect_scope(settings: Settings) -> Iterator[psycopg.Connection]:
+    """Short-lived DB connection that cannot leak across a phase boundary (issue #373).
+
+    ``connect()`` opens with ``autocommit=False``, so even a single SELECT
+    leaves the connection in an open transaction.  A pre-flight connection
+    carried across a long phase (parallel fetch, embedding) would sit idle
+    in that transaction until PostgreSQL kills it
+    (``idle_in_transaction_session_timeout``); the next phase then fails
+    with ``IdleInTransactionSessionTimeout``.
+
+    Use this for pre-flight work (bulk-path detection, schema prep,
+    circuit-breaker pre-check): the transaction is committed on success,
+    rolled back on exception (which is re-raised), and the connection is
+    always closed before the ``with`` block exits.  The long phase then
+    begins with no leftover connection and opens its own.
+    """
+    conn = connect(settings)
+    try:
+        yield conn
+    except BaseException:
+        # rollback() can itself raise (e.g. the server already killed this
+        # backend). Closing lives in finally so that failure cannot leak the
+        # connection -- which is the single thing this helper exists to prevent.
+        conn.rollback()
+        raise
+    else:
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def get_cursor(conn: psycopg.Connection, repo: str, kind: str) -> str | None:

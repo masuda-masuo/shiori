@@ -368,8 +368,13 @@ def run_fetch(
     # eliminates the connection leak that the old per-thread check had
     # (issue #345).
     explicit_repos = repos is not None
-    _cb_conn = db.connect(settings)
-    try:
+    # Pre-flight (migrate_light + circuit-breaker pre-check) runs on its own
+    # short-lived connection.  db.connect() opens with autocommit=False, so
+    # any SELECT would leave this connection idle in an open transaction for
+    # the whole fetch phase; PostgreSQL would then kill it with
+    # idle_in_transaction_session_timeout (issue #373).  connect_scope
+    # commits and closes it before the executor starts.
+    with db.connect_scope(settings) as _cb_conn:
         # fetch only writes issue_items/sync_state -- never needs heavy
         # indexes, and a full migrate() here would resurrect them mid-drain
         # if a reindex (#352) had dropped them (issue #352).
@@ -381,8 +386,6 @@ def run_fetch(
                 _cb_skipped.append(repo)
             else:
                 _active_targets.append(repo)
-    finally:
-        _cb_conn.close()
 
     if _cb_skipped:
         log.info(
@@ -483,37 +486,46 @@ def run_index(
     targets = _order_repos_dev_first(targets, settings.dev_repos)
     route = _route()
 
-    conn = db.connect(settings)
-    # Issue #376: the pending-volume threshold is scoped to the targeted
-    # repos, so targets/settings are passed into the bulk-path decision.
-    is_bulk = _is_bulk_path(conn, rebuild, targets, settings)
+    # Pre-flight (bulk-path detection, schema prep, destructive bulk ops)
+    # runs on its own short-lived connection.  db.connect() opens with
+    # autocommit=False, so any SELECT would leave this connection idle in an
+    # open transaction while the index loop embeds; PostgreSQL would then
+    # kill it with idle_in_transaction_session_timeout (issue #373).
+    # connect_scope commits and closes it before the loop starts, and the
+    # loop opens a fresh connection below.
+    with db.connect_scope(settings) as pre_conn:
+        # Issue #376: the pending-volume threshold is scoped to the targeted
+        # repos, so targets/settings are passed into the bulk-path decision.
+        is_bulk = _is_bulk_path(pre_conn, rebuild, targets, settings)
 
-    if is_bulk:
-        log.info("bulk path detected (rebuild=%s), using light schema + deferred indexes", rebuild)
-        schema.migrate_light(conn, settings)
-    else:
-        schema.migrate(conn, settings)
-
-    # Bulk path: destructive operations (no per-repo lock needed at schema level)
-    if is_bulk:
-        if rebuild:
-            log.warning("rebuild: discarding existing index and sync cursors")
-            schema.truncate_all_repos(conn)
-            conn.commit()
-        # Issue #364: only rebuild or a run that intends to cover every
-        # configured repo may drop the heavy indexes. A scoped bulk run
-        # (e.g. refreshing one dev repo) neither drops nor creates them --
-        # during a genuine drain they're already absent, and if they exist
-        # the drop is exactly the #364 accident (a scoped run destroying
-        # another lane's in-progress or just-finished HNSW build).
-        if rebuild or _bulk_covers_all_repos(targets, settings):
-            schema.drop_heavy_indexes(conn)
+        if is_bulk:
+            log.info("bulk path detected (rebuild=%s), using light schema + deferred indexes", rebuild)
+            schema.migrate_light(pre_conn, settings)
         else:
-            log.info(
-                "heavy indexes drop skipped: scoped bulk run (%d/%d repos); "
-                "indexes are left as-is for another lane's drain",
-                len(targets), len(settings.repos),
-            )
+            schema.migrate(pre_conn, settings)
+
+        # Bulk path: destructive operations (no per-repo lock needed at schema level)
+        if is_bulk:
+            if rebuild:
+                log.warning("rebuild: discarding existing index and sync cursors")
+                schema.truncate_all_repos(pre_conn)
+                pre_conn.commit()
+            # Issue #364: only rebuild or a run that intends to cover every
+            # configured repo may drop the heavy indexes. A scoped bulk run
+            # (e.g. refreshing one dev repo) neither drops nor creates them --
+            # during a genuine drain they're already absent, and if they exist
+            # the drop is exactly the #364 accident (a scoped run destroying
+            # another lane's in-progress or just-finished HNSW build).
+            if rebuild or _bulk_covers_all_repos(targets, settings):
+                schema.drop_heavy_indexes(pre_conn)
+            else:
+                log.info(
+                    "heavy indexes drop skipped: scoped bulk run (%d/%d repos); "
+                    "indexes are left as-is for another lane's drain",
+                    len(targets), len(settings.repos),
+                )
+
+    conn = db.connect(settings)
 
     embedder = Embedder()
     buffer: ChunkBuffer | None = None
@@ -736,62 +748,62 @@ def run_ingest(
     provider = build_token_provider(settings)
     route = os.environ.get("SHIORI_INGEST_ROUTE", "cli")
 
-    conn = db.connect(settings)
+    # --- Pre-flight: bulk-path detection, schema prep, destructive bulk
+    # ops, and the circuit-breaker pre-check all run on their own
+    # short-lived connection (issue #373).  db.connect() opens with
+    # autocommit=False, so any SELECT would leave this connection idle in
+    # an open transaction for the whole parallel fetch phase; PostgreSQL
+    # would then kill it with idle_in_transaction_session_timeout and
+    # Phase 2 would fail with IdleInTransactionSessionTimeout.
+    # connect_scope commits and closes it before Phase 1, and Phase 2
+    # opens a fresh connection.
+    with db.connect_scope(settings) as pre_conn:
+        # --- Bulk path detection (detect before lock. Handles fresh DB. Issue #72) ---
+        # Issue #376: the pending-volume threshold is scoped to the targeted
+        # repos, so targets/settings are passed into the bulk-path decision.
+        is_bulk = _is_bulk_path(pre_conn, rebuild, targets, settings)
 
-    # --- Bulk path detection (detect before lock. Handles fresh DB. Issue #72) ---
-    # Issue #376: the pending-volume threshold is scoped to the targeted
-    # repos, so targets/settings are passed into the bulk-path decision.
-    is_bulk = _is_bulk_path(conn, rebuild, targets, settings)
-
-    # --- Schema prep: migrate_light is idempotent, safe outside lock ---
-    if is_bulk:
-        log.info("bulk path detected (rebuild=%s), using light schema + deferred indexes", rebuild)
-        schema.migrate_light(conn, settings)
-    else:
-        schema.migrate(conn, settings)
-
-    # --- Bulk path: destructive operations (no per-repo lock needed at schema level) ---
-    if is_bulk:
-        if rebuild:
-            log.warning("rebuild: discarding existing index and sync cursors")
-            schema.truncate_all_repos(conn)
-            conn.commit()
-        # Issue #364: only rebuild or a run that intends to cover every
-        # configured repo may drop the heavy indexes -- see run_index for
-        # the full rationale (same gate, same predicate).
-        if rebuild or _bulk_covers_all_repos(targets, settings):
-            schema.drop_heavy_indexes(conn)
+        # --- Schema prep: migrate_light is idempotent, safe outside lock ---
+        if is_bulk:
+            log.info("bulk path detected (rebuild=%s), using light schema + deferred indexes", rebuild)
+            schema.migrate_light(pre_conn, settings)
         else:
-            log.info(
-                "heavy indexes drop skipped: scoped bulk run (%d/%d repos); "
-                "indexes are left as-is for another lane's drain",
-                len(targets), len(settings.repos),
-            )
+            schema.migrate(pre_conn, settings)
 
-    # ========================================================================
-    # Phase 1: Parallel fetch (ThreadPoolExecutor)
-    # Each repo gets its own DB connection with per-repo PG advisory lock.
-    # Failures are recorded per-repo; the process continues for other repos.
-    #
-    # Circuit breaker pre-check: repos with too many consecutive failures
-    # are skipped BEFORE a DB connection is opened inside a thread (issue #345).
-    # ========================================================================
-    explicit_repos = repos is not None
-    _cb_skipped: list[str] = []
-    _active_targets: list[str] = []
-    try:
+        # --- Bulk path: destructive operations (no per-repo lock needed at schema level) ---
+        if is_bulk:
+            if rebuild:
+                log.warning("rebuild: discarding existing index and sync cursors")
+                schema.truncate_all_repos(pre_conn)
+                pre_conn.commit()
+            # Issue #364: only rebuild or a run that intends to cover every
+            # configured repo may drop the heavy indexes -- see run_index for
+            # the full rationale (same gate, same predicate).
+            if rebuild or _bulk_covers_all_repos(targets, settings):
+                schema.drop_heavy_indexes(pre_conn)
+            else:
+                log.info(
+                    "heavy indexes drop skipped: scoped bulk run (%d/%d repos); "
+                    "indexes are left as-is for another lane's drain",
+                    len(targets), len(settings.repos),
+                )
+
+        # ========================================================================
+        # Phase 1: Parallel fetch (ThreadPoolExecutor)
+        # Each repo gets its own DB connection with per-repo PG advisory lock.
+        # Failures are recorded per-repo; the process continues for other repos.
+        #
+        # Circuit breaker pre-check: repos with too many consecutive failures
+        # are skipped BEFORE a DB connection is opened inside a thread (issue #345).
+        # ========================================================================
+        explicit_repos = repos is not None
+        _cb_skipped: list[str] = []
+        _active_targets: list[str] = []
         for repo in targets:
-            if _should_skip_repo(conn, repo, settings, explicit_repos):
+            if _should_skip_repo(pre_conn, repo, settings, explicit_repos):
                 _cb_skipped.append(repo)
             else:
                 _active_targets.append(repo)
-    except BaseException:
-        # An explicitly requested repo that is circuit-broken raises here.
-        # This connection is owned by run_ingest and nothing downstream will
-        # close it once we leave via an exception (mirrors the try/finally
-        # around the same pre-check in run_fetch).
-        conn.close()
-        raise
     if _cb_skipped:
         log.info(
             "Circuit breaker skipped %d repo(s): %s",
@@ -874,6 +886,11 @@ def run_ingest(
     # Phase 2: Sequential index (with batch embedding via ChunkBuffer)
     # Repos that failed during fetch OR were skipped by CB are excluded.
     # ========================================================================
+    # Fresh connection for this phase (issue #373): the pre-flight
+    # connection was closed before Phase 1 and nothing may be carried
+    # across a phase boundary.
+    conn = db.connect(settings)
+
     embedder = Embedder()
 
     buffer: ChunkBuffer | None = None
