@@ -469,6 +469,14 @@ class TestBulkHeavyIndexCoverageGate:
             patch("shiori.ingest.db.record_sync_run",
                    return_value=MagicMock(isoformat=lambda: "2026-01-01T00:00:00+00:00")),
             patch("shiori.ingest.db.record_sync_attempt"),
+            # Issue #377: completion is decided from a post-pass pending
+            # count; a zero count means "fully indexed" (success path) --
+            # only completed repos feed the bulk heavy-index gate.
+            patch("shiori.ingest.db.count_pending_issue_items", return_value=0),
+            patch(
+                "shiori.ingest.db.count_pending_issue_items_for_repos",
+                return_value=0,
+            ),
         ):
             run_index(settings=settings, repos=repos_arg)
         return mock_create, mock_drop
@@ -633,6 +641,14 @@ class TestRunIngestBulkHeavyIndexGates:
                 return_value=MagicMock(isoformat=lambda: "2026-01-01T00:00:00+00:00"),
             ),
             patch("shiori.ingest.db.record_sync_attempt"),
+            # Issue #377: completion is decided from a post-pass pending
+            # count; a zero count means "fully indexed" (success path) --
+            # only completed repos feed the bulk heavy-index gate.
+            patch("shiori.ingest.db.count_pending_issue_items", return_value=0),
+            patch(
+                "shiori.ingest.db.count_pending_issue_items_for_repos",
+                return_value=0,
+            ),
         ):
             run_ingest(settings=mock_settings, repos=repos_arg)
         return mock_create, mock_drop

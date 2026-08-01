@@ -150,6 +150,10 @@ services:
       # int() で読むため空文字列は例外になる（config.py）。未設定時は
       # 組み込みデフォルトと同じ 4 を展開する（:- の空デフォルトは禁止）。
       SHIORI_FETCH_CONCURRENCY: ${SHIORI_FETCH_CONCURRENCY:-4}
+      # 1回の index run の作業時間上限（秒）。time.monotonic() 基準なので
+      # サスペンド時間は消費しない（issue #377）。空文字列 = 無制限
+      # （config.py が防御的に None として扱うため ${VAR:-} 形式で安全）。
+      SHIORI_INGEST_TIME_BUDGET: ${SHIORI_INGEST_TIME_BUDGET:-}
       SHIORI_REF_BACKFILL_SINCE: ${SHIORI_REF_BACKFILL_SINCE:-}
       GITHUB_TOKEN: ${GITHUB_TOKEN:-}
       GITHUB_TOKEN_SOCKET: ${GITHUB_TOKEN_SOCKET:-}

@@ -25,7 +25,7 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 
 from . import db, schema
-from .config import Settings, load_settings
+from .config import IndexBudget, Settings, load_settings
 from .embedding import Embedder
 from .github_auth import build_token_provider
 from .github_sync import (
@@ -44,6 +44,24 @@ SYNC_LOCK_KEY = 0x5348494F
 
 # ChunkBuffer flush threshold for bulk path (issue #72)
 _BULK_BUFFER_SIZE = 500
+
+
+def _index_budget(settings: Settings) -> IndexBudget:
+    """Construct the run's time budget once, from settings (issue #377).
+
+    ``None``/unset means unbounded (the default).  Defensive against test
+    settings objects (MagicMock): anything that is not a positive number
+    yields an unbounded budget.
+    """
+    return IndexBudget(getattr(settings, "ingest_time_budget", None))
+
+
+def _budget_desc(budget: IndexBudget) -> str:
+    """One-line description of the budget in force, for the run-start log."""
+    seconds = budget.budget_seconds
+    if isinstance(seconds, (int, float)) and seconds > 0:
+        return f"{seconds:.0f}s (working time; suspend is not charged)"
+    return "unbounded (SHIORI_INGEST_TIME_BUDGET unset or not a positive number)"
 
 
 def _is_bulk_path(
@@ -70,11 +88,12 @@ def _is_bulk_path(
 
     The volume check is a single COUNT over ``issue_items`` scoped to the
     targeted repos, using the same pending predicate ``index_issues`` applies
-    (``indexed_at IS NULL OR updated_at > indexed_at``) -- issue_items is the
-    only SQL-side proxy for pending chunk/embed work (doc/code re-chunking
-    is sha-driven off the on-disk clone and not countable in SQL). No rows
-    are fetched, no per-repo loop runs, and nothing is truncated or reset:
-    the bulk path only batches; discarding is exclusive to ``rebuild=True``.
+    (``db.PENDING_ISSUE_ITEMS_WHERE`` -- the one shared definition of
+    "pending", issue #377) -- issue_items is the only SQL-side proxy for
+    pending chunk/embed work (doc/code re-chunking is sha-driven off the
+    on-disk clone and not countable in SQL). No rows are fetched, no
+    per-repo loop runs, and nothing is truncated or reset: the bulk path
+    only batches; discarding is exclusive to ``rebuild=True``.
 
     ``targets``/``settings`` are optional for backward compatibility with
     callers that predate the volume check (e.g. tests, and the duplicated
@@ -103,9 +122,8 @@ def _is_bulk_path(
             threshold = getattr(settings, "bulk_pending_threshold", 0)
             if isinstance(threshold, (int, float)) and threshold > 0:
                 cur.execute(
-                    "SELECT count(*) FROM issue_items WHERE repo = ANY(%s) "
-                    "AND (indexed_at IS NULL "
-                    "OR (updated_at IS NOT NULL AND updated_at > indexed_at))",
+                    f"SELECT count(*) FROM issue_items WHERE repo = ANY(%s) "
+                    f"AND {db.PENDING_ISSUE_ITEMS_WHERE}",
                     (list(targets),),
                 )
                 row = cur.fetchone()
@@ -610,10 +628,30 @@ def run_index(
         buffer = ChunkBuffer(conn, embedder, batch_size=_BULK_BUFFER_SIZE)
 
     t_total = time.monotonic()
+    budget = _index_budget(settings)
+    # Report the budget that is actually in force. An unparseable
+    # SHIORI_INGEST_TIME_BUDGET degrades to unbounded, which is silent and
+    # looks exactly like the unbounded runs this issue exists to end -- so
+    # say which of the two this run is, once, up front.
+    log.info("index run: time budget = %s", _budget_desc(budget))
+    truncated = False
     failed_repos: dict[str, str] = {}
     completed: list[str] = []
 
     for repo in targets:
+        # Time budget (issue #377): between repositories.  An exhausted
+        # budget is a normal outcome -- stop, log why, exit 0; the next run
+        # resumes via indexed_at.  ``budget.exhausted()`` uses
+        # time.monotonic(), so machine-suspend time does not consume it.
+        if budget.exhausted():
+            log.info(
+                "index run: budget exhausted (budget_s=%s), stopping "
+                "before repo=%s",
+                budget.budget_seconds, repo,
+            )
+            truncated = True
+            break
+
         log.info("=== index %s ===", repo)
 
         # Per-repo PG advisory lock: acquire, skip recording and
@@ -641,6 +679,7 @@ def run_index(
                 n_items = index_issues(
                     settings, conn, embedder, repo,
                     buffer=buffer if is_bulk else None,
+                    budget=budget,
                 )
                 if is_bulk and buffer is not None:
                     n_flushed = buffer.flush()
@@ -662,14 +701,36 @@ def run_index(
                 t_code = time.monotonic() - t0
                 log.info("index code: %d files updated (%.1fs)", n_code, t_code)
 
-                # Record success
-                finished_at = db.record_sync_run(
-                    conn, repo, route, n_docs, n_items, n_code
-                )
-                db.record_sync_attempt(conn, repo, success=True)
-                synced_ts = finished_at.isoformat() if finished_at is not None else "?"
-                log.info("indexed at %s (route=%s)", synced_ts, route)
-                completed.append(repo)
+                # Completion is decided from the data (issue #377), not from
+                # a flag: count what is still pending for this repo with the
+                # same predicate index_issues selects rows with.  Zero
+                # pending => fully indexed => record the successful run with
+                # finished_at.  Non-zero => the pass was cut short by the
+                # budget => record progress only, NO finished_at (the only
+                # trustworthy completion signal in the system) -- and keep
+                # the repo out of `completed`, so the bulk path's heavy-index
+                # gate cannot rebuild HNSW/pgroonga mid-drain.
+                pending = db.count_pending_issue_items(conn, repo)
+                if pending == 0:
+                    finished_at = db.record_sync_run(
+                        conn, repo, route, n_docs, n_items, n_code
+                    )
+                    db.record_sync_attempt(conn, repo, success=True)
+                    synced_ts = (
+                        finished_at.isoformat() if finished_at is not None else "?"
+                    )
+                    log.info("indexed at %s (route=%s)", synced_ts, route)
+                    completed.append(repo)
+                else:
+                    db.record_sync_progress(
+                        conn, repo, route, pending_count=pending
+                    )
+                    truncated = True
+                    log.info(
+                        "index %s: budget-truncated -- %d items still "
+                        "pending, progress recorded, no finished_at",
+                        repo, pending,
+                    )
             except Exception as exc:
                 conn.rollback()
                 db.record_sync_attempt(conn, repo, success=False, error=str(exc))
@@ -685,7 +746,10 @@ def run_index(
     # --- Bulk path: create heavy indexes in batch ---
     # Issue #365: gate on repos that actually completed, not the intended
     # target list -- a per-repo advisory-lock skip can leave the coverage
-    # check passing on intention while a repo was never re-indexed.
+    # check passing on intention while a repo was never re-indexed.  A
+    # budget-truncated repo never lands in `completed` (issue #377), so a
+    # partially-indexed repo can never trigger the HNSW/pgroonga rebuild
+    # mid-drain.
     if is_bulk:
         if _bulk_run_completed_all_repos(completed, settings):
             t0 = time.monotonic()
@@ -695,9 +759,10 @@ def run_index(
         elif _bulk_covers_all_repos(targets, settings):
             skipped = sorted(set(targets) - set(completed))
             log.info(
-                "heavy indexes deferred: %d repo(s) skipped via advisory lock "
-                "during a run that intended to cover all repos (%s); rerun "
-                "once they are free",
+                "heavy indexes deferred: %d repo(s) not completed during a "
+                "run that intended to cover all repos (advisory lock skip, "
+                "circuit breaker, or index time budget; %s); rerun once "
+                "they are free",
                 len(skipped), ", ".join(skipped),
             )
         else:
@@ -717,6 +782,17 @@ def run_index(
 
     t_total_elapsed = time.monotonic() - t_total
     log.info("total index time: %.1fs", t_total_elapsed)
+
+    # Run summary (issue #377): fixed key=value shape, greppable.  An
+    # exhausted budget is a normal outcome: truncated=1 with a non-zero
+    # exit only when a repo actually FAILED below.
+    remaining = db.count_pending_issue_items_for_repos(conn, targets)
+    log.info(
+        "index run summary: route=%s targets=%d completed_repos=%d "
+        "truncated=%d remaining_pending=%d elapsed_s=%.1f",
+        route, len(targets), len(completed), int(truncated),
+        remaining, t_total_elapsed,
+    )
 
     if failed_repos:
         detail = "; ".join(f"{r}: {e}" for r, e in failed_repos.items())
@@ -974,6 +1050,9 @@ def run_ingest(
         buffer = ChunkBuffer(conn, embedder, batch_size=_BULK_BUFFER_SIZE)
 
     t_total = time.monotonic()
+    budget = _index_budget(settings)
+    log.info("ingest run: index time budget = %s", _budget_desc(budget))
+    truncated = False
     index_failed: dict[str, str] = {}
     completed: list[str] = []
 
@@ -981,6 +1060,18 @@ def run_ingest(
         if repo in fetch_failed:
             log.info("index %s: skipped (fetch failed earlier)", repo)
             continue
+
+        # Time budget (issue #377): between repositories.  An exhausted
+        # budget is a normal outcome -- stop, log why, exit 0; the next run
+        # resumes via indexed_at (see run_index for the full rationale).
+        if budget.exhausted():
+            log.info(
+                "ingest run: budget exhausted (budget_s=%s), stopping "
+                "before repo=%s",
+                budget.budget_seconds, repo,
+            )
+            truncated = True
+            break
 
         log.info("=== index %s === (sequential)", repo)
 
@@ -1009,6 +1100,7 @@ def run_ingest(
                 n_items = index_issues(
                     settings, conn, embedder, repo,
                     buffer=buffer if is_bulk else None,
+                    budget=budget,
                 )
                 if is_bulk and buffer is not None:
                     n_flushed = buffer.flush()
@@ -1030,13 +1122,34 @@ def run_ingest(
                 t_code = time.monotonic() - t0
                 log.info("index code: %d files updated (%.1fs)", n_code, t_code)
 
-                finished_at = db.record_sync_run(
-                    conn, repo, route, n_docs, n_items, n_code
-                )
-                db.record_sync_attempt(conn, repo, success=True)
-                synced_ts = finished_at.isoformat() if finished_at is not None else "?"
-                log.info("synced at %s (route=%s)", synced_ts, route)
-                completed.append(repo)
+                # Completion is decided from the data (issue #377): count
+                # what is still pending with the same predicate index_issues
+                # selects rows with.  Zero pending => fully indexed =>
+                # record the successful run (finished_at).  Non-zero => the
+                # pass was cut short by the budget => record progress only,
+                # NO finished_at, and keep the repo out of `completed` so
+                # the bulk path's heavy-index gate cannot rebuild mid-drain.
+                pending = db.count_pending_issue_items(conn, repo)
+                if pending == 0:
+                    finished_at = db.record_sync_run(
+                        conn, repo, route, n_docs, n_items, n_code
+                    )
+                    db.record_sync_attempt(conn, repo, success=True)
+                    synced_ts = (
+                        finished_at.isoformat() if finished_at is not None else "?"
+                    )
+                    log.info("synced at %s (route=%s)", synced_ts, route)
+                    completed.append(repo)
+                else:
+                    db.record_sync_progress(
+                        conn, repo, route, pending_count=pending
+                    )
+                    truncated = True
+                    log.info(
+                        "index %s: budget-truncated -- %d items still "
+                        "pending, progress recorded, no finished_at",
+                        repo, pending,
+                    )
             except Exception as exc:
                 conn.rollback()
                 db.record_sync_attempt(conn, repo, success=False, error=str(exc))
@@ -1051,10 +1164,12 @@ def run_ingest(
 
     # --- Bulk path: create heavy indexes in batch ---
     # Issue #365: gate on repos that actually completed, not the intended
-    # target list. A per-repo advisory-lock skip, or a circuit-breaker
+    # target list. A per-repo advisory-lock skip, a circuit-breaker
     # pre-skip (a cb-skipped repo is never in _active_targets, so it can
-    # never land in `completed` either), can leave the coverage check
-    # passing on intention while a repo was never re-indexed.
+    # never land in `completed` either), or a budget truncation (a
+    # partially-indexed repo is never appended to `completed`, issue #377)
+    # can leave the coverage check passing on intention while a repo was
+    # never fully re-indexed.
     if is_bulk:
         if _bulk_run_completed_all_repos(completed, settings):
             t0 = time.monotonic()
@@ -1064,9 +1179,10 @@ def run_ingest(
         elif _bulk_covers_all_repos(targets, settings):
             skipped = sorted(set(targets) - set(completed))
             log.info(
-                "heavy indexes deferred: %d repo(s) skipped via advisory lock "
-                "or circuit breaker during a run that intended to cover all "
-                "repos (%s); rerun once they are free",
+                "heavy indexes deferred: %d repo(s) not completed during a "
+                "run that intended to cover all repos (advisory lock skip, "
+                "circuit breaker, or index time budget; %s); rerun once "
+                "they are free",
                 len(skipped), ", ".join(skipped),
             )
         else:
@@ -1086,6 +1202,17 @@ def run_ingest(
 
     t_total_elapsed = time.monotonic() - t_total
     log.info("total ingest time: %.1fs", t_total_elapsed)
+
+    # Run summary (issue #377): fixed key=value shape, greppable.  An
+    # exhausted budget is a normal outcome: truncated=1 with a non-zero
+    # exit only when a repo actually FAILED below.
+    remaining = db.count_pending_issue_items_for_repos(conn, targets)
+    log.info(
+        "ingest run summary: route=%s targets=%d completed_repos=%d "
+        "truncated=%d remaining_pending=%d elapsed_s=%.1f",
+        route, len(targets), len(completed), int(truncated),
+        remaining, t_total_elapsed,
+    )
 
     # Aggregate all failures (fetch + index)
     all_failed: dict[str, str] = {}

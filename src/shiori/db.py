@@ -17,6 +17,25 @@ from .config import Settings
 
 log = logging.getLogger(__name__)
 
+#: The single definition of "pending" (issue #377).  A issue_items row needs
+#: (re)indexing when it has never been indexed, or was updated after it was
+#: indexed.  This one constant is used by:
+#:
+#: - ``sync_issues.index_issues`` (the SELECT that picks rows to index),
+#: - ``count_pending_issue_items`` / ``count_pending_issue_items_for_repos``
+#:   (the remaining-work counters that decide completion),
+#: - ``ingest._is_bulk_path`` (the volume check, issue #376).
+#:
+#: Selection and counting are literally the same predicate, so the
+#: completion signal and the remaining-work counter are the same measurement
+#: and cannot disagree (two hand-copied predicates drifting apart is a bug
+#: this codebase has already shipped once elsewhere).
+#: Parenthesised so it can be AND-ed into a larger WHERE clause.
+PENDING_ISSUE_ITEMS_WHERE = (
+    "(indexed_at IS NULL "
+    "OR (updated_at IS NOT NULL AND updated_at > indexed_at))"
+)
+
 
 def connect(settings: Settings) -> psycopg.Connection:
     return psycopg.connect(settings.database_url, autocommit=False)
@@ -88,6 +107,7 @@ def record_sync_run(
     docs_updated: int,
     issues_indexed: int,
     code_indexed: int = 0,
+    pending_count: int = 0,
 ):
     """Record sync success per repo and return completion timestamp (DB's now()) (issue #22 / #33).
     Skipped executions (advisory lock) not recorded. Uses DB now() for cross-path consistency.
@@ -96,26 +116,92 @@ def record_sync_run(
     successful sync ends any failure streak (issue #187). Callers that want the
     attempt itself recorded (e.g. for last_attempt_at) should also call
     record_sync_attempt(..., success=True).
+
+    ``pending_count`` (issue #377) is the remaining-work counter measured
+    with the same predicate the index pass applies; this call is only used
+    for *complete* repos, so it defaults to 0 (fully indexed) and refreshes
+    ``last_progress_at`` -- a completed pass is the last progress.
     """
     with conn.cursor() as cur:
         cur.execute(
             """
-            INSERT INTO sync_runs (repo, route, finished_at, docs_updated, issues_indexed, code_indexed)
-            VALUES (%s, %s, now(), %s, %s, %s)
+            INSERT INTO sync_runs (repo, route, finished_at, docs_updated,
+                                   issues_indexed, code_indexed,
+                                   pending_count, last_progress_at)
+            VALUES (%s, %s, now(), %s, %s, %s, %s, now())
             ON CONFLICT (repo) DO UPDATE SET
                 route = EXCLUDED.route,
                 finished_at = EXCLUDED.finished_at,
                 docs_updated = EXCLUDED.docs_updated,
                 issues_indexed = EXCLUDED.issues_indexed,
-                code_indexed = EXCLUDED.code_indexed
+                code_indexed = EXCLUDED.code_indexed,
+                pending_count = EXCLUDED.pending_count,
+                last_progress_at = now()
             RETURNING finished_at
             """,
-            (repo, route, docs_updated, issues_indexed, code_indexed),
+            (repo, route, docs_updated, issues_indexed, code_indexed, pending_count),
         )
         row = cur.fetchone()
         finished_at = row[0] if row is not None else None
     conn.commit()
     return finished_at
+
+
+def record_sync_progress(
+    conn: psycopg.Connection,
+    repo: str,
+    route: str,
+    pending_count: int,
+) -> None:
+    """Record that *repo* was processed but NOT completed (issue #377).
+
+    Written when a repo's index pass finished with work still pending --
+    the pass was cut short by the index-run time budget.  Deliberately
+    writes **no** ``finished_at`` (the only trustworthy completion signal
+    in the system today) and touches no attempt/skip tracking: a
+    budget-truncated run is a normal outcome, not a failure, and must not
+    feed the circuit breaker (``last_attempt_at`` is written on failure
+    too, which is exactly why it cannot signal completion).
+
+    ``pending_count`` is measured with the same predicate the index pass
+    selects rows with (``PENDING_ISSUE_ITEMS_WHERE``), so "cut short" and
+    "remaining work" are the same measurement.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO sync_runs (repo, route, pending_count, last_progress_at)
+            VALUES (%s, %s, %s, now())
+            ON CONFLICT (repo) DO UPDATE SET
+                route = EXCLUDED.route,
+                pending_count = EXCLUDED.pending_count,
+                last_progress_at = now()
+            """,
+            (repo, route, pending_count),
+        )
+    conn.commit()
+
+
+def touch_sync_progress(conn: psycopg.Connection, repo: str) -> None:
+    """Advance sync_runs.last_progress_at for *repo* (issue #377).
+
+    Called at every batch boundary inside ``index_issues``, committed with
+    the batch.  This is the liveness heartbeat that lets a caller who can
+    read the DB distinguish a grinding run ("it advanced 30 seconds ago")
+    from a wedged one ("nothing has moved for an hour") -- without docker
+    stats, which misreported a working-but-DB-blocked run as idle.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO sync_runs (repo, last_progress_at)
+            VALUES (%s, now())
+            ON CONFLICT (repo) DO UPDATE SET
+                last_progress_at = now()
+            """,
+            (repo,),
+        )
+    conn.commit()
 
 
 def record_sync_skip(
@@ -205,6 +291,16 @@ def record_sync_attempt(
     conn.commit()
 
 
+def _row_col(row, index):
+    """Column *index* of *row*, or None when the row is shorter.
+
+    The readers below append issue #377 columns to their SELECTs; rows from
+    older code paths / unit-test fixtures that predate the columns simply
+    yield None for them.
+    """
+    return row[index] if len(row) > index else None
+
+
 def get_sync_runs(conn: psycopg.Connection) -> dict[str, dict]:
     """Latest sync record per repo. age_seconds based on DB clock.
 
@@ -212,6 +308,13 @@ def get_sync_runs(conn: psycopg.Connection) -> dict[str, dict]:
     nullable -- issue #187). last_attempt_at / last_error / consecutive_failures
     reflect the most recent attempt regardless of outcome, so a repo that has
     never succeeded still reports its failure history.
+
+    pending_count / last_progress_at (issue #377) reflect the most recent
+    processing event regardless of completion: pending_count is the remaining
+    work measured with the same predicate the index pass applies (non-zero
+    means the last pass was cut short and there is NO finished_at), and
+    last_progress_at is the liveness heartbeat that distinguishes a grinding
+    run from a wedged one.
     """
     with conn.cursor() as cur:
         cur.execute(
@@ -219,11 +322,21 @@ def get_sync_runs(conn: psycopg.Connection) -> dict[str, dict]:
             SELECT repo, route, finished_at,
                    EXTRACT(EPOCH FROM (now() - finished_at))::bigint,
                    docs_updated, issues_indexed, code_indexed,
-                   last_attempt_at, last_error, consecutive_failures
+                   last_attempt_at, last_error, consecutive_failures,
+                   pending_count, last_progress_at
             FROM sync_runs
             """
         )
         rows = cur.fetchall()
+
+    def _progress(r) -> tuple:
+        pending = _row_col(r, 10)
+        last_progress = _row_col(r, 11)
+        return (
+            pending,
+            last_progress.isoformat() if last_progress is not None else None,
+        )
+
     return {
         r[0]: {
             "last_synced_at": r[2].isoformat() if r[2] is not None else None,
@@ -235,6 +348,8 @@ def get_sync_runs(conn: psycopg.Connection) -> dict[str, dict]:
             "last_attempt_at": r[7].isoformat() if r[7] is not None else None,
             "last_error": r[8],
             "consecutive_failures": r[9],
+            "pending_count": _progress(r)[0],
+            "last_progress_at": _progress(r)[1],
         }
         for r in rows
     }
@@ -252,7 +367,8 @@ def get_sync_run(
             SELECT route, finished_at,
                    EXTRACT(EPOCH FROM (now() - finished_at))::bigint,
                    docs_updated, issues_indexed, code_indexed,
-                   last_attempt_at, last_error, consecutive_failures
+                   last_attempt_at, last_error, consecutive_failures,
+                   pending_count, last_progress_at
             FROM sync_runs WHERE repo = %s
             """,
             (repo,),
@@ -260,6 +376,7 @@ def get_sync_run(
         row = cur.fetchone()
     if row is None:
         return None
+    last_progress = _row_col(row, 10)
     return {
         "last_synced_at": row[1].isoformat() if row[1] is not None else None,
         "age_seconds": int(row[2]) if row[2] is not None else None,
@@ -270,6 +387,10 @@ def get_sync_run(
         "last_attempt_at": row[6].isoformat() if row[6] is not None else None,
         "last_error": row[7],
         "consecutive_failures": row[8],
+        "pending_count": _row_col(row, 9),
+        "last_progress_at": (
+            last_progress.isoformat() if last_progress is not None else None
+        ),
     }
 
 
@@ -314,6 +435,44 @@ def get_issue_item_count(conn: psycopg.Connection, repo: str) -> int:
         )
         row = cur.fetchone()
         return row[0] if row else 0
+
+
+def count_pending_issue_items(conn: psycopg.Connection, repo: str) -> int:
+    """Count *repo*'s issue_items rows still pending (re)indexing (issue #377).
+
+    Uses ``PENDING_ISSUE_ITEMS_WHERE`` -- the same predicate
+    ``index_issues`` selects rows with -- so the completion decision and the
+    remaining-work counter are literally the same measurement.  Zero after a
+    repo's pass means the repo was fully indexed; non-zero means the pass
+    was cut short (e.g. by the index-run time budget) and ``finished_at``
+    must not be recorded.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            f"SELECT count(*) FROM issue_items "
+            f"WHERE repo = %s AND {PENDING_ISSUE_ITEMS_WHERE}",
+            (repo,),
+        )
+        row = cur.fetchone()
+        return row[0] if row is not None else 0
+
+
+def count_pending_issue_items_for_repos(
+    conn: psycopg.Connection, repos: list[str]
+) -> int:
+    """Count pending issue_items across *repos* in one query (issue #377).
+
+    Used by the run-summary line ("how much work remains") -- a single
+    COUNT with the shared pending predicate, scoped to the run's targets.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            f"SELECT count(*) FROM issue_items "
+            f"WHERE repo = ANY(%s) AND {PENDING_ISSUE_ITEMS_WHERE}",
+            (list(repos),),
+        )
+        row = cur.fetchone()
+        return row[0] if row is not None else 0
 
 
 def vec_literal(vec) -> str:

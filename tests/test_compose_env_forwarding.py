@@ -85,6 +85,10 @@ SERVICE_SCOPES: dict[str, set[str]] = {
         # config.py + ingest.py:102 -- the volume-based bulk-path trigger.
         # The MCP copy in pipeline.py deliberately does NOT read it (#376).
         "SHIORI_BULK_PENDING_THRESHOLD",
+        # config.py; ingest.py run_index/run_ingest -- the index-run
+        # working-time budget (issue #377). Empty/unset = unbounded, so the
+        # plain ${VAR:-} form is safe here.
+        "SHIORI_INGEST_TIME_BUDGET",
         # config.py; ingest.py:446,853 -- fetch-phase worker count
         "SHIORI_FETCH_CONCURRENCY",
         # config.py; ingest.py:338 _resolve_backfill_since (ref repos only)

@@ -9,8 +9,14 @@ import psycopg
 from .api_utils import API, _GitHubAuth, _api_pages, _api_pages_gen
 from .chunk_buffer import ChunkBuffer
 from .chunking import detect_language, split_issue_text
-from .config import Settings
-from .db import delete_chunks_by_key, get_cursor, insert_chunk, set_cursor
+from .config import IndexBudget, Settings
+from .db import (
+    PENDING_ISSUE_ITEMS_WHERE,
+    delete_chunks_by_key,
+    get_cursor,
+    insert_chunk,
+    set_cursor,
+)
 from . import db
 from .embedding import Embedder
 from .github_auth import TokenProvider
@@ -557,6 +563,7 @@ def index_issues(
     embedder: Embedder,
     repo: str,
     buffer: ChunkBuffer | None = None,
+    budget: IndexBudget | None = None,
 ) -> int:
     """Incremental index of issue_items for *repo*.
 
@@ -567,17 +574,33 @@ def index_issues(
     **Durability invariant**: chunks are always committed *before*
     ``indexed_at`` is set, so a killed index run resumes correctly.
 
+    ``budget`` (issue #377): when given, the per-repo issue loop stops at
+    the next batch boundary once ``budget.exhausted()`` -- the batch
+    boundary is already the durability boundary (chunks committed before
+    ``indexed_at``), so stopping there is safe by construction; the next
+    run resumes via ``indexed_at``.  ``None`` (the default) means
+    unbounded: the pre-#377 behaviour, unchanged.  A budget-truncated stop
+    is a normal outcome: the batch commits, a stop line is logged, and the
+    remaining rows are left pending (the caller counts them and records
+    progress without ``finished_at``).
+
+    Every committed batch also advances ``sync_runs.last_progress_at``
+    (the liveness heartbeat: a DB reader can tell a grinding run from a
+    wedged one without docker stats).
+
     Returns the number of items indexed.
     """
     # --- Step 1: select only items that need (re)indexing ---
+    # PENDING_ISSUE_ITEMS_WHERE is the single definition of "pending" --
+    # the remaining-work counters (db.count_pending_issue_items) use the
+    # same constant, so selection and counting cannot disagree (issue #377).
     with conn.cursor() as cur:
         cur.execute(
-            """SELECT issue_no, comment_id, kind, title, author, is_bot,
+            f"""SELECT issue_no, comment_id, kind, title, author, is_bot,
                       state, path, line, body, url, created_at, updated_at
                FROM issue_items
                WHERE repo = %s
-                 AND (indexed_at IS NULL
-                      OR (updated_at IS NOT NULL AND updated_at > indexed_at))
+                 AND {PENDING_ISSUE_ITEMS_WHERE}
                ORDER BY issue_no, comment_id""",
             (repo,),
         )
@@ -607,9 +630,20 @@ def index_issues(
         issue_bodies[r[0]] = (r[1], r[2])  # kind, state from body row
 
     n_indexed = 0
+    n_batches = (len(rows) + BATCH_INDEX_SIZE - 1) // BATCH_INDEX_SIZE
 
     # Process in batches to maintain the durability invariant
     for i in range(0, len(rows), BATCH_INDEX_SIZE):
+        # Budget check at the batch boundary (issue #377): stopping here is
+        # safe by construction -- the previous batch's chunks and indexed_at
+        # are already committed, so the next run resumes via indexed_at.
+        if budget is not None and budget.exhausted():
+            log.info(
+                "index issues repo=%s batch=%d/%d stopped_by_budget=1 "
+                "remaining=%d",
+                repo, i // BATCH_INDEX_SIZE + 1, n_batches, len(rows) - i,
+            )
+            break
         batch = rows[i:i + BATCH_INDEX_SIZE]
         batch_keys: list[tuple[int, int]] = []
 
@@ -695,6 +729,16 @@ def index_issues(
                     (repo, issue_no_pk, comment_id_pk),
                 )
         conn.commit()
+
+        # Liveness heartbeat (issue #377): committed right after the batch,
+        # so a caller who can read the DB sees this repo advance batch by
+        # batch -- grinding is distinguishable from wedged without docker
+        # stats (which misreported a DB-blocked-but-working run as idle).
+        db.touch_sync_progress(conn, repo)
+        log.info(
+            "index issues repo=%s batch=%d/%d items=%d",
+            repo, i // BATCH_INDEX_SIZE + 1, n_batches, len(batch),
+        )
 
     # Propagate states to chunks (over ALL body rows, not just indexed)
     _propagate_issue_states(conn, repo)

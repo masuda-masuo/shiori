@@ -5,6 +5,7 @@ Everything reads from environment variables. Passed via docker compose `.env`.""
 from __future__ import annotations
 
 import os
+import time
 from dataclasses import dataclass, field
 
 
@@ -53,6 +54,66 @@ def _allow_rebuild_from_env() -> bool:
     return os.environ.get("SHIORI_ALLOW_REBUILD", "").lower() in (
         "1", "true", "yes"
     )
+
+
+def _ingest_time_budget_from_env() -> float | None:
+    """Return SHIORI_INGEST_TIME_BUDGET as a positive float or None (issue #377).
+
+    The value is *working* seconds: the budget is enforced with
+    ``time.monotonic()``, which on Linux does not advance while the machine
+    is suspended, so a run frozen for hours is not charged for the freeze.
+
+    Unset, empty (the plain ``${VAR:-}`` compose form), unparseable, or
+    non-positive values mean **unbounded** -- the default behaviour.  The
+    process must never crash on a bad value (``float("")`` raises, which is
+    exactly the trap of the ``${VAR:-}`` compose expansion).
+    """
+    raw = os.environ.get("SHIORI_INGEST_TIME_BUDGET", "").strip()
+    if not raw:
+        return None
+    try:
+        value = float(raw)
+    except ValueError:
+        return None
+    if value <= 0:
+        return None
+    return value
+
+
+class IndexBudget:
+    """Working-time budget for one index run (issue #377).
+
+    Constructed once at the top of the index run from settings, carries the
+    deadline, and exposes a single predicate ``exhausted()``.  Based on
+    ``time.monotonic()``: on Linux it does **not** advance while the machine
+    is suspended, so the budget measures *working* time rather than
+    wall-clock -- a run frozen for 18 hours is not charged for the freeze.
+
+    ``budget_seconds`` of None/0/negative/non-numeric means unbounded (the
+    default): ``exhausted()`` is always False.  ``monotonic`` is injectable
+    for tests; it defaults to ``time.monotonic``.
+    """
+
+    def __init__(
+        self,
+        budget_seconds: float | None,
+        monotonic=time.monotonic,
+    ) -> None:
+        self.budget_seconds = budget_seconds
+        self._monotonic = monotonic
+        if isinstance(budget_seconds, (int, float)) and budget_seconds > 0:
+            self._deadline: float | None = monotonic() + budget_seconds
+        else:
+            self._deadline = None
+
+    def exhausted(self) -> bool:
+        """True once the working-time budget has been consumed.
+
+        Monotone: once True it stays True (monotonic only moves forward).
+        """
+        if self._deadline is None:
+            return False
+        return self._monotonic() >= self._deadline
 
 
 #: Default pending-work volume that triggers the bulk path (issue #376).
@@ -247,6 +308,18 @@ class Settings:
     # Unset/empty/unparseable/non-positive values fall back to the default.
     bulk_pending_threshold: int = field(
         default_factory=_bulk_pending_threshold_from_env
+    )
+    # --- Index-run time budget (issue #377) ---
+    # Maximum *working* seconds (time.monotonic: machine-suspend time does
+    # not count) one index run may spend before stopping at the next safe
+    # boundary (between repos, and at the per-repo issue batch boundary).
+    # An exhausted budget is a normal outcome: the run stops, logs, records
+    # progress per repo, and exits 0 -- the next run resumes where it left
+    # off via indexed_at. Unset/empty/unparseable/non-positive means
+    # unbounded (the default; nothing changes for anyone who does not set
+    # it). Enforced in the CLI index loops (run_index / run_ingest) only.
+    ingest_time_budget: float | None = field(
+        default_factory=_ingest_time_budget_from_env
     )
 
     def repo_dir(self, repo: str) -> str:

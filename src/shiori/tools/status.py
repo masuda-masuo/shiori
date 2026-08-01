@@ -75,6 +75,18 @@ def _build_warnings(
             f"last_error: {info.get('last_error')}"
         )
 
+    # Issue #377: a repo whose last processing event found work still
+    # pending was cut short by the index-run time budget (or has never
+    # fully indexed) -- there is NO finished_at for it.  Surfacing the
+    # remaining-work counter makes the drain observable from status
+    # without ad hoc SQL.
+    pending = info.get("pending_count")
+    if pending is not None and pending > 0:
+        warnings.append(
+            f"{pending} issue items still pending (last index run did not "
+            "complete this repo; finished_at absent)"
+        )
+
     token_provider_error = info.get("token_provider_error")
     if token_provider_error:
         warnings.append(
@@ -144,6 +156,8 @@ def status(repo: str | None = None) -> dict[str, Any]:
                 "last_attempt_at": None,
                 "last_error": None,
                 "consecutive_failures": 0,
+                "pending_count": None,
+                "last_progress_at": None,
             }
             state = index_state.get(target_repo, {})
             info["clone_head"] = state.get("clone_head")
