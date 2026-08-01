@@ -295,6 +295,65 @@ class TestForwarding:
             + ", ".join(missing)
         )
 
+    def test_scoped_settings_are_listed_in_the_environment_block(self):
+        """Issue #396: ``env_file: .env`` must not stand in for an
+        ``environment:`` entry.
+
+        The two are different delivery paths and only one of them carries a
+        value from the *host process* environment:
+
+        - ``env_file: .env`` injects the keys a deployer happens to have
+          written into their .env file.
+        - ``environment: FOO: ${FOO:-}`` forwards whatever the process that
+          runs compose has in its environment -- a systemd unit's
+          ``Environment=``, a one-off ``SHIORI_GPU=1 ./scripts/ingest.sh``,
+          a CI export.
+
+        ``_effective_env()`` deliberately treats every documented setting as
+        reachable once a service declares ``env_file: .env`` (that is how
+        SHIORI_ONNX_MODEL_PATH is delivered, issue #353).  The side effect is
+        that deleting an ``environment:`` line leaves every other assertion
+        in this file green while the host-process path silently dies -- the
+        #372/#376 defect class, reached through the guard rather than around
+        it.  Measured: removing SHIORI_CB_REF_MAX_BACKOFF from compose left
+        the whole suite passing.
+
+        So require the entry explicitly.  The only exemption is the class of
+        settings for which the ``${VAR:-}`` form is itself the bug.
+        """
+        compose = _parse_compose(COMPOSE.read_text(encoding="utf-8"))
+        missing: list[str] = []
+        for service, scopes in SERVICE_SCOPES.items():
+            listed = set(compose[service]["env"])
+            for name in sorted(scopes - EMPTY_STRING_MEANINGFUL - listed):
+                missing.append(f"{name} -> {service}")
+        assert missing == [], (
+            "settings in SERVICE_SCOPES are not listed in the service's "
+            "environment: block, so they cannot arrive from the host "
+            "process environment (only from a deployer's .env): "
+            + ", ".join(missing)
+        )
+
+    def test_empty_string_meaningful_settings_stay_out_of_environment(self):
+        """The converse of the rule above, so the exemption cannot rot.
+
+        A setting is exempt from the environment: requirement precisely
+        because ``${VAR:-}`` would break it.  If one ever appears in an
+        environment: block, the exemption stopped being an exemption and
+        became a hole.
+        """
+        compose = _parse_compose(COMPOSE.read_text(encoding="utf-8"))
+        offenders = [
+            f"{name} -> {service}"
+            for service in SERVICE_SCOPES
+            for name in sorted(EMPTY_STRING_MEANINGFUL)
+            if name in compose[service]["env"]
+        ]
+        assert offenders == [], (
+            "settings whose empty string is meaningful must not be forwarded "
+            "through environment: at all: " + ", ".join(offenders)
+        )
+
 
 # ===================================================================
 # The ONNX trap (issue #353) and friends
