@@ -28,3 +28,5 @@ target/
 /data/
 # ONNX INT8 モデル成果物 (scripts/build_onnx_model.py が生成; issue #353)
 /models/
+# ingest.sh の実行ログ保存先 (issue #372)
+/logs/
