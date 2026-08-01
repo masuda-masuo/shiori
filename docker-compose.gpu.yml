@@ -1,9 +1,13 @@
 # GPU 加速用 override。
-# nvidia-container-toolkit がインストールされたホストでのみ使用する。
-# CPU-only ホストでは本ファイルを指定しないこと。
+# ingest.sh が自動で本ファイルを追加するのは、両方の前提が揃ったときだけ:
+#   - ホストに GPU が見えている (nvidia-smi -L が成功する)
+#   - nvidia container toolkit がインストールされている (runtime: nvidia が使える)
+# どちらか不明なら CPU のまま実行し、選択と理由を run ログ
+# (device=<gpu|cpu> reason="...") に残す。CPU-only ホストでは本ファイルは指定されない。
 #
-# 使い方:
-#   SHIORI_GPU=1 ./scripts/ingest.sh        # ingest.sh が自動で本ファイルを追加
+# 明示指定は検知に優先する:
+#   SHIORI_GPU=1 ./scripts/ingest.sh        # 検知せず本ファイルを強制追加（toolkit が無いと起動失敗）
+#   SHIORI_GPU=0 ./scripts/ingest.sh        # 検知せず CPU 強制
 #   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d  # 明示指定も可
 #
 # app (常時稼働): deploy.resources.reservations.devices (docker compose up 時に有効)

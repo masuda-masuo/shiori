@@ -20,8 +20,10 @@
 #
 # ==== ビルド / GPU ====
 # デフォルトでは --build なし。SHIORI_BUILD=1 でビルドを強制する。
-# デフォルトでは CPU 構成。SHIORI_GPU=1 で docker-compose.gpu.yml を追加する
-# （nvidia-container-toolkit が入ったホストでのみ有効）。
+# デフォルトでは自動検知（issue #383）: GPU がホストに見え（nvidia-smi -L が成功）かつ
+# nvidia container toolkit が入っていれば docker-compose.gpu.yml を追加し、どちらか
+# 不明なら CPU。選択と理由は run ログに device=<gpu|cpu> reason="..." の形で残る。
+# 明示指定が検知に優先する: SHIORI_GPU=1 で GPU 強制、SHIORI_GPU=0 で CPU 強制。
 #
 # ==== 実行ログ (issue #372) ====
 # 起動方法（systemd timer / 手動）によらず、実行ごとにログファイルを残す。
@@ -31,9 +33,50 @@
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
+# ---- GPU 判定 (issue #383) ----
+# docker-compose.gpu.yml を足してよいのは、以下の両方が成り立つときだけ:
+#   1. GPU がホストに見えている (nvidia-smi -L が成功する)
+#   2. docker が GPU をコンテナに渡せる (runtime: nvidia を処理できる
+#      nvidia container toolkit がインストールされている)
+# どちらか不明なら CPU のまま実行する。検知の失敗・ハングは実行を止めない
+# （失敗時は CPU に倒れる）。
+# プローブの制約（対象ホストで実測）: /dev/nvidia* は WSL では存在しないので使わない。
+# docker info は約 10 秒かかるので使わない。nvidia-smi はドライバが詰まると
+# ハングしうるので timeout で縛る。
+# 明示指定が検知に優先する: SHIORI_GPU=1 で GPU 強制（検知しない）、1 以外の
+# 非空値（SHIORI_GPU=0 など）で CPU 強制（検知しない）。未設定のときだけ自動検知。
+GPU_DEVICE=cpu
+GPU_REASON=""
+if [ "${SHIORI_GPU:-}" = "1" ]; then
+    GPU_DEVICE=gpu
+    GPU_REASON="explicit SHIORI_GPU=1"
+elif [ -n "${SHIORI_GPU:-}" ]; then
+    GPU_DEVICE=cpu
+    GPU_REASON="explicit SHIORI_GPU=${SHIORI_GPU}"
+else
+    # nvidia-smi は PATH 上にある（WSL では /usr/lib/wsl/lib）。systemd ユニットの
+    # PATH は /usr/lib/wsl/lib を含まないことがあるため、既知の場所も見る。
+    NV_SMI="$(command -v nvidia-smi 2>/dev/null || true)"
+    if [ -z "$NV_SMI" ] && [ -x /usr/lib/wsl/lib/nvidia-smi ]; then
+        NV_SMI=/usr/lib/wsl/lib/nvidia-smi
+    fi
+    if [ -n "$NV_SMI" ] && timeout 5 "$NV_SMI" -L >/dev/null 2>&1; then
+        if command -v nvidia-container-runtime >/dev/null 2>&1 \
+            || command -v nvidia-container-cli >/dev/null 2>&1 \
+            || command -v nvidia-ctk >/dev/null 2>&1; then
+            GPU_DEVICE=gpu
+            GPU_REASON="nvidia-smi -L ok and nvidia container toolkit found"
+        else
+            GPU_REASON="nvidia-smi ok but nvidia container toolkit not found"
+        fi
+    else
+        GPU_REASON="nvidia-smi -L failed (no GPU visible to host)"
+    fi
+fi
+
 # compose file list (empty = docker compose default: docker-compose.yml only)
 COMPOSE_FILES=()
-if [ "${SHIORI_GPU:-}" = "1" ]; then
+if [ "$GPU_DEVICE" = "gpu" ]; then
     COMPOSE_FILES=(-f docker-compose.yml -f docker-compose.gpu.yml)
 fi
 
@@ -56,12 +99,18 @@ find "$RUN_LOG_DIR" -maxdepth 1 -type f -name 'ingest-*.log' -mtime +30 -delete 
 
 LOG_FILE="$(mktemp "$RUN_LOG_DIR/ingest-XXXXXX.log")"
 
+# GPU 判定の結果を run ログに残す（journal は約 30 分で消えるため、ファイル側が本命）。
+# 固定の greppable な形: device=<gpu|cpu> reason="..."
+printf 'device=%s reason="%s"\n' "$GPU_DEVICE" "$GPU_REASON" | tee -a "$LOG_FILE"
+
 # pipefail により docker compose が失敗すればその終了ステータスがそのまま
 # スクリプトの終了ステータスになる（set -e と合わせて、失敗した実行は必ず
 # 非ゼロで終了し systemd ユニットも失敗する）。tee 側の失敗（ディスク満杯
 # など）も実行の失敗として表面化する。
+# tee -a: LOG_FILE には既に GPU 判定の1行が入っているので、追記でつなげる
+# （mktemp 直後は空なので、出力内容自体は -a の有無で変わらない）。
 if [ "${SHIORI_BUILD:-}" = "1" ]; then
-    docker compose "${COMPOSE_FILES[@]}" run --build --rm ingest python -m shiori ingest "$@" 2>&1 | tee "$LOG_FILE"
+    docker compose "${COMPOSE_FILES[@]}" run --build --rm ingest python -m shiori ingest "$@" 2>&1 | tee -a "$LOG_FILE"
 else
-    docker compose "${COMPOSE_FILES[@]}" run --rm ingest python -m shiori ingest "$@" 2>&1 | tee "$LOG_FILE"
+    docker compose "${COMPOSE_FILES[@]}" run --rm ingest python -m shiori ingest "$@" 2>&1 | tee -a "$LOG_FILE"
 fi
