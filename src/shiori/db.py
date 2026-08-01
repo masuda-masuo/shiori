@@ -118,6 +118,39 @@ def record_sync_run(
     return finished_at
 
 
+def record_sync_skip(
+    conn: psycopg.Connection,
+    repo: str,
+) -> None:
+    """Record that *repo* could not be locked (advisory lock held elsewhere).
+
+    A skip is deliberately NOT an attempt: ``last_attempt_at`` /
+    ``last_error`` / ``consecutive_failures`` are untouched, so the circuit
+    breaker (#345) never sees a skip as a failure. Instead the row carries a
+    durable, countable trace: ``last_skipped_at`` (DB ``now()``) and
+    ``skip_count``, which counts *consecutive* skips and is reset to 0 by a
+    successful attempt (``record_sync_attempt(success=True)``).
+
+    Before this, a skipped repo left only a log line -- and log retention is
+    ~9 hours while the daily lane's period is 24 hours, so yesterday's skip
+    was unanswerable the next morning. Now ``SELECT last_skipped_at,
+    skip_count FROM sync_runs WHERE repo = ...`` answers "has this repo been
+    skipped every day for a week?" from the database alone.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO sync_runs (repo, last_skipped_at, skip_count)
+            VALUES (%s, now(), 1)
+            ON CONFLICT (repo) DO UPDATE SET
+                last_skipped_at = now(),
+                skip_count = sync_runs.skip_count + 1
+            """,
+            (repo,),
+        )
+    conn.commit()
+
+
 def record_sync_attempt(
     conn: psycopg.Connection,
     repo: str,
@@ -136,17 +169,22 @@ def record_sync_attempt(
     On success, clears last_error and resets consecutive_failures to 0. On
     failure, increments consecutive_failures and stores the error message
     (truncated to avoid unbounded row growth from long tracebacks).
+
+    A successful attempt also resets ``skip_count`` (issue #374): a repo that
+    processes again is no longer in a skip streak, so "skipped every day for
+    a week?" is answered by ``skip_count`` alone.
     """
     if success:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                INSERT INTO sync_runs (repo, last_attempt_at, last_error, consecutive_failures)
-                VALUES (%s, now(), NULL, 0)
+                INSERT INTO sync_runs (repo, last_attempt_at, last_error, consecutive_failures, skip_count)
+                VALUES (%s, now(), NULL, 0, 0)
                 ON CONFLICT (repo) DO UPDATE SET
                     last_attempt_at = now(),
                     last_error = NULL,
-                    consecutive_failures = 0
+                    consecutive_failures = 0,
+                    skip_count = 0
                 """,
                 (repo,),
             )

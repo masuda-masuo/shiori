@@ -21,6 +21,7 @@ import os
 import shutil
 import threading
 import time
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 
 from . import db, schema
@@ -161,11 +162,15 @@ def run_forget(
     try:
         result: dict[str, dict[str, int]] = {}
         for repo in repos:
-            if not _acquire_repo_lock(conn, repo):
-                raise SystemExit(
-                    f"sync is running for {repo} in another process; try again later"
-                )
-            try:
+            # Per-repo advisory lock (issue #307): acquire, skip recording
+            # and release all live in repo_lock(). The skip is recorded
+            # durably even though this site raises SystemExit instead of
+            # continuing (issue #374).
+            with repo_lock(conn, repo, phase="forget") as held:
+                if not held:
+                    raise SystemExit(
+                        f"sync is running for {repo} in another process; try again later"
+                    )
                 deleted = schema.forget_repo(conn, repo)
                 conn.commit()
                 result[repo] = deleted
@@ -189,8 +194,6 @@ def run_forget(
                         "will index it again",
                         repo,
                     )
-            finally:
-                _release_repo_lock(conn, repo)
         return result
     finally:
         conn.close()
@@ -215,15 +218,90 @@ def _acquire_repo_lock(conn, repo: str) -> bool:
         return row[0] if row is not None else False
 
 
-def _release_repo_lock(conn, repo: str) -> None:
+def _release_repo_lock(conn, repo: str) -> bool:
+    """Release the per-repo advisory lock.
+
+    Returns True when the lock was released, False when this session did not
+    hold it (the lock was lost mid-run -- see ``repo_lock``). Raises when the
+    release statement itself failed.
+
+    The return value and the exception are both signals and are no longer
+    discarded (issue #374): ``pg_advisory_unlock`` returning false (with a
+    server warning) means the session lost the lock while work was still
+    running -- the connection died (issue #370/#373) -- so another process
+    could have entered the same repo. Callers that must not let a release
+    error mask their own outcome catch it here; this function never swallows.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT pg_advisory_unlock(%s, hashtext(%s))",
+            (SYNC_LOCK_KEY, repo),
+        )
+        row = cur.fetchone()
+        return bool(row[0]) if row is not None else False
+
+
+@contextmanager
+def repo_lock(
+    conn, repo: str, phase: str = "index", acquire=None, release=None,
+):
+    """Acquire the per-repo advisory lock and own the whole lifecycle.
+
+    The single place where acquire / skip recording / release live, so a new
+    phase that takes the lock gets the recording for free (issue #374). The
+    lock granularity, key and session-level semantics are unchanged (issue
+    #307): two-argument ``pg_try_advisory_lock`` keyed on the repo, held for
+    the session so the batch loop's commits do not drop it.
+
+    Yields True when the lock was acquired -- the caller's own
+    ``try/finally`` release disappears, this helper releases on exit. Yields
+    False when it was not: the skip is already recorded durably
+    (``db.record_sync_skip`` -> sync_runs.last_skipped_at/skip_count) and
+    logged, and the caller keeps its own control flow (``continue`` /
+    ``return`` / ``raise`` -- e.g. the ``SystemExit`` for an explicitly
+    targeted repo). A raise from ``_acquire_repo_lock`` itself (DB-level
+    problem) propagates unchanged and records nothing: it is not a skip.
+
+    Release outcomes are distinguishable, never silent: released (debug),
+    did not hold the lock -- lost mid-run (warning), release statement
+    failed (error with traceback, never masking the block's own outcome).
+
+    The lock is taken on *conn* -- the caller's working connection -- and
+    no connection is kept alive by this helper beyond the block (issue #373).
+
+    ``acquire``/``release`` default to this module's ``_acquire_repo_lock`` /
+    ``_release_repo_lock``. Callers may pass their own (imported) copies so a
+    patch on the *caller's* module attribute takes effect -- the pipeline
+    passes its module globals, keeping one CM for all call sites (issue #374).
+    """
+    acquire = acquire or _acquire_repo_lock
+    release = release or _release_repo_lock
+    held = acquire(conn, repo)
+    if not held:
+        db.record_sync_skip(conn, repo)
+        log.info("%s %s: skipped (sync already running for this repo)", phase, repo)
     try:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT pg_advisory_unlock(%s, hashtext(%s))",
-                (SYNC_LOCK_KEY, repo),
-            )
-    except Exception:
-        pass
+        yield held
+    finally:
+        if held:
+            try:
+                released = release(conn, repo)
+            except Exception:
+                log.exception(
+                    "%s %s: advisory-lock release statement failed -- the "
+                    "lock may still be held by this session",
+                    phase, repo,
+                )
+            else:
+                if released:
+                    log.debug("%s %s: advisory lock released", phase, repo)
+                else:
+                    log.warning(
+                        "%s %s: advisory lock was NOT held at release time -- "
+                        "the lock was lost mid-run (session died?); another "
+                        "process could have entered this repo",
+                        phase, repo,
+                    )
 
 
 # --- Circuit breaker helpers (issue #345) ---
@@ -401,10 +479,11 @@ def run_fetch(
         conn = db.connect(settings)
         schema.migrate_light(conn, settings)
         try:
-            if not _acquire_repo_lock(conn, repo):
-                log.info("fetch %s: skipped (sync already running for this repo)", repo)
-                return
-            try:
+            # Per-repo PG advisory lock: acquire, skip recording and release
+            # all live in repo_lock() (issue #374).
+            with repo_lock(conn, repo, phase="fetch") as held:
+                if not held:
+                    return
                 log.info("=== fetch %s ===", repo)
                 t0 = time.monotonic()
 
@@ -441,8 +520,6 @@ def run_fetch(
                 # last_attempt_at frozen at the last failure for fetch-only
                 # runs (run_ingest resets in its index phase instead).
                 db.record_sync_attempt(conn, repo, success=True)
-            finally:
-                _release_repo_lock(conn, repo)
         finally:
             conn.close()
 
@@ -539,71 +616,71 @@ def run_index(
     for repo in targets:
         log.info("=== index %s ===", repo)
 
-        # Per-repo PG advisory lock
-        if not _acquire_repo_lock(conn, repo):
-            log.info("index %s: skipped (sync already running for this repo)", repo)
-            continue
+        # Per-repo PG advisory lock: acquire, skip recording and
+        # release all live in repo_lock() (issue #374).
+        with repo_lock(conn, repo, phase="index") as held:
+            if not held:
+                continue
 
-        try:
-            # Index docs
-            t0 = time.monotonic()
-            n_docs = index_docs(
-                settings, conn, embedder, repo,
-                buffer=buffer if is_bulk else None,
-            )
-            if is_bulk and buffer is not None:
-                n_flushed = buffer.flush()
-                conn.commit()
-                log.info("docs flushed: %d chunks", n_flushed)
-            t_docs = time.monotonic() - t0
-            log.info("index docs: %d files updated (%.1fs)", n_docs, t_docs)
+            try:
+                # Index docs
+                t0 = time.monotonic()
+                n_docs = index_docs(
+                    settings, conn, embedder, repo,
+                    buffer=buffer if is_bulk else None,
+                )
+                if is_bulk and buffer is not None:
+                    n_flushed = buffer.flush()
+                    conn.commit()
+                    log.info("docs flushed: %d chunks", n_flushed)
+                t_docs = time.monotonic() - t0
+                log.info("index docs: %d files updated (%.1fs)", n_docs, t_docs)
 
-            # Index issues/PRs
-            t0 = time.monotonic()
-            n_items = index_issues(
-                settings, conn, embedder, repo,
-                buffer=buffer if is_bulk else None,
-            )
-            if is_bulk and buffer is not None:
-                n_flushed = buffer.flush()
-                conn.commit()
-                log.info("issues flushed: %d chunks", n_flushed)
-            t_issues = time.monotonic() - t0
-            log.info("index issues: %d items indexed (%.1fs)", n_items, t_issues)
+                # Index issues/PRs
+                t0 = time.monotonic()
+                n_items = index_issues(
+                    settings, conn, embedder, repo,
+                    buffer=buffer if is_bulk else None,
+                )
+                if is_bulk and buffer is not None:
+                    n_flushed = buffer.flush()
+                    conn.commit()
+                    log.info("issues flushed: %d chunks", n_flushed)
+                t_issues = time.monotonic() - t0
+                log.info("index issues: %d items indexed (%.1fs)", n_items, t_issues)
 
-            # Index code
-            t0 = time.monotonic()
-            n_code = index_code(
-                settings, conn, embedder, repo,
-                buffer=buffer if is_bulk else None,
-            )
-            if is_bulk and buffer is not None:
-                n_flushed = buffer.flush()
-                conn.commit()
-                log.info("code flushed: %d chunks", n_flushed)
-            t_code = time.monotonic() - t0
-            log.info("index code: %d files updated (%.1fs)", n_code, t_code)
+                # Index code
+                t0 = time.monotonic()
+                n_code = index_code(
+                    settings, conn, embedder, repo,
+                    buffer=buffer if is_bulk else None,
+                )
+                if is_bulk and buffer is not None:
+                    n_flushed = buffer.flush()
+                    conn.commit()
+                    log.info("code flushed: %d chunks", n_flushed)
+                t_code = time.monotonic() - t0
+                log.info("index code: %d files updated (%.1fs)", n_code, t_code)
 
-            # Record success
-            finished_at = db.record_sync_run(
-                conn, repo, route, n_docs, n_items, n_code
-            )
-            db.record_sync_attempt(conn, repo, success=True)
-            synced_ts = finished_at.isoformat() if finished_at is not None else "?"
-            log.info("indexed at %s (route=%s)", synced_ts, route)
-            completed.append(repo)
-        except Exception as exc:
-            conn.rollback()
-            db.record_sync_attempt(conn, repo, success=False, error=str(exc))
-            if is_bulk:
-                raise
-            failed_repos[repo] = str(exc)
-            log.exception(
-                "index failed for %s (route=%s), continuing with remaining repos",
-                repo, route,
-            )
-        finally:
-            _release_repo_lock(conn, repo)
+                # Record success
+                finished_at = db.record_sync_run(
+                    conn, repo, route, n_docs, n_items, n_code
+                )
+                db.record_sync_attempt(conn, repo, success=True)
+                synced_ts = finished_at.isoformat() if finished_at is not None else "?"
+                log.info("indexed at %s (route=%s)", synced_ts, route)
+                completed.append(repo)
+            except Exception as exc:
+                conn.rollback()
+                db.record_sync_attempt(conn, repo, success=False, error=str(exc))
+                if is_bulk:
+                    raise
+                failed_repos[repo] = str(exc)
+                log.exception(
+                    "index failed for %s (route=%s), continuing with remaining repos",
+                    repo, route,
+                )
+
 
     # --- Bulk path: create heavy indexes in batch ---
     # Issue #365: gate on repos that actually completed, not the intended
@@ -822,10 +899,11 @@ def run_ingest(
         """
         conn2 = db.connect(settings)
         try:
-            if not _acquire_repo_lock(conn2, repo):
-                log.info("fetch %s: skipped (sync already running for this repo)", repo)
-                return
-            try:
+            # Per-repo PG advisory lock: acquire, skip recording and release
+            # all live in repo_lock() (issue #374).
+            with repo_lock(conn2, repo, phase="fetch") as held:
+                if not held:
+                    return
                 log.info("=== fetch %s === (parallel)", repo)
 
                 t0 = time.monotonic()
@@ -857,8 +935,6 @@ def run_ingest(
                     with _fetch_failed_lock:
                         fetch_failed[repo] = str(exc)
                     return  # swallow: don't abort other repos
-            finally:
-                _release_repo_lock(conn2, repo)
         finally:
             conn2.close()
 
@@ -908,70 +984,70 @@ def run_ingest(
 
         log.info("=== index %s === (sequential)", repo)
 
-        # Per-repo PG advisory lock for index phase
-        if not _acquire_repo_lock(conn, repo):
-            log.info("index %s: skipped (sync already running for this repo)", repo)
-            continue
+        # Per-repo PG advisory lock for index phase: acquire, skip
+        # recording and release all live in repo_lock() (issue #374).
+        with repo_lock(conn, repo, phase="index") as held:
+            if not held:
+                continue
 
-        try:
-            # docs: walk + chunk + embed
-            t0 = time.monotonic()
-            n_docs = index_docs(
-                settings, conn, embedder, repo,
-                buffer=buffer if is_bulk else None,
-            )
-            if is_bulk and buffer is not None:
-                n_flushed = buffer.flush()
-                conn.commit()
-                log.info("docs flushed: %d chunks", n_flushed)
-            t_docs = time.monotonic() - t0
-            log.info("index docs: %d files updated (%.1fs)", n_docs, t_docs)
+            try:
+                # docs: walk + chunk + embed
+                t0 = time.monotonic()
+                n_docs = index_docs(
+                    settings, conn, embedder, repo,
+                    buffer=buffer if is_bulk else None,
+                )
+                if is_bulk and buffer is not None:
+                    n_flushed = buffer.flush()
+                    conn.commit()
+                    log.info("docs flushed: %d chunks", n_flushed)
+                t_docs = time.monotonic() - t0
+                log.info("index docs: %d files updated (%.1fs)", n_docs, t_docs)
 
-            # issues: read issue_items + chunk + embed
-            t0 = time.monotonic()
-            n_items = index_issues(
-                settings, conn, embedder, repo,
-                buffer=buffer if is_bulk else None,
-            )
-            if is_bulk and buffer is not None:
-                n_flushed = buffer.flush()
-                conn.commit()
-                log.info("issues flushed: %d chunks", n_flushed)
-            t_issues = time.monotonic() - t0
-            log.info("index issues: %d items indexed (%.1fs)", n_items, t_issues)
+                # issues: read issue_items + chunk + embed
+                t0 = time.monotonic()
+                n_items = index_issues(
+                    settings, conn, embedder, repo,
+                    buffer=buffer if is_bulk else None,
+                )
+                if is_bulk and buffer is not None:
+                    n_flushed = buffer.flush()
+                    conn.commit()
+                    log.info("issues flushed: %d chunks", n_flushed)
+                t_issues = time.monotonic() - t0
+                log.info("index issues: %d items indexed (%.1fs)", n_items, t_issues)
 
-            # code: walk + chunk + embed
-            t0 = time.monotonic()
-            n_code = index_code(
-                settings, conn, embedder, repo,
-                buffer=buffer if is_bulk else None,
-            )
-            if is_bulk and buffer is not None:
-                n_flushed = buffer.flush()
-                conn.commit()
-                log.info("code flushed: %d chunks", n_flushed)
-            t_code = time.monotonic() - t0
-            log.info("index code: %d files updated (%.1fs)", n_code, t_code)
+                # code: walk + chunk + embed
+                t0 = time.monotonic()
+                n_code = index_code(
+                    settings, conn, embedder, repo,
+                    buffer=buffer if is_bulk else None,
+                )
+                if is_bulk and buffer is not None:
+                    n_flushed = buffer.flush()
+                    conn.commit()
+                    log.info("code flushed: %d chunks", n_flushed)
+                t_code = time.monotonic() - t0
+                log.info("index code: %d files updated (%.1fs)", n_code, t_code)
 
-            finished_at = db.record_sync_run(
-                conn, repo, route, n_docs, n_items, n_code
-            )
-            db.record_sync_attempt(conn, repo, success=True)
-            synced_ts = finished_at.isoformat() if finished_at is not None else "?"
-            log.info("synced at %s (route=%s)", synced_ts, route)
-            completed.append(repo)
-        except Exception as exc:
-            conn.rollback()
-            db.record_sync_attempt(conn, repo, success=False, error=str(exc))
-            if is_bulk:
-                raise
-            index_failed[repo] = str(exc)
-            log.exception(
-                "index failed for %s (route=%s), continuing with remaining repos",
-                repo, route,
-            )
-        finally:
-            _release_repo_lock(conn, repo)
+                finished_at = db.record_sync_run(
+                    conn, repo, route, n_docs, n_items, n_code
+                )
+                db.record_sync_attempt(conn, repo, success=True)
+                synced_ts = finished_at.isoformat() if finished_at is not None else "?"
+                log.info("synced at %s (route=%s)", synced_ts, route)
+                completed.append(repo)
+            except Exception as exc:
+                conn.rollback()
+                db.record_sync_attempt(conn, repo, success=False, error=str(exc))
+                if is_bulk:
+                    raise
+                index_failed[repo] = str(exc)
+                log.exception(
+                    "index failed for %s (route=%s), continuing with remaining repos",
+                    repo, route,
+                )
+
 
     # --- Bulk path: create heavy indexes in batch ---
     # Issue #365: gate on repos that actually completed, not the intended
