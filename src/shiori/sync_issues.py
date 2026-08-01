@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import logging
+import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime, timezone
 
 import httpx
@@ -25,6 +28,45 @@ from .sync_utils import _clean_text, _is_bot, _should_index
 log = logging.getLogger(__name__)
 
 MAX_PR_REVIEW_WORKERS = 10
+
+#: Global ceiling on the PR-review inner level (issue #375): at most this
+#: many PR-review workers may hold a DB connection at once, ACROSS ALL repo
+#: threads of one ingest process.
+#:
+#: Each ``_worker`` opens exactly one connection for its whole lifetime, so
+#: bounding the workers bounds the inner-level connections.  The worst case
+#: for the whole process becomes ``1 (pre-flight / phase 2) +
+#: fetch_concurrency (repo threads) + PR_REVIEW_CONNECTION_LIMIT`` = 15 with
+#: the defaults -- a sum, instead of the old
+#: ``fetch_concurrency * (1 + MAX_PR_REVIEW_WORKERS) + 1`` = 45 product that
+#: grew with ``SHIORI_FETCH_CONCURRENCY``.  A single repo's pool is at most
+#: ``MAX_PR_REVIEW_WORKERS`` anyway, so a lone repo is unaffected; the cap
+#: only binds when several repos nest PR-review workers at once.
+PR_REVIEW_CONNECTION_LIMIT = MAX_PR_REVIEW_WORKERS
+
+#: Permits for the ceiling above.  A worker acquires one before opening its
+#: connection and returns it after closing, so a worker waiting for a slot
+#: holds no connection and no advisory lock -- the level that waits is never
+#: the level that holds (issue #375).
+_pr_review_connection_slots = threading.BoundedSemaphore(PR_REVIEW_CONNECTION_LIMIT)
+
+
+@contextmanager
+def _pr_review_connection_scope() -> Iterator[None]:
+    """Hold one global PR-review connection slot for the duration of the block.
+
+    Structural release (issue #375): the slot is returned by ``__exit__`` no
+    matter how the block ends -- success, exception, or ``BaseException`` --
+    so a work-path failure can never leak a permit (a leaked permit would
+    silently degrade every later run of the unattended daily lane).  The
+    block body is the whole worker lifetime: ``db.connect`` opens inside the
+    block and ``conn2.close()`` runs before it exits.
+    """
+    _pr_review_connection_slots.acquire()
+    try:
+        yield
+    finally:
+        _pr_review_connection_slots.release()
 
 
 def _upsert_issue_item(conn: psycopg.Connection, row: dict) -> None:
@@ -283,24 +325,30 @@ def _fetch_pr_reviews_parallel(
 
     def _worker(chunk: list[int]) -> int:
         count = 0
-        conn2 = db.connect(settings)
-        try:
-            with httpx.Client(headers=headers, auth=_GitHubAuth(provider), timeout=30.0, follow_redirects=True) as cl:
-                for no in chunk:
-                    try:
-                        _sync_pr_reviews(
-                            cl, conn2, embedder=None, settings=settings,
-                            repo=repo, issue_no=no,
-                            do_index=False,
-                        )
-                        count += 1
-                    except Exception as exc:
-                        log.warning(
-                            "PR #%d review fetch failed, continuing: %s", no, exc,
-                        )
-            conn2.commit()
-        finally:
-            conn2.close()
+        # Global connection ceiling (issue #375): the slot is taken before
+        # the connection opens and returned after it closes, so an exception
+        # on the work path cannot leak a permit -- and a worker waiting for
+        # a slot holds no connection and no advisory lock (those live on the
+        # repo thread's own connection).
+        with _pr_review_connection_scope():
+            conn2 = db.connect(settings)
+            try:
+                with httpx.Client(headers=headers, auth=_GitHubAuth(provider), timeout=30.0, follow_redirects=True) as cl:
+                    for no in chunk:
+                        try:
+                            _sync_pr_reviews(
+                                cl, conn2, embedder=None, settings=settings,
+                                repo=repo, issue_no=no,
+                                do_index=False,
+                            )
+                            count += 1
+                        except Exception as exc:
+                            log.warning(
+                                "PR #%d review fetch failed, continuing: %s", no, exc,
+                            )
+                conn2.commit()
+            finally:
+                conn2.close()
         return count
 
     chunks = _split_into_chunks(pr_numbers, n_workers)
