@@ -163,6 +163,107 @@ def _fetch_concurrency_from_env() -> int:
     return value
 
 
+#: Default circuit-breaker consecutive-failure threshold (issue #345).
+#: Used when SHIORI_CB_THRESHOLD is unset, empty (the plain ``${VAR:-}``
+#: compose form), unparseable, or negative.
+DEFAULT_CB_THRESHOLD: int = 5
+
+
+def _cb_threshold_from_env() -> int:
+    """Return SHIORI_CB_THRESHOLD as a non-negative int.
+
+    Unset, empty (the plain ``${VAR:-}`` compose form), unparseable, or
+    negative values fall back to ``DEFAULT_CB_THRESHOLD`` -- the process
+    must never crash on a bad value.
+
+    ``0`` is *not* a bad value: it is the documented off-switch and is
+    returned as-is, because ``ingest._should_skip_repo`` disables the
+    breaker on ``cb_threshold <= 0``.  Folding it into the default would
+    turn a working knob into a silent no-op now that this setting really
+    reaches the container (issue #371).
+    """
+    raw = os.environ.get("SHIORI_CB_THRESHOLD", "").strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        return DEFAULT_CB_THRESHOLD
+    if value < 0:
+        return DEFAULT_CB_THRESHOLD
+    return value
+
+
+#: Default circuit-breaker base backoff in seconds (issue #345). Used when
+#: SHIORI_CB_BASE_BACKOFF is unset, empty (the plain ``${VAR:-}`` compose
+#: form), unparseable, or non-positive.
+DEFAULT_CB_BASE_BACKOFF: float = 60.0
+
+
+def _cb_base_backoff_from_env() -> float:
+    """Return SHIORI_CB_BASE_BACKOFF as a positive float.
+
+    Unset, empty (the plain ``${VAR:-}`` compose form), unparseable, or
+    non-positive values fall back to ``DEFAULT_CB_BASE_BACKOFF`` -- the
+    process must never crash on a bad value.
+    """
+    raw = os.environ.get("SHIORI_CB_BASE_BACKOFF", "").strip()
+    try:
+        value = float(raw)
+    except ValueError:
+        return DEFAULT_CB_BASE_BACKOFF
+    if value <= 0:
+        return DEFAULT_CB_BASE_BACKOFF
+    return value
+
+
+#: Default circuit-breaker backoff cap for the dev lane (issue #345).
+#: Used when SHIORI_CB_MAX_BACKOFF is unset, empty (the plain ``${VAR:-}``
+#: compose form), unparseable, or non-positive.
+DEFAULT_CB_MAX_BACKOFF: float = 3600.0
+
+
+def _cb_max_backoff_from_env() -> float:
+    """Return SHIORI_CB_MAX_BACKOFF as a positive float.
+
+    Unset, empty (the plain ``${VAR:-}`` compose form), unparseable, or
+    non-positive values fall back to ``DEFAULT_CB_MAX_BACKOFF`` -- the
+    process must never crash on a bad value.
+    """
+    raw = os.environ.get("SHIORI_CB_MAX_BACKOFF", "").strip()
+    try:
+        value = float(raw)
+    except ValueError:
+        return DEFAULT_CB_MAX_BACKOFF
+    if value <= 0:
+        return DEFAULT_CB_MAX_BACKOFF
+    return value
+
+
+#: Default circuit-breaker backoff cap for the reference lane (issue #371):
+#: 7 days. Reference repos sync once a day, so a cap below the daily
+#: cadence (the dev cap of 3600s) could never let the breaker fire there;
+#: the day-scale cap does. Used when SHIORI_CB_REF_MAX_BACKOFF is unset,
+#: empty (the plain ``${VAR:-}`` compose form), unparseable, or
+#: non-positive.
+DEFAULT_CB_REF_MAX_BACKOFF: float = 604_800.0
+
+
+def _cb_ref_max_backoff_from_env() -> float:
+    """Return SHIORI_CB_REF_MAX_BACKOFF as a positive float.
+
+    Unset, empty (the plain ``${VAR:-}`` compose form), unparseable, or
+    non-positive values fall back to ``DEFAULT_CB_REF_MAX_BACKOFF`` -- the
+    process must never crash on a bad value.
+    """
+    raw = os.environ.get("SHIORI_CB_REF_MAX_BACKOFF", "").strip()
+    try:
+        value = float(raw)
+    except ValueError:
+        return DEFAULT_CB_REF_MAX_BACKOFF
+    if value <= 0:
+        return DEFAULT_CB_REF_MAX_BACKOFF
+    return value
+
+
 # Default embedding model baked into the image (docker/app/Dockerfile).
 # To change, fork the image and rebuild. Runtime env var override removed (#255).
 DEFAULT_EMBEDDING_MODEL = "intfloat/multilingual-e5-small"
@@ -270,25 +371,24 @@ class Settings:
         default_factory=lambda: os.environ.get("SHIORI_REF_BACKFILL_SINCE") or None
     )
     # --- Circuit breaker: stop retrying a repo after N consecutive failures (issue #345) ---
-    # Set to 0 to disable the circuit breaker entirely.
-    cb_threshold: int = field(
-        default_factory=lambda: int(
-            os.environ.get("SHIORI_CB_THRESHOLD", "5")
-        )
-    )
+    # Unset, empty, unparseable, or non-positive values fall back to the
+    # built-in defaults (the process must never crash on a bad value; see
+    # the *_from_env helpers above).
+    # Set SHIORI_CB_THRESHOLD=0 to disable the circuit breaker entirely.
+    cb_threshold: int = field(default_factory=_cb_threshold_from_env)
     # Base backoff in seconds. The actual backoff grows exponentially:
-    #   min(cb_max_backoff, cb_base_backoff * 2^(failures - 1))
-    cb_base_backoff: float = field(
-        default_factory=lambda: float(
-            os.environ.get("SHIORI_CB_BASE_BACKOFF", "60")
-        )
-    )
-    # Maximum backoff cap in seconds. Prevents exponential growth from
-    # parking a repo for days.
-    cb_max_backoff: float = field(
-        default_factory=lambda: float(
-            os.environ.get("SHIORI_CB_MAX_BACKOFF", "3600")
-        )
+    #   min(cap, cb_base_backoff * 2^(failures - 1))
+    cb_base_backoff: float = field(default_factory=_cb_base_backoff_from_env)
+    # Backoff cap in seconds for the dev lane (repos in SHIORI_DEV_REPOS,
+    # ~15-minute cadence): prevents exponential growth from parking a dev
+    # repo for days -- a dev repo waits at most one hour.
+    cb_max_backoff: float = field(default_factory=_cb_max_backoff_from_env)
+    # Backoff cap in seconds for the reference lane (repos in SHIORI_REPOS
+    # but NOT in SHIORI_DEV_REPOS, once-a-day cadence). The dev cap is
+    # always below the daily cadence, so the breaker could never fire
+    # there; the day-scale cap lets it (issue #371).
+    cb_ref_max_backoff: float = field(
+        default_factory=_cb_ref_max_backoff_from_env
     )
     # --- Rate-limit handling (issue #345) ---
     # Maximum seconds to wait on a rate-limit response (Retry-After or

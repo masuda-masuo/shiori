@@ -154,6 +154,14 @@ services:
       # サスペンド時間は消費しない（issue #377）。空文字列 = 無制限
       # （config.py が防御的に None として扱うため ${VAR:-} 形式で安全）。
       SHIORI_INGEST_TIME_BUDGET: ${SHIORI_INGEST_TIME_BUDGET:-}
+      # Circuit breaker (issue #345): config.py parses defensively, so the
+      # ${VAR:-} form is safe (empty/unparseable/non-positive values fall
+      # back to the built-in defaults). cb_max_backoff is the dev-lane cap;
+      # cb_ref_max_backoff the reference-lane cap (issue #371).
+      SHIORI_CB_THRESHOLD: ${SHIORI_CB_THRESHOLD:-}
+      SHIORI_CB_BASE_BACKOFF: ${SHIORI_CB_BASE_BACKOFF:-}
+      SHIORI_CB_MAX_BACKOFF: ${SHIORI_CB_MAX_BACKOFF:-}
+      SHIORI_CB_REF_MAX_BACKOFF: ${SHIORI_CB_REF_MAX_BACKOFF:-}
       SHIORI_REF_BACKFILL_SINCE: ${SHIORI_REF_BACKFILL_SINCE:-}
       GITHUB_TOKEN: ${GITHUB_TOKEN:-}
       GITHUB_TOKEN_SOCKET: ${GITHUB_TOKEN_SOCKET:-}
