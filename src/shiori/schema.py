@@ -124,7 +124,14 @@ CREATE TABLE IF NOT EXISTS sync_runs (
     -- this table only keeps the latest row per repo.
     last_attempt_at TIMESTAMPTZ,
     last_error TEXT,
-    consecutive_failures INTEGER NOT NULL DEFAULT 0
+    consecutive_failures INTEGER NOT NULL DEFAULT 0,
+    -- Advisory-lock skip tracking (issue #374): a repo that could not be
+    -- locked (lock held by another process) leaves a durable trace --
+    -- last time it was skipped and how many skips in a row (reset on a
+    -- successful attempt). A skip is deliberately NOT an attempt: it must
+    -- not touch last_error / consecutive_failures (circuit breaker, #345).
+    last_skipped_at TIMESTAMPTZ,
+    skip_count INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS repo_index_state (
@@ -370,6 +377,32 @@ def _run_alter_statements(conn: psycopg.Connection) -> None:
         conn.commit()
         ran_any = True
         log.info("migrate: executed sync_runs attempt-tracking columns")
+
+    # 6b. Advisory-lock skip tracking (issue #374): last_skipped_at +
+    # skip_count, so a repo that could not be locked stays countable from
+    # the DB after the ~9h log retention window. The probe reuses
+    # sync_runs_columns from step 5/6; if that probe predates the ALTERs
+    # just above, the IF NOT EXISTS here makes the re-run harmless.
+    missing_skip_cols = [
+        col
+        for col in ("last_skipped_at", "skip_count")
+        if col not in sync_runs_columns
+    ]
+    if missing_skip_cols:
+        with conn.cursor() as cur:
+            if "last_skipped_at" in missing_skip_cols:
+                cur.execute(
+                    "ALTER TABLE sync_runs ADD COLUMN IF NOT EXISTS "
+                    "last_skipped_at TIMESTAMPTZ"
+                )
+            if "skip_count" in missing_skip_cols:
+                cur.execute(
+                    "ALTER TABLE sync_runs ADD COLUMN IF NOT EXISTS skip_count "
+                    "INTEGER NOT NULL DEFAULT 0"
+                )
+        conn.commit()
+        ran_any = True
+        log.info("migrate: executed sync_runs skip-tracking columns")
 
     # 7. Add repo_index_state table for pull-type sync tracking (#236) --
     # already probes to_regclass (ACCESS SHARE); left as-is.

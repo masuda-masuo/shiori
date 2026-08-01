@@ -26,6 +26,7 @@ from .ingest import (
     _acquire_repo_lock,
     _BULK_BUFFER_SIZE,
     _release_repo_lock,
+    repo_lock,
 )
 
 log = logging.getLogger(__name__)
@@ -239,95 +240,107 @@ def _do_sync(
                 failed_repos: dict[str, str] = {}
                 completed: list[str] = []
                 for repo in targets:
-                    # Per-repo PG advisory lock (issue #307)
+                    # Per-repo PG advisory lock (issue #307): acquire,
+                    # skip recording and release all live in
+                    # repo_lock() (issue #374). Only an *acquire*
+                    # failure (DB-level problem) is handled here --
+                    # recorded as a failed attempt, never as a skip.
+                    # recorded_exc distinguishes that case from the
+                    # bulk-mode re-raise below, so a work failure is
+                    # recorded exactly once.
+                    recorded_exc: BaseException | None = None
                     try:
-                        lock_ok = _acquire_repo_lock(conn, repo)
-                    except Exception as exc:
-                        db.record_sync_attempt(conn, repo, success=False, error=str(exc))
-                        raise
-                    if not lock_ok:
-                        log.info("sync %s: skipped (sync already running for this repo)", repo)
-                        continue
+                        with repo_lock(
+                            conn, repo, phase="sync",
+                            acquire=_acquire_repo_lock,
+                            release=_release_repo_lock,
+                        ) as lock_ok:
+                            if not lock_ok:
+                                continue
 
-                    try:
-                        n_docs = sync_docs(
-                            settings, conn, embedder, repo, provider,
-                            buffer=buffer if is_bulk else None,
-                        )
-                        if is_bulk:
-                            assert buffer is not None
-                            buffer.flush()
-                            conn.commit()
-                        n_items = sync_issues(
-                            settings, conn, embedder, repo, provider,
-                            buffer=buffer if is_bulk else None,
-                        )
-                        if is_bulk:
-                            assert buffer is not None
-                            buffer.flush()
-                            conn.commit()
-                        n_code = sync_code(
-                            settings, conn, embedder, repo, provider,
-                            buffer=buffer if is_bulk else None,
-                        )
-                        if is_bulk:
-                            assert buffer is not None
-                            buffer.flush()
-                            conn.commit()
-                        finished_at = db.record_sync_run(
-                            conn, repo, route, n_docs, n_items, n_code
-                        )
-                        db.record_sync_attempt(conn, repo, success=True)
-                        indexed_head = db.get_cursor(conn, repo, "docs")
-                        if indexed_head:
-                            db.upsert_indexed_head(conn, repo, indexed_head)
-                        result["repos"][repo] = {
-                            "docs_updated": n_docs,
-                            "issues_indexed": n_items,
-                            "code_added": n_code,
-                            "synced_at": finished_at.isoformat() if finished_at is not None else None,
-                        }
-                        log.info(
-                            "synced %s: docs=%d issues=%d code=%d (route=%s)",
-                            repo, n_docs, n_items, n_code, route,
-                        )
-                        completed.append(repo)
-                    except Exception as exc:
-                        need_reconnect = False
-                        try:
-                            conn.rollback()
-                        except psycopg.OperationalError:
-                            need_reconnect = True
-                        try:
-                            db.record_sync_attempt(conn, repo, success=False, error=str(exc))
-                        except psycopg.OperationalError:
-                            need_reconnect = True
-                            with _conn() as tmp_conn:
-                                db.record_sync_attempt(tmp_conn, repo, success=False, error=str(exc))
-                        try:
-                            db.record_repo_sync_error(conn, repo, str(exc))
-                        except psycopg.OperationalError:
-                            with _conn() as tmp_conn:
-                                db.record_repo_sync_error(tmp_conn, repo, str(exc))
-                        if is_bulk:
-                            raise
-                        failed_repos[repo] = str(exc)
-                        log.exception(
-                            "sync failed for %s (route=%s), continuing with "
-                            "remaining repos", repo, route,
-                        )
-                        if need_reconnect:
                             try:
-                                conn.close()
-                            except Exception:
-                                pass
-                            conn = _conn()
-                            log.warning(
-                                "reconnected DB connection after OperationalError "
-                                "during sync of %s", repo,
-                            )
-                    finally:
-                        _release_repo_lock(conn, repo)
+                                n_docs = sync_docs(
+                                    settings, conn, embedder, repo, provider,
+                                    buffer=buffer if is_bulk else None,
+                                )
+                                if is_bulk:
+                                    assert buffer is not None
+                                    buffer.flush()
+                                    conn.commit()
+                                n_items = sync_issues(
+                                    settings, conn, embedder, repo, provider,
+                                    buffer=buffer if is_bulk else None,
+                                )
+                                if is_bulk:
+                                    assert buffer is not None
+                                    buffer.flush()
+                                    conn.commit()
+                                n_code = sync_code(
+                                    settings, conn, embedder, repo, provider,
+                                    buffer=buffer if is_bulk else None,
+                                )
+                                if is_bulk:
+                                    assert buffer is not None
+                                    buffer.flush()
+                                    conn.commit()
+                                finished_at = db.record_sync_run(
+                                    conn, repo, route, n_docs, n_items, n_code
+                                )
+                                db.record_sync_attempt(conn, repo, success=True)
+                                indexed_head = db.get_cursor(conn, repo, "docs")
+                                if indexed_head:
+                                    db.upsert_indexed_head(conn, repo, indexed_head)
+                                result["repos"][repo] = {
+                                    "docs_updated": n_docs,
+                                    "issues_indexed": n_items,
+                                    "code_added": n_code,
+                                    "synced_at": finished_at.isoformat() if finished_at is not None else None,
+                                }
+                                log.info(
+                                    "synced %s: docs=%d issues=%d code=%d (route=%s)",
+                                    repo, n_docs, n_items, n_code, route,
+                                )
+                                completed.append(repo)
+                            except Exception as exc:
+                                recorded_exc = exc
+                                need_reconnect = False
+                                try:
+                                    conn.rollback()
+                                except psycopg.OperationalError:
+                                    need_reconnect = True
+                                try:
+                                    db.record_sync_attempt(conn, repo, success=False, error=str(exc))
+                                except psycopg.OperationalError:
+                                    need_reconnect = True
+                                    with _conn() as tmp_conn:
+                                        db.record_sync_attempt(tmp_conn, repo, success=False, error=str(exc))
+                                try:
+                                    db.record_repo_sync_error(conn, repo, str(exc))
+                                except psycopg.OperationalError:
+                                    with _conn() as tmp_conn:
+                                        db.record_repo_sync_error(tmp_conn, repo, str(exc))
+                                if is_bulk:
+                                    raise
+                                failed_repos[repo] = str(exc)
+                                log.exception(
+                                    "sync failed for %s (route=%s), continuing with "
+                                    "remaining repos", repo, route,
+                                )
+                                if need_reconnect:
+                                    try:
+                                        conn.close()
+                                    except Exception:
+                                        pass
+                                    conn = _conn()
+                                    log.warning(
+                                        "reconnected DB connection after OperationalError "
+                                        "during sync of %s", repo,
+                                    )
+                    except Exception as exc:
+                        if exc is not recorded_exc:
+                            db.record_sync_attempt(conn, repo, success=False, error=str(exc))
+                        raise
+
 
                 if is_bulk:
                     # Mirrors ingest._bulk_run_completed_all_repos (issue

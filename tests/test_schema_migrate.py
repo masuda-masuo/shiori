@@ -135,6 +135,8 @@ def _up_to_date_columns() -> dict[str, dict[str, bool]]:
             "last_attempt_at": False,
             "last_error": False,
             "consecutive_failures": False,
+            "last_skipped_at": False,
+            "skip_count": False,
             "finished_at": False,
         },
         "issue_items": {"indexed_at": False, "labels": False},
