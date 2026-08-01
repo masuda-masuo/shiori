@@ -95,6 +95,13 @@ SERVICE_SCOPES: dict[str, set[str]] = {
         "SHIORI_INGEST_TIME_BUDGET",
         # config.py; ingest.py:446,853 -- fetch-phase worker count
         "SHIORI_FETCH_CONCURRENCY",
+        # config.py; ingest.py _should_skip_repo -- circuit breaker. The
+        # backoff cap is chosen per lane from settings.dev_repos (#371);
+        # the breaker only runs on the ingest CLI path.
+        "SHIORI_CB_THRESHOLD",
+        "SHIORI_CB_BASE_BACKOFF",
+        "SHIORI_CB_MAX_BACKOFF",
+        "SHIORI_CB_REF_MAX_BACKOFF",
         # config.py; ingest.py:338 _resolve_backfill_since (ref repos only)
         "SHIORI_REF_BACKFILL_SINCE",
         # embedding.py: _resolve_onnx_path -- Embedder used by the index phase
@@ -365,7 +372,16 @@ class TestEmptyStringSemantics:
         literal 0) -- listing it as a known gap keeps it visible instead of
         silently exempt.
         """
-        single_source = {"SHIORI_FETCH_CONCURRENCY"}
+        single_source = {
+            "SHIORI_FETCH_CONCURRENCY",
+            # Circuit-breaker settings: their reads became defensive with
+            # the per-lane cap change (#371), so compose may carry only the
+            # plain ${VAR:-} form and the defaults live in config.py only.
+            "SHIORI_CB_THRESHOLD",
+            "SHIORI_CB_BASE_BACKOFF",
+            "SHIORI_CB_MAX_BACKOFF",
+            "SHIORI_CB_REF_MAX_BACKOFF",
+        }
         known_gaps = {"SHIORI_SYNC_INTERVAL_SECONDS"}
         assert not (single_source & known_gaps)
 

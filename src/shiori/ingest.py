@@ -341,6 +341,10 @@ def _should_skip_repo(
     Reads ``consecutive_failures`` and ``last_attempt_at`` from the DB.
     When *explicit* is True (caller passed ``repos=[...]``), a skip raises
     ``ValueError`` instead of silently returning True.
+
+    The backoff cap is chosen per lane from ``settings.dev_repos``
+    (issue #371): reference repos get a day-scale cap so the breaker can
+    fire on the daily cadence; dev repos keep the one-hour cap exactly.
     """
     # Defensive: settings may be a MagicMock (tests); MagicMock.__int__()
     # returns 1, so we must use isinstance to detect non-real settings.
@@ -354,7 +358,18 @@ def _should_skip_repo(
     base_backoff = getattr(settings, "cb_base_backoff", 60.0)
     if not isinstance(base_backoff, (int, float)):
         return False
-    max_backoff = getattr(settings, "cb_max_backoff", 3600.0)
+    # The backoff cap is chosen per lane (issue #371): dev repos (in
+    # settings.dev_repos, ~15-minute cadence) keep the one-hour cap
+    # exactly; reference repos (daily cadence) get a day-scale cap so the
+    # breaker can actually fire on that lane.
+    if repo in (getattr(settings, "dev_repos", ()) or ()):
+        max_backoff = getattr(settings, "cb_max_backoff", 3600.0)
+    else:
+        # Reference lane. Absent/non-numeric reference cap (partial test
+        # settings) falls back to the dev cap rather than raising.
+        max_backoff = getattr(settings, "cb_ref_max_backoff", None)
+        if not isinstance(max_backoff, (int, float)):
+            max_backoff = getattr(settings, "cb_max_backoff", 3600.0)
     if not isinstance(max_backoff, (int, float)):
         return False
 
