@@ -76,6 +76,17 @@ services:
     build:
       context: .
       dockerfile: docker/app/Dockerfile
+    # env_file: .env で .env.example に記載された設定をすべて届ける
+    # （setup.md の手順: cp .env.example .env）。environment: のキーは
+    # env_file より優先される。ONNX パスはここ経由でのみ届ける
+    # （下記 environment: に ${SHIORI_ONNX_MODEL_PATH:-} を書くと、
+    # 未設定時に空文字列に展開され embedding.py の明示的 off-switch と
+    # 解釈されて ONNX が常時無効化される。issue #353 の罠）。
+    # .env は .gitignore 済みで clone 直後には存在しないので required: false。
+    # 無いと `docker compose build` すら通らなくなる。
+    env_file:
+      - path: .env
+        required: false
     environment:
       DATABASE_URL: postgresql://shiori:shiori@db:5432/shiori
       SHIORI_REPOS: ${SHIORI_REPOS:-}
@@ -85,6 +96,8 @@ services:
       SHIORI_DEV_REPOS: ${SHIORI_DEV_REPOS:-}
       SHIORI_CODE_EXTENSIONS: ${SHIORI_CODE_EXTENSIONS:-}
       SHIORI_CODE_EXCLUDE_GLOBS: ${SHIORI_CODE_EXCLUDE_GLOBS:-}
+      SHIORI_LOG_LEVEL: ${SHIORI_LOG_LEVEL:-}
+      SHIORI_ALLOW_REBUILD: ${SHIORI_ALLOW_REBUILD:-}
       GITHUB_TOKEN: ${GITHUB_TOKEN:-}
       # on-demand mint socket — GITHUB_TOKEN_SOCKET=/run/shiori/mint.sock
       # を .env に書くと TokenSocketProvider が選択される。pull 型なので
@@ -119,6 +132,11 @@ services:
       dockerfile: docker/app/Dockerfile
     profiles: ["ingest"]
     command: ["sh", "-c", "python -m shiori ingest $(echo \"$SHIORI_REPOS\" | tr ',' ' ' | xargs -n1 echo --repo)"]
+    # env_file: .env で .env.example に記載された設定をすべて届ける
+    # （app サービスと同じ理由。ONNX パスもここ経由。issue #353 の罠回避）。
+    env_file:
+      - path: .env
+        required: false
     environment:
       DATABASE_URL: postgresql://shiori:shiori@db:5432/shiori
       SHIORI_REPOS: ${SHIORI_REPOS:-}
@@ -127,6 +145,12 @@ services:
       SHIORI_DEV_REPOS: ${SHIORI_DEV_REPOS:-}
       SHIORI_CODE_EXTENSIONS: ${SHIORI_CODE_EXTENSIONS:-}
       SHIORI_CODE_EXCLUDE_GLOBS: ${SHIORI_CODE_EXCLUDE_GLOBS:-}
+      SHIORI_LOG_LEVEL: ${SHIORI_LOG_LEVEL:-}
+      SHIORI_BULK_PENDING_THRESHOLD: ${SHIORI_BULK_PENDING_THRESHOLD:-}
+      # int() で読むため空文字列は例外になる（config.py）。未設定時は
+      # 組み込みデフォルトと同じ 4 を展開する（:- の空デフォルトは禁止）。
+      SHIORI_FETCH_CONCURRENCY: ${SHIORI_FETCH_CONCURRENCY:-4}
+      SHIORI_REF_BACKFILL_SINCE: ${SHIORI_REF_BACKFILL_SINCE:-}
       GITHUB_TOKEN: ${GITHUB_TOKEN:-}
       GITHUB_TOKEN_SOCKET: ${GITHUB_TOKEN_SOCKET:-}
       GITHUB_TOKEN_COMMAND: ${GITHUB_TOKEN_COMMAND:-}
