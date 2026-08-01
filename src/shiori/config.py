@@ -140,6 +140,29 @@ def _bulk_pending_threshold_from_env() -> int:
     return value
 
 
+#: Default fetch-phase concurrency cap (issue #386). Used when
+#: SHIORI_FETCH_CONCURRENCY is unset, empty (the plain ``${VAR:-}``
+#: compose form), unparseable, or non-positive.
+DEFAULT_FETCH_CONCURRENCY: int = 4
+
+
+def _fetch_concurrency_from_env() -> int:
+    """Return SHIORI_FETCH_CONCURRENCY as a positive int.
+
+    Unset, empty (the plain ``${VAR:-}`` compose form), unparseable, or
+    non-positive values fall back to ``DEFAULT_FETCH_CONCURRENCY`` -- the
+    process must never crash on a bad value.
+    """
+    raw = os.environ.get("SHIORI_FETCH_CONCURRENCY", "").strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        return DEFAULT_FETCH_CONCURRENCY
+    if value <= 0:
+        return DEFAULT_FETCH_CONCURRENCY
+    return value
+
+
 # Default embedding model baked into the image (docker/app/Dockerfile).
 # To change, fork the image and rebuild. Runtime env var override removed (#255).
 DEFAULT_EMBEDDING_MODEL = "intfloat/multilingual-e5-small"
@@ -238,11 +261,8 @@ class Settings:
     allow_rebuild: bool = field(default_factory=_allow_rebuild_from_env)
     # Fetch-phase concurrency cap. Max number of repos fetched simultaneously.
     # The actual worker count is max(1, min(len(targets), this value)).
-    fetch_concurrency: int = field(
-        default_factory=lambda: int(
-            os.environ.get("SHIORI_FETCH_CONCURRENCY", "4")
-        )
-    )
+    # Unset/empty/unparseable/non-positive values fall back to the default.
+    fetch_concurrency: int = field(default_factory=_fetch_concurrency_from_env)
     # Backfill seed for ref repos (not in SHIORI_DEV_REPOS) whose cursor is None.
     # YYYY-MM-DD format. CLI --backfill-since overrides this for all targets.
     # Dev repos are never seeded by this env var (always full backfill).

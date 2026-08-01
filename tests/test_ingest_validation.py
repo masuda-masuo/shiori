@@ -1339,6 +1339,16 @@ class TestFetchConcurrencySettings:
         s = Settings()
         assert s.fetch_concurrency == 8
 
+    @pytest.mark.parametrize("bad", ["", "abc", "-1", "0"])
+    def test_bad_values_fall_back_to_default(self, monkeypatch, bad):
+        """Empty (the plain ${VAR:-} compose form), non-numeric, and
+        non-positive values fall back to the default instead of raising."""
+        monkeypatch.setenv("SHIORI_FETCH_CONCURRENCY", bad)
+        from shiori.config import Settings
+
+        s = Settings()
+        assert s.fetch_concurrency == 4
+
 
 class TestFetchConcurrencyCapRunFetch:
     """ThreadPoolExecutor max_workers bounded by fetch_concurrency in run_fetch."""
