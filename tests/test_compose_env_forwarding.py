@@ -21,9 +21,13 @@ off-switch in ``embedding._resolve_onnx_path()``, so default-to-empty would
 hard-disable ONNX in every run. The only delivery form that keeps the
 three-way contract (unset -> default candidates, path -> that path,
 GPU overlay ``""`` -> off) is ``env_file: .env``: a key absent from the
-deployer's ``.env`` is simply not injected. ``SHIORI_FETCH_CONCURRENCY`` has
-the same problem in reverse: ``int(os.environ.get(...))`` raises on the
-empty string, so its environment entry must carry a non-empty default.
+deployer's ``.env`` is simply not injected. ``SHIORI_FETCH_CONCURRENCY``
+used to have the same problem in reverse (a bare ``int(os.environ.get(...))``
+read raised on the empty string, forcing compose to carry a copy of the
+default in ``${SHIORI_FETCH_CONCURRENCY:-4}``). Its read is now defensive,
+so the plain ``${VAR:-}`` form is safe -- and the general-rule test below
+pins that compose may only use the empty-default form for settings whose
+code read is defensive.
 """
 
 from __future__ import annotations
@@ -104,9 +108,6 @@ EMPTY_STRING_MEANINGFUL = {
     # embedding.py treats "" as an explicit off-switch distinct from unset;
     # ${VAR:-} would hard-disable ONNX in every run (#353).
     "SHIORI_ONNX_MODEL_PATH",
-    # config.py: int(os.environ.get("SHIORI_FETCH_CONCURRENCY", "4")) raises
-    # on "" -- a ${VAR:-} entry would crash Settings construction.
-    "SHIORI_FETCH_CONCURRENCY",
 }
 
 
@@ -207,6 +208,42 @@ def _compose_env(services: dict[str, dict], service: str) -> dict[str, str]:
     return services[service]["env"]
 
 
+#: An env read converted directly with no defensive parse: the value can be
+#: "" (compose's ``${VAR:-}`` form expands an unset host variable to the
+#: empty string) and ``int("")`` / ``float("")`` raise.
+_BARE_NUMERIC_ENV_READ_RE = re.compile(
+    r"(?:int|float)\s*\(\s*os\.(?:environ\.get|getenv)\("
+)
+
+
+def _bare_numeric_env_reads() -> list[tuple[str, int, str]]:
+    """(path, line, env var) for every env read wrapped directly in
+    ``int()``/``float()`` anywhere in src/."""
+    found: list[tuple[str, int, str]] = []
+    for path in sorted(SRC_DIR.rglob("*.py")):
+        text = path.read_text(encoding="utf-8")
+        for match in _BARE_NUMERIC_ENV_READ_RE.finditer(text):
+            rest = text[match.end() : match.end() + 200]
+            name_match = re.match(r'\s*"([^"]+)"', rest)
+            name = name_match.group(1) if name_match else "?"
+            lineno = text.count("\n", 0, match.start()) + 1
+            found.append((str(path.relative_to(REPO_ROOT)), lineno, name))
+    return found
+
+
+def _compose_empty_default_forwarded() -> set[str]:
+    """Env vars docker-compose.yml forwards with the plain ``${VAR:-}`` form
+    (an unset host variable becomes the empty string in the container)."""
+    compose = _parse_compose(COMPOSE.read_text(encoding="utf-8"))
+    forwarded: set[str] = set()
+    for service_env in compose.values():
+        for value in service_env["env"].values():
+            entry = re.fullmatch(r"\$\{(?P<var>[A-Z_][A-Z0-9_]*):-\}", value)
+            if entry is not None:
+                forwarded.add(entry.group("var"))
+    return forwarded
+
+
 # ===================================================================
 # Documented <-> read <-> forwarded consistency (the defect class)
 # ===================================================================
@@ -288,53 +325,61 @@ class TestEmptyStringSemantics:
             f"got {raw!r}"
         )
 
-    def test_fetch_concurrency_compose_default_matches_the_code_default(self):
-        """``${SHIORI_FETCH_CONCURRENCY:-}`` would crash Settings
-        construction (``int("")``), so the compose entry must carry a
-        non-empty default -- which duplicates the default that config.py
-        already holds. Because compose then sets the variable on *every*
-        run, config.py's own default is dead in a deployed run and a change
-        made there alone would silently do nothing. Pin the two together so
-        the duplicate cannot drift into a lie."""
-        code = (SRC_DIR / "shiori" / "config.py").read_text(encoding="utf-8")
-        match = re.search(
-            r'os\.environ\.get\(\s*"SHIORI_FETCH_CONCURRENCY"\s*,\s*"(\d+)"', code
+    def test_no_compose_empty_default_for_bare_numeric_env_reads(self):
+        """General rule, of which the old SHIORI_FETCH_CONCURRENCY pin tests
+        were a special case: compose may only use the plain ``${VAR:-}``
+        form for settings whose code read is defensive.
+
+        The empty-default form expands an unset host variable to "", and a
+        bare ``int(os.environ.get(...))`` / ``float(os.environ.get(...))``
+        read raises on that -- crashing Settings construction on every host
+        that does not set the variable. No setting in src/ may read an
+        environment variable in a way that raises on the empty string.
+        """
+        bare = _bare_numeric_env_reads()
+        empty_default_forwarded = _compose_empty_default_forwarded()
+        offenders = [
+            (path, lineno, name)
+            for path, lineno, name in bare
+            if name in empty_default_forwarded
+        ]
+        assert offenders == [], (
+            "settings read with a bare int()/float() wrap are forwarded by "
+            "docker-compose.yml with the empty-default ${VAR:-} form (unset "
+            "host variable -> '' in the container -> the conversion "
+            "raises). Make the code read defensive instead:\n"
+            + "\n".join(f"{path}:{lineno}: {name}" for path, lineno, name in offenders)
         )
-        assert match is not None, (
-            "config.py no longer reads SHIORI_FETCH_CONCURRENCY with a "
-            "literal string default; update this test with it"
-        )
-        code_default = match.group(1)
+
+    def test_single_source_defaults_are_not_duplicated_in_compose(self):
+        """A literal default in compose makes config.py's default dead.
+
+        compose sets the variable on *every* deployed run, so a non-empty
+        ``${VAR:-<value>}`` entry means the constant in config.py never
+        applies -- changing it there silently does nothing. That is the
+        defect #386 removed for SHIORI_FETCH_CONCURRENCY; this keeps it
+        from drifting back now that the code read is defensive.
+
+        SHIORI_SYNC_INTERVAL_SECONDS is the same defect class and is
+        deliberately left alone here (its compose entry still carries a
+        literal 0) -- listing it as a known gap keeps it visible instead of
+        silently exempt.
+        """
+        single_source = {"SHIORI_FETCH_CONCURRENCY"}
+        known_gaps = {"SHIORI_SYNC_INTERVAL_SECONDS"}
+        assert not (single_source & known_gaps)
 
         compose = _parse_compose(COMPOSE.read_text(encoding="utf-8"))
         for service in ("app", "ingest"):
-            value = _compose_env(compose, service).get("SHIORI_FETCH_CONCURRENCY")
-            if value is None:
-                continue
-            entry = re.fullmatch(
-                r"\$\{SHIORI_FETCH_CONCURRENCY:-(?P<default>[^}]*)\}", value
-            )
-            assert entry is not None, (
-                f"{service}: unexpected SHIORI_FETCH_CONCURRENCY form {value!r}"
-            )
-            assert entry.group("default") == code_default, (
-                f"{service}: compose defaults SHIORI_FETCH_CONCURRENCY to "
-                f"{entry.group('default')!r} but config.py defaults to "
-                f"{code_default!r}. compose sets the variable on every run, "
-                f"so config.py's value never applies -- keep them equal."
-            )
-
-    def test_fetch_concurrency_never_defaults_to_empty(self):
-        """int(os.environ.get("SHIORI_FETCH_CONCURRENCY", "4")) raises on
-        the empty string; a ${VAR:-} entry would crash Settings
-        construction in the deployed run."""
-        compose = _parse_compose(COMPOSE.read_text(encoding="utf-8"))
-        for service in ("app", "ingest"):
-            value = _compose_env(compose, service).get("SHIORI_FETCH_CONCURRENCY")
-            if value is not None:
-                assert value != "${SHIORI_FETCH_CONCURRENCY:-}", (
-                    f"{service}: SHIORI_FETCH_CONCURRENCY must not use the "
-                    "empty-default form ${SHIORI_FETCH_CONCURRENCY:-}"
+            env = _compose_env(compose, service)
+            for name in sorted(single_source):
+                value = env.get(name)
+                if value is None:
+                    continue
+                assert value == "${" + name + ":-}", (
+                    f"{service}: {name} must be forwarded as the plain "
+                    f"${{{name}:-}} form so its default lives only in "
+                    f"config.py, got {value!r}"
                 )
 
 
