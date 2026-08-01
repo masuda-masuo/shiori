@@ -79,6 +79,67 @@ def _resolve_onnx_path() -> Path | None:
     return None
 
 
+def _pick_device() -> tuple[str, str]:
+    """Best-effort device choice for SentenceTransformer: (device, reason).
+
+    Detection must never raise out of here -- no torch installed, a broken
+    driver or an odd runtime all resolve to CPU (issue #383).  The chosen
+    device is passed to SentenceTransformer explicitly, so a CUDA
+    *acquisition* failure can be retried once on CPU; the reason strings keep
+    the log greppable: ``device=<name>: <reason>``.
+    """
+    try:
+        import torch  # pyright: ignore[reportMissingImports]
+    except ImportError:
+        return "cpu", "auto-detected (torch unavailable)"
+    try:
+        if torch.cuda.is_available():
+            return "cuda", "auto-detected"
+        return "cpu", "auto-detected (no CUDA)"
+    except Exception as e:  # noqa: BLE001 - deliberate: a broken detection must not kill the run
+        log.warning(
+            "CUDA detection failed (%s: %s); assuming CPU", type(e).__name__, e,
+        )
+        return "cpu", "detection failed; assuming CPU"
+
+
+def _is_device_acquisition_failure(exc: BaseException) -> bool:
+    """True only when the failure means *the device was not acquired*: CUDA
+    out-of-memory (a game or another job holds the VRAM) or CUDA
+    initialisation errors (no/faulty driver, kernel-image mismatch).
+
+    Everything else -- a corrupt model file, a failed download, a bad config
+    -- is a model problem that CPU does not fix, so it must keep propagating.
+    Same standard as Embedder.__init__'s ImportError-only rescue: defensive
+    code that swallows unrelated failures hides incidents instead of
+    surfacing them.
+
+    Exception types are resolved at call time: torch is an optional extra and
+    cannot be referenced at module scope.
+    """
+    try:
+        import torch  # pyright: ignore[reportMissingImports]
+    except ImportError:
+        return False
+    cuda = getattr(torch, "cuda", None)
+    oom = getattr(cuda, "OutOfMemoryError", None)
+    if isinstance(oom, type) and isinstance(exc, oom):
+        return True
+    if isinstance(exc, RuntimeError):
+        message = str(exc).lower()
+        return any(marker in message for marker in (
+            "found no nvidia driver",
+            "nvidia driver",
+            "cuda driver",
+            "cuda error",
+            "cublas",
+            "cudnn",
+            "cuda out of memory",
+            "no kernel image",
+        ))
+    return False
+
+
 class Embedder:
     def __init__(self, model_name: str | None = None):
         model_name = model_name or DEFAULT_EMBEDDING_MODEL
@@ -131,8 +192,30 @@ class Embedder:
         # Optional [embed] extra (#179) -- same inline suppression as above.
         from sentence_transformers import SentenceTransformer  # pyright: ignore[reportMissingImports]
 
-        log.info("loading embedding model: %s (pid=%d, fallback ST)", model_name, os.getpid())
-        self.model = SentenceTransformer(model_name)
+        # Resolve the device ourselves instead of letting the constructor
+        # guess (issue #383): a failed CUDA acquisition must fall back to CPU,
+        # while a model that fails to load must still propagate.
+        device, reason = _pick_device()
+        log.info(
+            "loading embedding model: %s (pid=%d, fallback ST, device=%s: %s)",
+            model_name, os.getpid(), device, reason,
+        )
+        try:
+            self.model = SentenceTransformer(model_name, device=device)
+        except Exception as e:
+            # Retry once on CPU only for a device-acquisition failure (CUDA
+            # OOM, CUDA init error).  A model that fails to load fails the
+            # same way on CPU -- that must propagate, not be masked by a
+            # second attempt -- and a failure on the CPU retry itself is by
+            # definition not a device problem, so it propagates too.
+            if not _is_device_acquisition_failure(e):
+                raise
+            log.warning(
+                "CUDA acquisition failed for %s (%s: %s); "
+                "device=cpu: fell back after a failure",
+                model_name, type(e).__name__, e,
+            )
+            self.model = SentenceTransformer(model_name, device="cpu")
         self.dim = self.model.get_sentence_embedding_dimension()
 
     def _prep(self, texts: list[str], kind: str) -> list[str]:
