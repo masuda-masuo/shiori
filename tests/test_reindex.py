@@ -3,8 +3,8 @@
 Covers:
 - schema.reindex_prepare (chunks/doc_files cleared; issue_items/sync_state/
   sync_runs/repo_index_state preserved)
-- the _is_bulk_path HNSW-absence extension (both the shiori.ingest copy and
-  the duplicated shiori.pipeline copy)
+- the _is_bulk_path HNSW-absence extension (the shared helper defined in
+  shiori.ingest, which shiori.pipeline imports rather than duplicating)
 - ingest.run_reindex orchestration
 - schema.create_heavy_indexes build knobs (SHIORI_MAINTENANCE_WORK_MEM /
   SHIORI_MAX_PARALLEL_MAINTENANCE_WORKERS)
@@ -127,11 +127,20 @@ class TestReindexPrepareScoped:
 
 
 class TestIsBulkPathHnswExtension:
-    """shiori.ingest._is_bulk_path and shiori.pipeline._is_bulk_path are two
-    independent copies (pipeline.py predates the shared-helper extraction,
-    issue #281) that must both treat an absent HNSW index as a bulk-path
-    signal, while leaving the existing True/False cases unchanged.
+    """shiori.pipeline._is_bulk_path is the very same function as
+    shiori.ingest._is_bulk_path -- imported, not copied (issue #382), so
+    the HNSW-absence behaviour is defined exactly once. The identity test
+    below pins that arrangement: a future re-fork of the function inside
+    pipeline.py fails the suite instead of silently passing two
+    near-identical copies. The behavioural cases are exercised once,
+    against the shared definition.
     """
+
+    def test_pipeline_name_is_the_ingest_function(self):
+        import shiori.ingest
+        import shiori.pipeline
+
+        assert shiori.pipeline._is_bulk_path is shiori.ingest._is_bulk_path
 
     def _mock_conn(self, *, chunks_exists=True, chunk_count=5, hnsw_exists=True):
         conn = MagicMock()
@@ -147,40 +156,35 @@ class TestIsBulkPathHnswExtension:
         conn.cursor.return_value.__enter__.return_value = cursor
         return conn
 
-    @pytest.mark.parametrize("module_name", ["shiori.ingest", "shiori.pipeline"])
-    def test_hnsw_absent_is_bulk_even_with_nonempty_chunks(self, module_name):
-        import importlib
-        mod = importlib.import_module(module_name)
+    def test_hnsw_absent_is_bulk_even_with_nonempty_chunks(self):
+        from shiori.ingest import _is_bulk_path
+
         conn = self._mock_conn(chunks_exists=True, chunk_count=42, hnsw_exists=False)
-        assert mod._is_bulk_path(conn, rebuild=False) is True
+        assert _is_bulk_path(conn, rebuild=False) is True
 
-    @pytest.mark.parametrize("module_name", ["shiori.ingest", "shiori.pipeline"])
-    def test_hnsw_present_nonempty_chunks_is_not_bulk(self, module_name):
-        import importlib
-        mod = importlib.import_module(module_name)
+    def test_hnsw_present_nonempty_chunks_is_not_bulk(self):
+        from shiori.ingest import _is_bulk_path
+
         conn = self._mock_conn(chunks_exists=True, chunk_count=42, hnsw_exists=True)
-        assert mod._is_bulk_path(conn, rebuild=False) is False
+        assert _is_bulk_path(conn, rebuild=False) is False
 
-    @pytest.mark.parametrize("module_name", ["shiori.ingest", "shiori.pipeline"])
-    def test_missing_chunks_table_is_bulk_regardless_of_hnsw(self, module_name):
-        import importlib
-        mod = importlib.import_module(module_name)
+    def test_missing_chunks_table_is_bulk_regardless_of_hnsw(self):
+        from shiori.ingest import _is_bulk_path
+
         conn = self._mock_conn(chunks_exists=False)
-        assert mod._is_bulk_path(conn, rebuild=False) is True
+        assert _is_bulk_path(conn, rebuild=False) is True
 
-    @pytest.mark.parametrize("module_name", ["shiori.ingest", "shiori.pipeline"])
-    def test_empty_chunks_table_is_bulk_without_checking_hnsw(self, module_name):
-        import importlib
-        mod = importlib.import_module(module_name)
+    def test_empty_chunks_table_is_bulk_without_checking_hnsw(self):
+        from shiori.ingest import _is_bulk_path
+
         conn = self._mock_conn(chunks_exists=True, chunk_count=0)
-        assert mod._is_bulk_path(conn, rebuild=False) is True
+        assert _is_bulk_path(conn, rebuild=False) is True
 
-    @pytest.mark.parametrize("module_name", ["shiori.ingest", "shiori.pipeline"])
-    def test_rebuild_true_short_circuits_without_querying(self, module_name):
-        import importlib
-        mod = importlib.import_module(module_name)
+    def test_rebuild_true_short_circuits_without_querying(self):
+        from shiori.ingest import _is_bulk_path
+
         conn = MagicMock()
-        assert mod._is_bulk_path(conn, rebuild=True) is True
+        assert _is_bulk_path(conn, rebuild=True) is True
         conn.cursor.assert_not_called()
 
 
@@ -679,8 +683,8 @@ class TestRunIngestBulkHeavyIndexGates:
 
 # ===================================================================
 # Bulk-path heavy index drop/create gating at the pipeline sync mirror
-# (issues #364/#365 -- shiori.pipeline._do_sync duplicates ingest.py's
-# gating rather than importing it, see the comment near pipeline.py:55)
+# (issues #364/#365 -- shiori.pipeline._do_sync uses the shared
+# ingest._bulk_covers_all_repos / _bulk_run_completed_all_repos helpers)
 # ===================================================================
 
 
@@ -731,6 +735,48 @@ class TestDoSyncBulkHeavyIndexGates:
 
             _do_sync(repos=repos_arg)
         return mock_create, mock_drop
+
+    def test_mcp_path_does_not_pass_the_volume_check_arguments(self):
+        """The one difference that survives the de-duplication (issue #382).
+
+        ``_is_bulk_path`` enters the bulk path on pending volume only when
+        it is given targets and settings. The MCP path deliberately does
+        not pass them: the SHIORI_BULK_PENDING_THRESHOLD trigger was
+        measured on the CLI only. That decision lives in a single call
+        site now, so pin it -- if the MCP path should get the volume
+        check, deleting this test is the explicit way to say so.
+        """
+        from shiori.pipeline import _do_sync
+
+        mock_conn = self._mock_conn_cm()
+        with (
+            patch("shiori.pipeline.settings") as mock_settings,
+            patch("shiori.pipeline._sync_lock") as mock_lock,
+            patch("shiori.pipeline.build_token_provider", return_value=MagicMock()),
+            patch("shiori.pipeline._get_embedder", return_value=MagicMock()),
+            patch("shiori.pipeline._conn", return_value=mock_conn),
+            patch("shiori.pipeline._is_bulk_path", return_value=False) as mock_is_bulk,
+            patch("shiori.pipeline.schema.migrate"),
+            patch("shiori.pipeline._acquire_repo_lock", return_value=True),
+            patch("shiori.pipeline._release_repo_lock"),
+            patch("shiori.pipeline.sync_docs", return_value=1),
+            patch("shiori.pipeline.sync_issues", return_value=2),
+            patch("shiori.pipeline.sync_code", return_value=3),
+            patch(
+                "shiori.pipeline.db.record_sync_run",
+                return_value=MagicMock(isoformat=lambda: "2026-01-01T00:00:00+00:00"),
+            ),
+            patch("shiori.pipeline.db.record_sync_attempt"),
+        ):
+            mock_settings.repos = ["owner/repo1"]
+            mock_settings.fetch_concurrency = 4
+            mock_lock.acquire.return_value = True
+
+            _do_sync(repos=None)
+
+        args, kwargs = mock_is_bulk.call_args
+        assert len(args) == 2, f"unexpected positional arguments: {args!r}"
+        assert kwargs == {}, f"unexpected keyword arguments: {kwargs!r}"
 
     def test_scoped_bulk_sync_never_drops_or_creates(self):
         mock_create, mock_drop = self._run(

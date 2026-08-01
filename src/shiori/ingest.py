@@ -95,10 +95,11 @@ def _is_bulk_path(
     per-repo loop runs, and nothing is truncated or reset: the bulk path
     only batches; discarding is exclusive to ``rebuild=True``.
 
-    ``targets``/``settings`` are optional for backward compatibility with
-    callers that predate the volume check (e.g. tests, and the duplicated
-    ``shiori.pipeline._is_bulk_path``): when either is missing the volume
-    check is skipped and the pre-#376 behaviour is exactly preserved.
+    ``targets``/``settings`` are optional: when either is missing the volume
+    check is skipped and the pre-#376 behaviour is exactly preserved. The
+    MCP ingest path (``shiori.pipeline``) calls without them deliberately
+    -- the volume trigger was measured on the CLI only, and whether the MCP
+    path should get it is an open question (issue #382).
     """
     if rebuild:
         return True

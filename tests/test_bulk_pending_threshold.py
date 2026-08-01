@@ -131,9 +131,9 @@ class TestVolumeThreshold:
         assert issue_queries[0].args[1] == (["o/a", "o/b"],)
 
     def test_backward_compat_two_arg_call_skips_volume_check(self):
-        """Callers that predate the volume check (e.g. shiori.pipeline's
-        duplicated copy, tests) keep the exact pre-#376 behaviour: no
-        volume query is issued."""
+        """Calls without targets/settings -- e.g. shiori.pipeline, which
+        deliberately omits them (issue #382), and tests -- keep the exact
+        pre-#376 behaviour: no volume query is issued."""
         conn, cursor = _bulk_path_conn(pending=99_999)
         assert ingest._is_bulk_path(conn, rebuild=False) is False
         sqls = [_sql_of(c) for c in cursor.execute.call_args_list]

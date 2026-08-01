@@ -25,6 +25,9 @@ from .github_sync import ChunkBuffer, sync_code, sync_docs, sync_issues
 from .ingest import (
     _acquire_repo_lock,
     _BULK_BUFFER_SIZE,
+    _bulk_covers_all_repos,
+    _bulk_run_completed_all_repos,
+    _is_bulk_path,
     _release_repo_lock,
     repo_lock,
 )
@@ -47,38 +50,6 @@ def _get_embedder() -> Embedder:
 
 def _conn():
     return db.connect(settings)
-
-
-def _is_bulk_path(conn, rebuild: bool) -> bool:
-    """Determine bulk path: rebuild=True, chunks table empty/missing, or the
-    HNSW index absent (issue #72; HNSW-absence check added by issue #352).
-
-    Duplicated from ``shiori.ingest._is_bulk_path`` rather than imported --
-    this module predates the shared-helper extraction, see issue #281.
-
-    **The two copies have diverged (issue #376).** The CLI copy also enters
-    the bulk path when the pending work for the targeted repos exceeds
-    ``SHIORI_BULK_PENDING_THRESHOLD``; this one does not, so an MCP
-    ``ingest()`` call still takes the item-at-a-time path on a large
-    backlog. Deliberate: the volume trigger was measured on the CLI only.
-    Do not describe these as in sync until that is fixed.
-
-    Heavy-index absence is the persistent, DB-derived marker of
-    a drain in progress (e.g. a CLI ``reindex``): while it lasts, an MCP
-    ``ingest()`` call must stay on the deferred-index bulk path too, or it
-    would resurrect the heavy indexes mid-drain via a plain ``schema.migrate``.
-    """
-    if rebuild:
-        return True
-    with conn.cursor() as cur:
-        cur.execute("SELECT to_regclass('chunks')")
-        if cur.fetchone()[0] is None:
-            return True
-        cur.execute("SELECT count(*) FROM chunks")
-        if cur.fetchone()[0] == 0:
-            return True
-        cur.execute("SELECT to_regclass('chunks_embedding_hnsw')")
-        return cur.fetchone()[0] is None
 
 
 def _record_pre_loop_sync_failure(targets: list[str], error: str) -> None:
@@ -193,6 +164,14 @@ def _do_sync(
         conn = _conn()
         try:
             try:
+                # Deliberately no targets/settings: the volume trigger
+                # (SHIORI_BULK_PENDING_THRESHOLD, issue #376) was measured
+                # on the CLI path only, so an MCP ingest() stays on the
+                # item-at-a-time path no matter how large the backlog.
+                # Whether the MCP path should get the volume check is an
+                # open question waiting on a separate measurement (issue
+                # #382); this call site is the one visible difference from
+                # ingest's callers, not a forked copy that can drift again.
                 is_bulk = _is_bulk_path(conn, rebuild)
 
                 if is_bulk:
@@ -217,15 +196,11 @@ def _do_sync(
                         conn.commit()
                     # Issue #364: only rebuild or a sync that intends to
                     # cover every configured repo may drop the heavy
-                    # indexes (mirrors ingest._bulk_covers_all_repos --
-                    # this module deliberately duplicates rather than
-                    # imports, see the comment near _is_bulk_path above).
+                    # indexes (shared helper ingest._bulk_covers_all_repos).
                     # A scoped sync neither drops nor creates them: during
                     # a genuine drain they're already absent, and if they
                     # exist the drop is exactly the #364 accident.
-                    if rebuild or (
-                        bool(settings.repos) and set(targets) >= set(settings.repos)
-                    ):
+                    if rebuild or _bulk_covers_all_repos(targets, settings):
                         schema.drop_heavy_indexes(conn)
                     else:
                         log.info(
@@ -343,16 +318,17 @@ def _do_sync(
 
 
                 if is_bulk:
-                    # Mirrors ingest._bulk_run_completed_all_repos (issue
-                    # #365): gate on repos that actually completed, not the
-                    # intended target list -- a per-repo advisory-lock skip
-                    # can leave the coverage check passing on intention
-                    # while a repo was never re-indexed. A scoped bulk sync
-                    # during a reindex drain must also not rebuild the
-                    # heavy indexes early (issue #352).
-                    if bool(settings.repos) and set(completed) >= set(settings.repos):
+                    # Gate on repos that actually completed, not the
+                    # intended target list (shared helper
+                    # ingest._bulk_run_completed_all_repos, issue #365): a
+                    # per-repo advisory-lock skip can leave the coverage
+                    # check passing on intention while a repo was never
+                    # re-indexed. A scoped bulk sync during a reindex drain
+                    # must also not rebuild the heavy indexes early
+                    # (issue #352).
+                    if _bulk_run_completed_all_repos(completed, settings):
                         schema.create_heavy_indexes(conn, settings)
-                    elif bool(settings.repos) and set(targets) >= set(settings.repos):
+                    elif _bulk_covers_all_repos(targets, settings):
                         skipped = sorted(set(targets) - set(completed))
                         log.info(
                             "heavy indexes deferred: %d repo(s) skipped via "
