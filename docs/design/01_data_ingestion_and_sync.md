@@ -427,6 +427,53 @@ back up automatically; chunk inserts are `ON CONFLICT (chunk_key,
 chunk_index) DO UPDATE` (`src/shiori/db.py`), so replaying already-indexed
 items is a safe no-op.
 
+### Bounding one run, and seeing what is left (issue #377)
+
+The machine this runs on suspends, so wall-clock is not controllable: one
+catch-up measured 22 hours of wall-clock for ~4 hours of actual work. The
+answer is not a faster run but a *bounded* one.
+
+`SHIORI_INGEST_TIME_BUDGET` (seconds, unset/empty/non-positive = unbounded,
+the default) caps the **working time** of one index run. It is enforced with
+`time.monotonic()`, which on Linux does not advance while the machine is
+suspended -- so a run frozen overnight is not charged for the freeze.
+
+The budget is checked at two safe boundaries: between repos, and inside a
+repo at each 200-item issue batch (`BATCH_INDEX_SIZE`). The batch boundary
+is already the durability boundary -- chunks are committed before
+`indexed_at` -- so stopping there needs no new resume mechanism; the next
+run picks up via `indexed_at` exactly as a killed run does. **An exhausted
+budget is a normal outcome: the run stops, logs, and exits 0.** Bounding by
+repository count would not work: 95% of the pending backlog sits in two
+repositories, so any run that drew one of them would be unbounded again.
+
+Completion is decided from the data, not from a flag. After a repo's pass
+the remaining pending items are counted with `db.PENDING_ISSUE_ITEMS_WHERE`
+-- the same predicate `index_issues` selects rows with, so the completion
+decision and the remaining-work counter cannot disagree:
+
+- **zero pending** -> `record_sync_run()` writes `finished_at`, and the repo
+  joins `completed`;
+- **non-zero** -> `record_sync_progress()` writes `pending_count` only. No
+  `finished_at` (it stays the one trustworthy completion signal), no
+  attempt/failure fields (a truncation is not a failure and must not feed
+  the #345 circuit breaker), and the repo is kept **out of `completed`** so
+  the heavy-index gate above cannot rebuild HNSW/pgroonga over partial data.
+
+Two `sync_runs` columns make the state observable without ad hoc SQL, which
+matters because log retention (~9h) is shorter than the daily lane period:
+`pending_count` (how much is left) and `last_progress_at` (a heartbeat
+advanced at every committed batch). The heartbeat exists because
+`docker stats` is not a liveness instrument -- it reported 0.25% CPU for a
+run that was in fact working, blocked on Postgres. Both surface through
+`shiori_status`.
+
+Only the index phase is bounded. `run_ingest` fetches first and starts the
+budget at the index phase, so a single `ingest run` is not bounded
+end-to-end; fetch has its own page-level resumable cursor. The MCP path
+(`pipeline.py`) records the heartbeat but is not budgeted -- it is
+debounced and incremental, not a drain lane.
+
 ### Avoiding heavy-index resurrection mid-drain
 
 Two other code paths used to call the full `schema.migrate()` (which

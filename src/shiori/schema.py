@@ -131,7 +131,15 @@ CREATE TABLE IF NOT EXISTS sync_runs (
     -- successful attempt). A skip is deliberately NOT an attempt: it must
     -- not touch last_error / consecutive_failures (circuit breaker, #345).
     last_skipped_at TIMESTAMPTZ,
-    skip_count INTEGER NOT NULL DEFAULT 0
+    skip_count INTEGER NOT NULL DEFAULT 0,
+    -- Index-run budget visibility (issue #377): pending_count is the work
+    -- still remaining for this repo at its last processing event -- non-zero
+    -- means the pass was cut short by the time budget, and finished_at is
+    -- deliberately absent. last_progress_at is the liveness heartbeat,
+    -- advanced at every committed batch, so a DB reader can tell a grinding
+    -- run from a wedged one.
+    pending_count INTEGER,
+    last_progress_at TIMESTAMPTZ
 );
 
 CREATE TABLE IF NOT EXISTS repo_index_state (
@@ -403,6 +411,34 @@ def _run_alter_statements(conn: psycopg.Connection) -> None:
         conn.commit()
         ran_any = True
         log.info("migrate: executed sync_runs skip-tracking columns")
+
+    # 6c. Index-run budget visibility (issue #377): pending_count (remaining
+    # pending issue items at the repo's last processing event -- non-zero
+    # means the pass was cut short by the time budget and there is no
+    # finished_at) + last_progress_at (liveness heartbeat committed at every
+    # batch boundary, so a DB reader can tell a grinding run from a wedged
+    # one). Both are additive and nullable; the probe reuses
+    # sync_runs_columns from step 5/6 (same IF NOT EXISTS fallback as 6b).
+    missing_budget_cols = [
+        col
+        for col in ("pending_count", "last_progress_at")
+        if col not in sync_runs_columns
+    ]
+    if missing_budget_cols:
+        with conn.cursor() as cur:
+            if "pending_count" in missing_budget_cols:
+                cur.execute(
+                    "ALTER TABLE sync_runs ADD COLUMN IF NOT EXISTS "
+                    "pending_count INTEGER"
+                )
+            if "last_progress_at" in missing_budget_cols:
+                cur.execute(
+                    "ALTER TABLE sync_runs ADD COLUMN IF NOT EXISTS "
+                    "last_progress_at TIMESTAMPTZ"
+                )
+        conn.commit()
+        ran_any = True
+        log.info("migrate: executed sync_runs budget-visibility columns")
 
     # 7. Add repo_index_state table for pull-type sync tracking (#236) --
     # already probes to_regclass (ACCESS SHARE); left as-is.

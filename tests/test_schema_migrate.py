@@ -138,6 +138,8 @@ def _up_to_date_columns() -> dict[str, dict[str, bool]]:
             "last_skipped_at": False,
             "skip_count": False,
             "finished_at": False,
+            "pending_count": False,
+            "last_progress_at": False,
         },
         "issue_items": {"indexed_at": False, "labels": False},
     }

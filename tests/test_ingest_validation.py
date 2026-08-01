@@ -251,6 +251,13 @@ class TestRunIngestSyncAttemptRecording:
                 return_value=MagicMock(isoformat=lambda: "2026-01-01T00:00:00+00:00"),
             ),
             patch("shiori.ingest.db.record_sync_attempt") as mock_record_attempt,
+            # Issue #377: completion is decided from a post-pass pending
+            # count; a zero count means "fully indexed" (success path).
+            patch("shiori.ingest.db.count_pending_issue_items", return_value=0),
+            patch(
+                "shiori.ingest.db.count_pending_issue_items_for_repos",
+                return_value=0,
+            ),
         ):
             run_ingest(settings=mock_settings)
 
@@ -800,6 +807,13 @@ class TestRunIngestPerRepoContinueOnFailure:
                 return_value=MagicMock(isoformat=lambda: "2026-01-01T00:00:00+00:00"),
             ),
             patch("shiori.ingest.db.record_sync_attempt") as mock_record_attempt,
+            # Issue #377: completion is decided from a post-pass pending
+            # count; a zero count means "fully indexed" (success path).
+            patch("shiori.ingest.db.count_pending_issue_items", return_value=0),
+            patch(
+                "shiori.ingest.db.count_pending_issue_items_for_repos",
+                return_value=0,
+            ),
         ):
             with pytest.raises(RuntimeError, match="owner/repo1"):
                 run_ingest(settings=mock_settings)
@@ -838,6 +852,13 @@ class TestRunIngestPerRepoContinueOnFailure:
                 return_value=MagicMock(isoformat=lambda: "2026-01-01T00:00:00+00:00"),
             ),
             patch("shiori.ingest.db.record_sync_attempt") as mock_record_attempt,
+            # Issue #377: completion is decided from a post-pass pending
+            # count; a zero count means "fully indexed" (success path).
+            patch("shiori.ingest.db.count_pending_issue_items", return_value=0),
+            patch(
+                "shiori.ingest.db.count_pending_issue_items_for_repos",
+                return_value=0,
+            ),
         ):
             run_ingest(settings=mock_settings)  # must not raise
 
@@ -1131,9 +1152,18 @@ class TestRunIndex:
             patch("shiori.ingest.index_docs", return_value=1) as mock_index_docs,
             patch("shiori.ingest.index_issues", return_value=2) as mock_index_issues,
             patch("shiori.ingest.index_code", return_value=3) as mock_index_code,
-            patch("shiori.ingest.db.record_sync_run",
-                   return_value=MagicMock(isoformat=lambda: "2026-01-01T00:00:00+00:00")),
+            patch(
+                "shiori.ingest.db.record_sync_run",
+                return_value=MagicMock(isoformat=lambda: "2026-01-01T00:00:00+00:00"),
+            ),
             patch("shiori.ingest.db.record_sync_attempt"),
+            # Issue #377: completion is decided from a post-pass pending
+            # count; a zero count means "fully indexed" (success path).
+            patch("shiori.ingest.db.count_pending_issue_items", return_value=0),
+            patch(
+                "shiori.ingest.db.count_pending_issue_items_for_repos",
+                return_value=0,
+            ),
         ):
             run_index(settings=self._mock_settings())
 
@@ -1164,9 +1194,18 @@ class TestRunIndex:
             patch("shiori.ingest.index_docs", return_value=1),
             patch("shiori.ingest.index_issues", return_value=2),
             patch("shiori.ingest.index_code", return_value=3),
-            patch("shiori.ingest.db.record_sync_run",
-                   return_value=MagicMock(isoformat=lambda: "2026-01-01T00:00:00+00:00")),
+            patch(
+                "shiori.ingest.db.record_sync_run",
+                return_value=MagicMock(isoformat=lambda: "2026-01-01T00:00:00+00:00"),
+            ),
             patch("shiori.ingest.db.record_sync_attempt"),
+            # Issue #377: completion is decided from a post-pass pending
+            # count; a zero count means "fully indexed" (success path).
+            patch("shiori.ingest.db.count_pending_issue_items", return_value=0),
+            patch(
+                "shiori.ingest.db.count_pending_issue_items_for_repos",
+                return_value=0,
+            ),
         ):
             settings = self._mock_settings()
             run_index(settings=settings, rebuild=True)
