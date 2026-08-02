@@ -121,15 +121,25 @@ def _run_fetch(
     """
     from shiori.ingest import run_fetch
 
+    # _api_pages_gen is called concurrently from every repo thread, so the
+    # mock must route by URL, not consume a global FIFO list: a side_effect
+    # list is popped in whatever order threads get scheduled, and a thread
+    # preempted between its calls receives another repo's entries.  That
+    # misrouting delivered issue pages to the comments handlers
+    # (KeyError: 'issue_url' / 'pull_request_url') and, because fetch
+    # failures are isolated per repo, silently reduced the inner nesting
+    # until the "cap never bound" assertion tripped -- the #406 flake.
+    def _api_pages_for(client, url, params, *args, **kwargs):
+        if url.endswith("/issues"):
+            return [_body_page(prs_per_repo)]
+        return []  # comments / pulls-comments endpoints: nothing to serve
+
     with (
         patch("shiori.ingest.db.connect", side_effect=counter.open),
         patch("shiori.ingest.build_token_provider", return_value=MagicMock()),
         patch("shiori.ingest.schema.migrate_light"),
         patch("shiori.ingest.fetch_docs", return_value=None),
-        patch(
-            "shiori.sync_issues._api_pages_gen",
-            side_effect=[[_body_page(prs_per_repo)], [], []] * len(settings.repos),
-        ),
+        patch("shiori.sync_issues._api_pages_gen", side_effect=_api_pages_for),
         patch("shiori.sync_issues.get_cursor", return_value="2023-01-01T00:00:00Z"),
         patch("shiori.sync_issues.set_cursor"),
         patch("shiori.sync_issues._upsert_issue_item"),
