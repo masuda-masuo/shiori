@@ -37,6 +37,25 @@ _PRIMARY_DATE = "9999"
 _MISSING_SP = -999
 _MISSING_DATE = ""
 
+# Decision-comment ranking boost (issue #404).
+# Comments whose FIRST LINE is a markdown heading containing
+# 設計判断/設計確定/設計決定 record a design decision (the operator's
+# "## 設計判断" / "## 設計確定" convention). Signal chosen by measurement on
+# citation-labeled data: lexical/heading AUC 0.873 vs embedding 0.636 (#404).
+# Heading-anchored regex only -- no marker-counting lexicon (counting
+# markers pulls in measurement-report comments as false positives).
+# Sort-key only: key_score = score * DECISION_BOOST. The 5% cap keeps #70's
+# cap principle: a chunk more than one relevance notch behind cannot be
+# lifted past. Returned scores are unchanged.
+DECISION_BOOST = 1.05
+_DECISION_HEADING_RE = r"^#{1,6}[^\n]*設計(判断|確定|決定)"
+
+# _RESULT_COLS column positions (row tuple indices) -- additions to the
+# header block above (issue #404)
+_COL_REPO = 2
+_COL_ISSUE_NO = 4
+_COL_COMMENT_ID = 5
+
 
 @dataclass
 class SearchHit:
@@ -157,10 +176,15 @@ def _rank_candidates(
     rows_by_id: dict[int, tuple],
     sort_by: str = "score",
     sort_order: str = "desc",
+    decision_ids: set[int] | None = None,
 ) -> tuple[list[tuple[int, float]], str]:
     """Apply source-aware compound ranking to candidate pool (issue #69).
     Embedding: cosine distance (1-cosine). Keyword: pgroonga_score/pg_trgm.
-    RRF: 0.5 embedding + 0.5 keyword."""
+    RRF: 0.5 embedding + 0.5 keyword.
+    decision_ids: chunk ids of decision-record comments (issue #404).
+    Sort-key-only 5% boost (score * DECISION_BOOST) for those chunks, applied
+    only in the default sort_by="score"/sort_order="desc" mode; returned
+    scores are unchanged."""
     reverse = sort_order != "asc"
 
     def _key(item: tuple[int, float]) -> tuple[float, int, str]:
@@ -178,6 +202,19 @@ def _rank_candidates(
         if source_type in ("doc", "code"):
             return (score, _PRIMARY_SP, _PRIMARY_DATE)
 
+        # Decision-record comments (issue #404): sort-key-only boost, capped
+        # at 5% so a chunk more than one relevance notch behind cannot be
+        # lifted past (#70 cap principle). Only source_type='issue' chunks
+        # qualify; doc/code/pr_review rows are untouched.
+        if (
+            decision_ids is not None
+            and rid in decision_ids
+            and source_type == "issue"
+            and sort_by == "score"
+            and sort_order == "desc"
+        ):
+            score = score * DECISION_BOOST
+
         # Secondary source (issue / pr_review): compound tie-break
         st = row[_COL_STATE]
         if st == "open":
@@ -193,6 +230,51 @@ def _rank_candidates(
 
     result = sorted(ranked, key=_key, reverse=reverse)
     return result, "rrf"
+
+
+def _decision_comment_chunk_ids(
+    conn: psycopg.Connection, rows_by_id: dict[int, tuple]
+) -> set[int]:
+    """Chunk ids of pool candidates that are decision-record comments (issue #404).
+
+    ONE query: asks issue_items which of the candidates' (repo, issue_no,
+    comment_id) triples have a body whose first line is a markdown heading
+    containing 設計判断/設計確定/設計決定 (string-start anchored, first line
+    only). Only source_type='issue' chunks are collected, so doc/code/pr_review
+    rows can never qualify.
+    """
+    candidates = [
+        (row[_COL_REPO], row[_COL_ISSUE_NO], row[_COL_COMMENT_ID])
+        for row in rows_by_id.values()
+        if row[_COL_SOURCE_TYPE] == "issue"
+    ]
+    if not candidates:
+        return set()
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT DISTINCT r.repo, r.issue_no, r.comment_id
+            FROM unnest(%s::text[], %s::bigint[], %s::bigint[]) AS r(repo, issue_no, comment_id)
+            JOIN issue_items ii
+              ON ii.repo = r.repo
+             AND ii.issue_no = r.issue_no
+             AND ii.comment_id = r.comment_id
+            WHERE ii.body ~ %s
+            """,
+            [
+                [c[0] for c in candidates],
+                [c[1] for c in candidates],
+                [c[2] for c in candidates],
+                _DECISION_HEADING_RE,
+            ],
+        )
+        qualifying = set(cur.fetchall())
+    return {
+        rid
+        for rid, row in rows_by_id.items()
+        if row[_COL_SOURCE_TYPE] == "issue"
+        and (row[_COL_REPO], row[_COL_ISSUE_NO], row[_COL_COMMENT_ID]) in qualifying
+    }
 
 
 def keyword_search(
@@ -222,7 +304,17 @@ def keyword_search(
         rows_by_id[rid] = r[:-1]
         scored.append((rid, float(r[-1])))
 
-    ranked, method = _rank_candidates(scored, rows_by_id, sort_by, sort_order)
+    # Decision-record comments get a sort-key-only boost (issue #404).
+    # The one qualifying query is skipped in sort modes where the boost
+    # never applies (non-score sort_by / ascending order).
+    decision_ids = (
+        _decision_comment_chunk_ids(conn, rows_by_id)
+        if sort_by == "score" and sort_order == "desc"
+        else None
+    )
+    ranked, method = _rank_candidates(
+        scored, rows_by_id, sort_by, sort_order, decision_ids=decision_ids
+    )
 
     hits = []
     for rid, score in ranked[:k]:
@@ -270,7 +362,16 @@ def semantic_search(
     ranked = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
 
     # Apply source-aware compound tie-break at pool stage (issue #69)
-    ranked, method = _rank_candidates(ranked, rows_by_id, sort_by, sort_order)
+    # Decision-record comments get a sort-key-only boost (issue #404);
+    # the one qualifying query is skipped where the boost never applies.
+    decision_ids = (
+        _decision_comment_chunk_ids(conn, rows_by_id)
+        if sort_by == "score" and sort_order == "desc"
+        else None
+    )
+    ranked, method = _rank_candidates(
+        ranked, rows_by_id, sort_by, sort_order, decision_ids=decision_ids
+    )
 
     # Truncate to top-k after tie-break
     hits = []

@@ -43,3 +43,24 @@ Chronological triage (listing recently modified issues) is delegated to the GitH
 *   The primary search API `shiori_search` defaults to relevance ranking. Secondary metadata (`state`, `updated_at`) serves as a tie-breaker.
 *   Tie-breaking is evaluated on the database side *before* top-k truncation to prevent pagination errors.
 *   `shiori_keyword_search` is kept separate to handle exact identifier lookups.
+
+### Decision-Comment Boost (Issue #404)
+
+Threads are bot-heavy, and design decisions recorded as comments (the operator's
+`## 設計判断` / `## 設計確定` / `## 設計決定` convention) get buried by plain
+relevance ranking. Comments whose **first line** of `issue_items.body` is a
+markdown heading containing `設計判断` / `設計確定` / `設計決定` (regex
+`^#{1,6}[^\n]*設計(判断|確定|決定)`, string-start anchored, first line only)
+receive a **sort-key-only** bump at the pool-stage ranking (#69 compound
+tie-break): `key_score = score * DECISION_BOOST` with `DECISION_BOOST = 1.05`.
+
+*   The signal was chosen by measurement on citation-labeled data: lexical /
+    heading AUC 0.873 vs. embedding 0.636 (#404). No fuzzy marker lexicon —
+    fuzzy marker counting pulls in measurement-report comments as false
+    positives, so the marker must be a heading-anchored first-line match.
+*   The 1.05 cap is the issue #70 cap principle: a chunk more than one
+    relevance notch behind cannot be lifted past.
+*   Only `source_type='issue'` chunks qualify; doc / code / pr_review rows are
+    untouched (the existing primary-source neutralization stays as is).
+*   Returned scores are unchanged; only the ordering key is affected, and only
+    in the default `sort_by="score"` / `sort_order="desc"` retrieval mode.
