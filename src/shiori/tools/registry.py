@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from importlib.metadata import version as _pkg_version
+
 from mcp.server.mcpserver import MCPServer
 
 # host/port moved off the constructor in mcp 2.x: they are now run() kwargs
@@ -7,6 +9,10 @@ from mcp.server.mcpserver import MCPServer
 # title/description positional params before it.
 mcp = MCPServer(
     "shiori",
+    # serverInfo.version: mcp 2.x reports an empty string when unset (the
+    # SDK's own version is no longer substituted), so wire the package
+    # version through explicitly.
+    version=_pkg_version("shiori"),
     instructions=(
         "Project-knowledge search MCP: one unified, cross-lingual (ja/en) index over GitHub "
         "repository knowledge — Markdown docs, source code, and issue/PR discussions — searchable "
