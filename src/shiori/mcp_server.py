@@ -63,7 +63,7 @@ def ingest(rebuild: bool = False, repo: str | None = None) -> dict[str, Any]:
 register_dashboard(mcp)
 
 
-def run(transport: Literal["stdio", "sse", "streamable-http"] = "streamable-http") -> None:
+def run(transport: Literal["stdio", "streamable-http"] = "streamable-http") -> None:
     with _conn() as conn:
         # migrate_light only (issue #352): a full migrate() here would build
         # HNSW/pgroonga on every server restart, which is an hours-long
@@ -77,4 +77,10 @@ def run(transport: Literal["stdio", "sse", "streamable-http"] = "streamable-http
         "host-level systemd timers (issue #347), not this process",
         transport,
     )
-    mcp.run(transport=transport)
+    # host/port are run() kwargs in mcp 2.x (moved off the constructor).
+    if transport == "streamable-http":
+        mcp.run(transport="streamable-http", host=settings.mcp_host, port=settings.mcp_port)
+    else:
+        # stdio has no binding kwargs in v2 -- passing host/port raises
+        # TypeError on unrecognized transport kwargs.
+        mcp.run(transport="stdio")

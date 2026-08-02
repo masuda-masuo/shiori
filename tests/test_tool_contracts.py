@@ -1,7 +1,7 @@
 """Guard test for Issue #340: every registered MCP tool documents its data source.
 
-Enumerates tools dynamically from the live FastMCP registry (not a hardcoded
-list) so a future tool added without a "Data sources:" line fails this test.
+Enumerates tools dynamically from the live server registry (not a hardcoded
+list) so a future tool added without a "Data sources:" line breaks this test.
 """
 
 from __future__ import annotations
@@ -12,11 +12,11 @@ import shiori.mcp_server as mcp_server
 
 
 def _registered_tools():
-    """Return the live list of registered tools via FastMCP's public API.
+    """Return the live list of registered tools via the server's public API.
 
-    Uses the public async ``FastMCP.list_tools()`` rather than the private
-    ``_tool_manager`` so a FastMCP upgrade can't silently change what this
-    guard enumerates. Importing shiori.mcp_server already triggers
+    Uses the public async ``mcp.list_tools()`` (unchanged in mcp 2.x) rather
+    than the private tool manager so an SDK upgrade can't silently change what
+    this guard enumerates. Importing shiori.mcp_server already triggers
     registration of every @mcp.tool as a side effect -- see the
     `from .tools import (...)` block there.
     """
@@ -32,10 +32,11 @@ def test_registry_is_not_empty() -> None:
 def test_every_tool_documents_its_data_source() -> None:
     """Every registered tool's visible description has a 'Data sources:' line.
 
-    FastMCP builds `description` from the tool function's docstring, and issue
-    #550 established that everything from an 'Args:' section onward is dropped
-    from that visible description -- so this also guards against the line
-    being added only under 'Args:' where it would silently stop being visible.
+    The server builds `description` from the tool function's docstring. mcp 2.x
+    uses the docstring verbatim; under v1, everything from an 'Args:' section
+    onward was dropped from the visible description (issue #550). Keeping the
+    line at top level -- never under an 'Args:' section -- keeps it visible on
+    both lines.
     """
     tools = _registered_tools()
     missing = [t.name for t in tools if "Data sources:" not in (t.description or "")]
