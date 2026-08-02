@@ -27,13 +27,10 @@ def pr_changes(
     repo: str | None = None,
     include_diff: bool = False,
 ) -> dict[str, Any]:
-    """PR change file map computed from git clone (issue #259).
+    """PR change file map computed from git clone.
     Data sources: live git fetch of PR head + base against the clone; no cache, no index.
     Uses git diff --name-status + --numstat to build the file list.
-    blob_url is omitted because it cannot be computed from git alone.
-    repo: "owner/name", or a short name if it uniquely matches one
-          configured (indexed) repo (e.g. "shiori" -> "owner/shiori").
-          Omit for the default configured repo."""
+    blob_url is omitted because it cannot be computed from git alone."""
     target = _resolve_repo(repo)
     git_dir = os.path.realpath(settings.repo_dir(target))
     if not os.path.isdir(os.path.join(git_dir, ".git")):
@@ -189,7 +186,7 @@ def pr_diff(
     path: str | None = None,
     repo: str | None = None,
 ) -> dict[str, Any]:
-    """Return PR diff (issue #96).
+    """Return PR diff.
 
     Data sources: live git fetch of PR head + base against the clone; no cache, no index.
 
@@ -198,9 +195,6 @@ def pr_diff(
 
     number: PR number
     path: File path to scope the diff (omit for all files)
-    repo: "owner/name", or a short name if it uniquely matches one
-          configured (indexed) repo (e.g. "shiori" -> "owner/shiori").
-          Omit for the default configured repo.
     """
     target = _resolve_repo(repo)
     diff_text, stat_text = _compute_pr_diff(number, target, base_sha=None, path=path)
@@ -214,17 +208,13 @@ def pr_diff(
 
 @mcp.tool(name="shiori_pr_review_comments")
 def pr_review_comments(number: int, repo: str | None = None) -> dict[str, Any]:
-    """Return PR review comments (issue #96).
+    """Return PR review comments.
 
     Data sources: GitHub API (live, PR review comments endpoint); no clone, no index.
 
     Fetches from GitHub Pull Request Review Comments API directly.
     Includes file path, line number, body, author, and timestamps.
     Useful for reviewing comment history and understanding other reviewers' feedback.
-
-    repo: "owner/name", or a short name if it uniquely matches one
-          configured (indexed) repo (e.g. "shiori" -> "owner/shiori").
-          Omit for the default configured repo.
     """
     target = _resolve_repo(repo)
     with _github_client() as client:

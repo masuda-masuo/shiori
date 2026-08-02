@@ -30,11 +30,7 @@ def read_file(
     repo: str | None = None,
 ) -> dict[str, Any]:
     """Read full file (or range) from clone (not index).
-    PR head files via read_pr_file or GitHub MCP.
-    Data sources: clone on disk (_ensure_phase1 refreshes it before reading).
-    repo: "owner/name", or a short name if it uniquely matches one
-          configured (indexed) repo (e.g. "shiori" -> "owner/shiori").
-          Omit for the default configured repo."""
+    Data sources: clone on disk (_ensure_phase1 refreshes it before reading)."""
     target = _resolve_repo(repo)
     _ensure_phase1(target)
     base = os.path.realpath(settings.repo_dir(target))
@@ -212,10 +208,7 @@ def read_issue(
     kinds it is the overall issue state (open/closed).
     Items have a kind field: 'issue', 'pr', 'comment', 'pr_review', or
     'pr_review_comment'.
-    repo: "owner/name", or a short name if it uniquely matches one
-          configured (indexed) repo (e.g. "shiori" -> "owner/shiori").
-          Omit for the default configured repo. An unresolvable repo
-          raises immediately with the indexed-repo list."""
+    An unresolvable repo raises immediately with the indexed-repo list."""
     if number is not None and numbers is not None:
         raise ValueError("number and numbers cannot be specified together")
     target = _resolve_repo(repo)
@@ -249,11 +242,8 @@ def read_pr_file(
     end_line: int | None = None,
     repo: str | None = None,
 ) -> dict[str, Any]:
-    """Read PR head file content (or range). Delegated from read_file with PR-specific fetch.
-    Data sources: own git fetch of the PR head ref against the clone; not _ensure_phase1.
-    repo: "owner/name", or a short name if it uniquely matches one
-          configured (indexed) repo (e.g. "shiori" -> "owner/shiori").
-          Omit for the default configured repo."""
+    """Read PR head file content (or range).
+    Data sources: own git fetch of the PR head ref against the clone; not _ensure_phase1."""
     target = _resolve_repo(repo)
     base = os.path.realpath(settings.repo_dir(target))
 

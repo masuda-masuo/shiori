@@ -59,12 +59,16 @@ The `warnings` list in `shiori_status` automatically identifies the following sy
 
 ## 6. Tool-Contract Map (Issue #340)
 
-Every registered tool's *precise* data-source contract lives in its own docstring, as a
-one-line `Data sources:` sentence in the visible part of the description (i.e. before any
-`Args:` section -- FastMCP drops everything from `Args:` onward from the tool description
-surfaced to the model, per Issue #550). `tests/test_tool_contracts.py` enumerates the live
-FastMCP registry and fails if any tool is missing that line. The table below is the
-category-level summary; it does not replace the per-tool docstrings.
+The server `instructions` text is the Map: the search workflow, the shared `repo` parameter
+semantics, and the store summary (search index / clone on disk / GitHub API) are documented
+there once; tool docstrings carry no copy. Each tool's docstring is that tool's Contract:
+its *precise* data-source contract as a one-line `Data sources:` sentence. mcp 2.x serves the
+docstring verbatim as the description; keep the line at top level, never under an `Args:`
+section (under SDK v1 everything from `Args:` onward was dropped from the visible
+description, per Issue #550 -- the placement rule survives the SDK line either way).
+`tests/test_tool_contracts.py` enumerates the live tool registry and fails if any tool is
+missing that line. The table below is the category-level summary; it does not replace the
+per-tool docstrings.
 
 | Category | Tools | Needs |
 |---|---|---|
