@@ -13,7 +13,7 @@ from .. import db
 
 @mcp.tool(name="shiori_issue_links")
 def issue_links(number: int, repo: str | None = None) -> dict[str, Any]:
-    """Return issue/PR cross-references (inbound/outbound) (issue #97).
+    """Return issue/PR cross-references (inbound/outbound).
 
     Data sources: GitHub API (live) for this issue; issue_items index enriches
     outbound titles/state and all inbound refs (optional, stale if unindexed).
@@ -23,10 +23,6 @@ def issue_links(number: int, repo: str | None = None) -> dict[str, Any]:
     state. Inbound lists other issues/PRs that reference this issue.
 
     Useful for duplicate detection, epic construction, and regression tracking.
-
-    repo: "owner/name", or a short name if it uniquely matches one
-          configured (indexed) repo (e.g. "shiori" -> "owner/shiori").
-          Omit for the default configured repo.
     """
     target = _resolve_repo(repo)
 

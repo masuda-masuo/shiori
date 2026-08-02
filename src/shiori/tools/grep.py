@@ -18,18 +18,13 @@ def grep_search(
     ignore_case: bool = True,
     max_results: int = 200,
 ) -> dict[str, Any]:
-    """Grep clone files with ripgrep. Stage-2 search after shiori_search/keyword_search
-    narrowed down the target file. Returns line-level matches.
+    """Grep clone files with ripgrep. Returns line-level matches.
 
     Data sources: clone on disk (_ensure_phase1 refreshes each repo before grepping).
 
-    When repo="*", search across all configured repositories.
     Each match includes a "repo" field identifying the source repository.
 
     pattern: search pattern (regex or fixed string)
-    repo: target repo ("owner/name"), a short name if it uniquely matches
-          one configured (indexed) repo (e.g. "shiori" -> "owner/shiori"),
-          "*" for all repos, or None for default
     path: optional file/subdir path within repo to scope the search
     regex: True (default) for regex search, False for fixed-string search.
           Patterns containing literal ``[...]`` (character classes) should use

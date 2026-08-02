@@ -33,12 +33,9 @@ def semantic_search(
     Data sources: search index (embeddings, pgvector); needs ingest, stale if timers are off.
     labels: filter by GitHub issue labels (match-any semantics). Only affects
             issue/pr_review source_types; doc/code results are excluded when
-            labels filter is active (issue #165).
+            labels filter is active.
     kind: 'issue' | 'pr' — further filter source_type='issue'/'pr_review' results
-          by thread type. No effect on doc/code results (issue #98).
-    repo: "owner/name" filter, or a short name if it uniquely matches one
-          configured (indexed) repo (e.g. "shiori" -> "owner/shiori").
-          Omit to search across all indexed repos."""
+          by thread type. No effect on doc/code results."""
     with _conn() as conn:
         return search.semantic_search(
             settings, conn, _get_embedder(), query,
@@ -72,12 +69,9 @@ def keyword_search(
     Data sources: search index (chunks, full-text); needs ingest, stale if timers are off.
     labels: filter by GitHub issue labels (match-any semantics). Only affects
             issue/pr_review source_types; doc/code results are excluded when
-            labels filter is active (issue #165).
+            labels filter is active.
     kind: 'issue' | 'pr' — further filter source_type='issue'/'pr_review' results
-          by thread type. No effect on doc/code results (issue #98).
-    repo: "owner/name" filter, or a short name if it uniquely matches one
-          configured (indexed) repo (e.g. "shiori" -> "owner/shiori").
-          Omit to search across all indexed repos."""
+          by thread type. No effect on doc/code results."""
     with _conn() as conn:
         return search.keyword_search(
             settings, conn, query,
