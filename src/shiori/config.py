@@ -352,8 +352,8 @@ class Settings:
     mcp_host: str = field(
         default_factory=lambda: os.environ.get("SHIORI_MCP_HOST", "0.0.0.0")
     )
-    # Positive only: this is a served endpoint (tools/registry.py passes it
-    # to FastMCP(port=...)), so 0 (bind an ephemeral random port) and
+    # Positive only: this is a served endpoint (mcp_server.run() passes it
+    # to mcp.run(port=...)), so 0 (bind an ephemeral random port) and
     # negative (bind error) have no useful meaning here.
     mcp_port: int = field(
         default_factory=lambda: _int_from_env("SHIORI_MCP_PORT", 8765, minimum=1)

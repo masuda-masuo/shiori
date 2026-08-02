@@ -207,9 +207,9 @@ class TestSteadySyncIntervals:
 class TestMcpPort:
     """SHIORI_MCP_PORT -- positive only.
 
-    tools/registry.py passes it straight to ``FastMCP(port=...)``, a served
-    endpoint: 0 binds an ephemeral random port nobody can find, negative
-    fails at bind. Neither is a configuration of this server.
+    mcp_server.run() passes it to ``mcp.run(port=...)``, a served endpoint:
+    0 binds an ephemeral random port nobody can find, negative fails at bind.
+    Neither is a configuration of this server.
     """
 
     def test_unset_defaults(self, monkeypatch):

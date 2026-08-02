@@ -169,14 +169,16 @@ def register_dashboard(mcp):
         )
 
     if os.path.exists(dashboard_dist):
-        # WORKAROUND: FastMCP currently lacks a public method to mount static files or custom starlette apps.
-        # We append directly to the private `_custom_starlette_routes` list so the routes are included
-        # when the underlying Starlette app is built.
+        # WORKAROUND: as of mcp 2.0.0 there is still no public API to mount a
+        # Starlette sub-app / StaticFiles -- `custom_route` covers plain routes
+        # only. We deliberately keep appending the Mount to the private
+        # `_custom_starlette_routes` list (verified present in 2.0.0) so it is
+        # included when the underlying Starlette app is built.
         mcp._custom_starlette_routes.append(
             Mount("/", app=StaticFiles(directory=dashboard_dist, html=True), name="dashboard")
         )
     else:
-        # WORKAROUND: See above
+        # WORKAROUND: See above (custom_route covers plain routes only)
         mcp._custom_starlette_routes.append(
             Route("/", index_fallback, methods=["GET"])
         )

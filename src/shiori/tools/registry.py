@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
-from ..pipeline import settings
-
-mcp = FastMCP(
+# host/port moved off the constructor in mcp 2.x: they are now run() kwargs
+# (see mcp_server.run). instructions= must stay keyword -- v2 inserted
+# title/description positional params before it.
+mcp = MCPServer(
     "shiori",
-    host=settings.mcp_host,
-    port=settings.mcp_port,
     instructions=(
         "Project-knowledge search MCP: one unified, cross-lingual (ja/en) index over GitHub "
         "repository knowledge \u2014 Markdown docs, source code, and issue/PR discussions \u2014 searchable "
