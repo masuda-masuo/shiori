@@ -13,7 +13,12 @@ git pull
 # sidesteps the Docker Desktop credential helper, which dies under WSL
 # interop while Desktop is stopped -- even for anonymous pulls.
 IMAGE=ghcr.io/masuda-masuo/shiori/app
-SHA="$(git rev-parse HEAD)"
+# build-app.yml builds only when image-relevant paths change, so HEAD does not
+# always have an image tag (a scripts-only or docs-only merge never gets one).
+# The image that should be running is the one for the newest commit touching
+# those paths. Keep this pathspec in sync with the paths: filter in
+# .github/workflows/build-app.yml.
+SHA="$(git log -1 --format=%H -- docker/app/Dockerfile pyproject.toml src README.md .github/workflows/build-app.yml)"
 if ! DOCKER_CONFIG="$(mktemp -d)" docker pull "${IMAGE}:${SHA}"; then
   echo "" >&2
   echo "image for ${SHA} is not on ghcr.io (build-app workflow still running," >&2
