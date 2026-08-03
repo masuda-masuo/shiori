@@ -211,9 +211,16 @@ class TestScopedVolumeBulkRun:
 
         mock_conn = MagicMock()
         mock_cursor = MagicMock()
+        # Issue #409: the completion path reads the repo's docs cursor
+        # (advance_indexed_head -> get_cursor) after a zero-pending
+        # completion -- answer it with "no cursor set" for every repo that
+        # will complete (count_pending_issue_items is patched to 0 below,
+        # so each target repo completes), so no indexed_head write is
+        # attempted in this harness.
+        targets = repos_arg or ["o/a", "o/b"]
         mock_cursor.fetchone.side_effect = [
             ("chunks",), (42,), ("chunks_embedding_hnsw",), (pending,),
-        ]
+        ] + [(None,)] * len(targets)
         mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
 
         settings = MagicMock()

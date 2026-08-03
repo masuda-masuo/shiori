@@ -262,9 +262,7 @@ def _do_sync(
                                     conn, repo, route, n_docs, n_items, n_code
                                 )
                                 db.record_sync_attempt(conn, repo, success=True)
-                                indexed_head = db.get_cursor(conn, repo, "docs")
-                                if indexed_head:
-                                    db.upsert_indexed_head(conn, repo, indexed_head)
+                                db.advance_indexed_head(conn, repo)
                                 result["repos"][repo] = {
                                     "docs_updated": n_docs,
                                     "issues_indexed": n_items,
