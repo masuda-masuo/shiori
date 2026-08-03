@@ -203,17 +203,41 @@ def test_permits_returned_when_worker_raises():
     exception on the work path cannot leak a permit.  Leaked permits are
     observable: after an exploding run, a follow-up happy run could reach
     at most PR_REVIEW_CONNECTION_LIMIT - 1 concurrent inner connections.
+
+    Determinism (issue #411): the ``== PR_REVIEW_CONNECTION_LIMIT``
+    assertions demand that all LIMIT workers hold their connections at the
+    same instant, and scheduling alone does not guarantee that overlap --
+    on a 2-core CI runner an early worker finished its near-instant mocked
+    chunk and returned its permit before the last worker started, so the
+    high-water mark stopped at LIMIT - 1.  A ``threading.Barrier`` of
+    LIMIT parties inside the worker body forces the overlap: nobody
+    proceeds until all LIMIT workers are live at once.  With a leaked
+    permit only LIMIT - 1 workers can ever be live, the barrier times out,
+    and every waiter fails loudly (BrokenBarrierError -> high_water stays
+    below LIMIT -> the equality assertion fires) instead of hanging.
     """
     from shiori.sync_issues import _fetch_pr_reviews_parallel
 
     settings = _make_settings(["owner/repo0"])
     pr_numbers = list(range(1, 41))  # 40 PRs -> 10 workers, 4 PRs each
 
-    # Every worker raises right after opening its connection.
+    # Every worker raises right after opening its connection -- but only
+    # once ALL workers hold one, so the exploding peak is exactly LIMIT.
+    exploding_barrier = threading.Barrier(
+        PR_REVIEW_CONNECTION_LIMIT, timeout=10.0,
+    )
+
+    class _SyncedExplodingClient:
+        """_ExplodingClient that raises only when all workers are live."""
+
+        def __init__(self, *args, **kwargs) -> None:
+            exploding_barrier.wait()
+            raise RuntimeError("boom")
+
     exploding = _ConnectionCounter()
     with (
         patch("shiori.sync_issues.db.connect", side_effect=exploding.open),
-        patch("shiori.sync_issues.httpx.Client", _ExplodingClient),
+        patch("shiori.sync_issues.httpx.Client", _SyncedExplodingClient),
     ):
         result = _fetch_pr_reviews_parallel(
             settings, "owner/repo0", MagicMock(), pr_numbers,
@@ -224,12 +248,21 @@ def test_permits_returned_when_worker_raises():
     assert exploding.live == 0
 
     # Happy path afterwards: the full ceiling must be reachable again, i.e.
-    # all PR_REVIEW_CONNECTION_LIMIT permits are available.
+    # all PR_REVIEW_CONNECTION_LIMIT permits are available.  Each worker
+    # holds its single connection across its whole 4-PR chunk, and the 40
+    # _sync_pr_reviews calls divide into exactly 4 barrier waves of LIMIT,
+    # so every wave requires all LIMIT workers live simultaneously.
+    happy_barrier = threading.Barrier(
+        PR_REVIEW_CONNECTION_LIMIT, timeout=10.0,
+    )
     happy = _ConnectionCounter()
     with (
         patch("shiori.sync_issues.db.connect", side_effect=happy.open),
         patch("shiori.sync_issues.httpx.Client", _FakeClient),
-        patch("shiori.sync_issues._sync_pr_reviews"),
+        patch(
+            "shiori.sync_issues._sync_pr_reviews",
+            side_effect=lambda *a, **k: happy_barrier.wait(),
+        ),
     ):
         _fetch_pr_reviews_parallel(
             settings, "owner/repo0", MagicMock(), pr_numbers,
