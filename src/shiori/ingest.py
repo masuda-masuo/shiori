@@ -525,6 +525,13 @@ def run_fetch(
                 try:
                     head = fetch_docs(settings, conn, repo, provider)
                     if head:
+                        # Issue #409: the CLI fetch advanced the on-disk
+                        # clone, so record it as clone_head exactly like the
+                        # pipeline's Phase 1 write -- otherwise status keeps
+                        # comparing indexed_head against the pre-fetch SHA
+                        # and reports the index stale despite a caught-up
+                        # index.
+                        db.upsert_clone_head(conn, repo, head)
                         log.info("fetch docs: clone refreshed at %s (%.1fs)",
                                  head[:8], time.monotonic() - t0)
                     else:
@@ -732,6 +739,10 @@ def run_index(
                         conn, repo, route, n_docs, n_items, n_code
                     )
                     db.record_sync_attempt(conn, repo, success=True)
+                    # Issue #409: a CLI-only-ingested repo must advance
+                    # indexed_head too, or shiori_status reports it stale /
+                    # never-indexed forever despite a fully caught-up index.
+                    db.advance_indexed_head(conn, repo)
                     synced_ts = (
                         finished_at.isoformat() if finished_at is not None else "?"
                     )
@@ -1002,6 +1013,11 @@ def run_ingest(
                 try:
                     head = fetch_docs(settings, conn2, repo, provider)
                     if head:
+                        # Issue #409: same clone_head write as run_fetch and
+                        # the pipeline's Phase 1 -- the fetched clone HEAD
+                        # must be recorded so status does not compare
+                        # indexed_head against the pre-fetch SHA.
+                        db.upsert_clone_head(conn2, repo, head)
                         log.info("fetch docs: clone refreshed at %s (%.1fs)",
                                  head[:8], time.monotonic() - t0)
                     else:
@@ -1151,6 +1167,10 @@ def run_ingest(
                         conn, repo, route, n_docs, n_items, n_code
                     )
                     db.record_sync_attempt(conn, repo, success=True)
+                    # Issue #409: same indexed_head advancement as the
+                    # pull-sync path -- a repo indexed only via `ingest run`
+                    # must not stay stale/never-indexed in shiori_status.
+                    db.advance_indexed_head(conn, repo)
                     synced_ts = (
                         finished_at.isoformat() if finished_at is not None else "?"
                     )

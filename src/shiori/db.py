@@ -770,6 +770,25 @@ def upsert_indexed_head(
     conn.commit()
 
 
+def advance_indexed_head(
+    conn: psycopg.Connection,
+    repo: str,
+) -> None:
+    """Advance ``indexed_head`` to the repo's "docs" cursor after a
+    successful index/sync completion (issue #409).
+
+    Single write point shared by the pull-sync path (pipeline.py) and the
+    two CLI ingest completion paths (ingest.py): when a repo finishes with
+    zero pending items, its docs cursor is recorded as ``indexed_head`` so
+    ``shiori_status`` does not falsely report the index stale (or the repo
+    never-indexed).  No-op when the docs cursor is not set -- a repo with
+    nothing indexed yet must not claim an indexed head.
+    """
+    indexed_head = get_cursor(conn, repo, "docs")
+    if indexed_head:
+        upsert_indexed_head(conn, repo, indexed_head)
+
+
 def record_repo_sync_error(
     conn: psycopg.Connection,
     repo: str,
