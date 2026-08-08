@@ -78,4 +78,3 @@ Incremental sync runs maintain all indexes actively during inserts.
 *   `sync_runs(repo, route, finished_at, docs_updated, issues_indexed, code_indexed)`: Ingestion stats log (Issue #22).
 *   `doc_files(repo, path, content_sha, language, kind)`: Tracks document content hashes.
 *   `issue_items(repo, issue_no, comment_id, kind, title, author, is_bot, state, path, line, body, url, created_at, updated_at)`: Raw timeline data for `shiori_read_issue`.
-*   `pr_changes(repo, issue_no, head_sha, path, status, additions, deletions, changes, blob_url)`: Tracked PR change details (Issue #54).
