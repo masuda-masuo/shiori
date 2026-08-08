@@ -20,6 +20,7 @@ Expose retrieval and inspection functionality as Model Context Protocol (MCP) to
 *   `shiori_read_pr_file(number, path, range?, repo?)`: Fetches the file content at the head commit of a PR by pulling a temporary ref (Issue #81).
 *   `shiori_grep(pattern, repo?, path?, regex?, ignore_case?, max_results?)`: Performs line-level ripgrep search inside cloned repositories. Designed as a Stage-2 search. Setting `repo="*"` executes cross-repository searches (Issue #146, #151).
 *   `shiori_status()`: Queries system health, sync state cursors, and database row allocations per repository (Issue #22, #31). Reports `auto_sync_running` thread health, token provider strategies, and warning logs (Issue #187, #196).
+*   `shiori_report(template, repo?, path?, kind?, public_only?, max_results?, prog_lang?, max_chars?)`: Generates a structured report from the on-disk clone (`_ensure_phase1` refreshes it first; the `api_reference` template additionally reads the search index for cross-linking). Templates: `stats`, `module_tree`, `symbol_index`, `api_reference` (Issue #279).
 
 > **v2.0 Deprecation**: The `shiori_ingest` MCP tool has been deprecated. Synchronization is managed via CLI (`python -m shiori ingest`) or background polling (`SHIORI_SYNC_INTERVAL_SECONDS`).
 
@@ -87,3 +88,33 @@ Frozen design decisions (ratified in Issue #340/#347; do not re-litigate without
     documented in each tool's own docstring; it starts from the clone but does not
     perform the Phase 1 refresh.
 *   Category ③ (plus `shiori_report`) keep `_ensure_phase1`.
+
+---
+
+## 7. Web Dashboard (shared app, no second process)
+
+`register_dashboard(mcp)` (`src/shiori/dashboard.py`) mounts a human-facing
+browser dashboard on the **same** Starlette app and port as the MCP endpoint
+rather than running a second process. It registers several
+`@mcp.custom_route` JSON endpoints under `/api/`, and serves the built
+single-page app as static files at `/` -- appended to the private
+`_custom_starlette_routes` list as a `Mount`, since mcp 2.0.0 still offers no
+public API for mounting a Starlette sub-app. When `dashboard_dist` (the
+built SPA next to the package) is absent, a fallback 404 page telling the
+operator to run `npm install && npm run build` in the `dashboard/` directory
+is served at `/` instead.
+
+| Route | Backing function |
+|---|---|
+| `GET /api/repos` | `settings.repos` (configured repository list) |
+| `GET /api/search` | `search.semantic_search` / `search.keyword_search` via `_conn`, `_get_embedder`, `_resolve_repo_filter` |
+| `GET /api/read_file` | `mcp_server.read_file` |
+| `GET /api/issue` | `mcp_server.read_issue` |
+| `GET /api/report` | `mcp_server.report` |
+
+The `/api/` routes reuse the same underlying functions as the MCP tools
+instead of duplicating logic: `mcp_server.py` re-exports `_get_embedder` and
+`_resolve_repo_filter` with `# noqa: F401 — re-export for dashboard` comments
+for exactly this purpose, and the tool functions themselves are imported
+directly. Query parameters map onto the tools' keyword arguments; missing
+required parameters return HTTP 400 and tool errors surface as HTTP 500.

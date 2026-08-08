@@ -38,11 +38,11 @@ Shiori does not host full files or diffs for ongoing PRs (which would duplicate 
 | **Source Code** | `.py` / `.ts` / `.go` on `main` | Factual & Current | Postgres + Disk Clone | Current implementation status |
 | **Issues** | Description & Comments | Blended history | Postgres | Why (history, workarounds) |
 | **Pull Requests** | Description & Review Comments | Blended history | Postgres | Why (design decisions) |
-| **PR Changes** | File list + additions/deletions + head_sha | In-flight metadata | Postgres pointer | Start point for reviews |
+| **PR Changes** | File list + additions/deletions + head_sha / base_sha | In-flight metadata | Disk Clone (git fetch of PR head) | Start point for reviews |
 
 Stores are divided into two categories:
 *   **Database (PostgreSQL)**: Serves search requests. Returns pointers and snippets.
-*   **Clones (Local Disk)**: Serves full-text reads via `shiori_read_file`. Represents shallow checkouts of the `main` branch.
+*   **Clones (Local Disk)**: Serves full-text reads via `shiori_read_file`, and PR change lists and diffs computed from the clone (live git fetch of the PR head) via `shiori_pr_changes` / `shiori_pr_diff`. Represents shallow checkouts of the `main` branch.
 
 Bot comments (e.g. Dependabot) are excluded from the index to reduce noise. Specific bots posting on behalf of users can be allowlisted using the `SHIORI_INDEX_BOT_LOGINS` environment variable (comma-separated names, e.g. `app[bot]`).
 
@@ -50,7 +50,7 @@ Bot comments (e.g. Dependabot) are excluded from the index to reduce noise. Spec
 
 ## How It Works
 
-1.  **Ingestion**: Three subcommands — `fetch` (API + git pull, no embeddings), `index` (chunk + embed from stored rows), `run` (both, the default). Downloads docs and issues/PRs, splits them into chunks (documents are chunked by headings, discussions by comments with title context), and attaches metadata. Supports differential sync with page-level resumability.
+1.  **Ingestion**: Four subcommands — `fetch` (API + git pull, no embeddings), `index` (chunk + embed from stored rows), `run` (both, the default), and `reindex` (re-chunk + re-embed from stored raw data, no GitHub re-fetch). Downloads docs and issues/PRs, splits them into chunks (documents are chunked by headings, discussions by comments with title context), and attaches metadata. Supports differential sync with page-level resumability.
 2.  **Indexing**: Stores vector embeddings, full-text tokens, and metadata in PostgreSQL.
 3.  **Search**: Runs hybrid search (vector similarity + full-text keyword search via Reciprocal Rank Fusion) combined with metadata filtering.
 4.  **Delivery**: Exposes search APIs as MCP tools for the AI agent.
@@ -67,7 +67,7 @@ Bot comments (e.g. Dependabot) are excluded from the index to reduce noise. Spec
 
 ## MCP Tools
 
-The 12 tools are classified into 4 layers based on user query intent:
+The 13 tools are classified into 4 layers based on user query intent:
 
 ### 1. Retrieval (Where is it written?)
 *   `shiori_search`: Unified hybrid search (vector + keyword RRF). Strong at conceptual mapping, phrasing variations, and cross-lingual queries.
@@ -86,8 +86,23 @@ The 12 tools are classified into 4 layers based on user query intent:
 *   `shiori_pr_diff`: Calculates and returns unified diffs for a PR (supports path scoping).
 *   `shiori_pr_review_comments`: Lists review comments with line numbers.
 
-### 4. Operations (Is the index fresh?)
+### 4. Operations (Is the index fresh? What is the repository structure?)
 *   `shiori_status`: Inspects index status, sync times, and warnings.
+*   `shiori_report`: Generates structured reports (`stats`, `module_tree`, `symbol_index`, `api_reference`) from the clone and the search index.
+
+---
+
+## Browser Dashboard
+
+The MCP server also exposes a human-facing browser dashboard on the same server and port as the MCP endpoint (`http://localhost:8765/`): JSON endpoints under `/api/` backed by the same functions as the MCP tools, plus the built single-page app served as static files at `/`.
+
+*   `GET /api/repos` — configured repositories
+*   `GET /api/search` — hybrid search (`type=semantic|keyword`, plus filters)
+*   `GET /api/read_file` — file reads with line ranges
+*   `GET /api/issue` — issue/PR timeline reads
+*   `GET /api/report` — structured reports (`stats`, `module_tree`, `symbol_index`, `api_reference`)
+
+The dashboard must be built first (`npm install && npm run build` in the `dashboard/` directory); until then a fallback page telling you to build it is served at `/`. See [docs/design/06_mcp_server_and_tool_design.md](docs/design/06_mcp_server_and_tool_design.md) for the design.
 
 ---
 
@@ -104,7 +119,7 @@ docker compose run --rm ingest --repo owner/repo
 # ./scripts/ingest.sh run --backfill-since 2024-01-01 --repo owner/repo
 ```
 
-Ingestion has three subcommands — `fetch` (API + git pull only), `index` (chunk + embed), and `run` (both, default). The MCP server is exposed at `http://localhost:8765/mcp` (Streamable HTTP).
+Ingestion has four subcommands — `fetch` (API + git pull only), `index` (chunk + embed), `run` (both, default), and `reindex` (rebuild chunks while keeping fetched raw data, Issue #352). The MCP server is exposed at `http://localhost:8765/mcp` (Streamable HTTP).
 
 See [docs/guides/setup.md](docs/guides/setup.md) for:
 - **Reference (read-only) setup** — public repos, no token, one-shot bounded ingest

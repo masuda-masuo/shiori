@@ -56,14 +56,14 @@ RAG (Retrieval-Augmented Generation) refers to a complete pipeline where search 
 
 ## 4. Tool Taxonomy (4-Layer Model)
 
-The 12 tools are structured based on user query intent. When adding new tools, confirm which category they occupy:
+The 13 tools are structured based on user query intent. When adding new tools, confirm which category they occupy:
 
 | Layer | Intent | Tool |
 |---|---|---|
 | **① Retrieval (Entry)** | Where is it written? | `shiori_search` / `shiori_keyword_search` / `shiori_grep` |
 | **② Inspection** | What is written? | `shiori_read_file` / `shiori_read_issue` / `shiori_read_pr_file` / `shiori_list_tree` |
 | **③ Relationships & Changes** | How is it connected? What changes? | `shiori_issue_links` / `shiori_pr_changes` / `shiori_pr_diff` / `shiori_pr_review_comments` |
-| **④ Operations** | Is the index fresh? | `shiori_status` |
+| **④ Operations** | Is the index fresh? What is the repo structure? | `shiori_status` / `shiori_report` |
 
 ### ① Retrieval Layer — Core Search Funnel
 
@@ -85,12 +85,13 @@ Filters: `source_type` (`doc`/`issue`/`pr_review`/`code`), `kind` (`issue`/`pr`)
 ### ③ Relationships & Changes Layer — Traversal
 
 *   `shiori_issue_links`: Analyzes references in descriptions and comments (closes, duplicate, refs, mentions), returning target title and state (Issue #97).
-*   `shiori_pr_changes`: Returns changed files in a PR (paths, status, lines, and URLs).
+*   `shiori_pr_changes`: Returns changed files in a PR (paths, status, and lines).
 *   `shiori_pr_diff`: Calculates and returns unified Git diffs for a PR (supports path scoping).
 *   `shiori_pr_review_comments`: Lists review comments with line numbers and file paths.
 
 ### ④ Operations Layer
 *   `shiori_status`: Inspects index status, sync times, and warnings.
+*   `shiori_report`: Generates structured reports (`stats`, `module_tree`, `symbol_index`, `api_reference`) from the clone and the search index.
 
 ---
 
@@ -218,4 +219,4 @@ Filters: `source_type` (`doc`/`issue`/`pr_review`/`code`), `kind` (`issue`/`pr`)
 *   Redefine the product description from "RAG" to "Project Knowledge Search MCP".
 *   Define the value hierarchy as: (1) Unified cross-referencing, (2) Cross-lingual search, and (3) Context optimization.
 *   Categorize tools into the 4-layer model (Retrieval, Inspection, Relationships & Changes, Operations).
-*   Align `instructions` files, README, and AGENTS.md with the 12 tools cataloged here.
+*   Align `instructions` files and README with the 13 tools cataloged here.

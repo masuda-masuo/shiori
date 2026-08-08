@@ -175,6 +175,8 @@ When you need up-to-date indices during development:
 
 Because of per-repo PostgreSQL advisory locks, you can run a fetch for a dev repo in one terminal while a reference backfill runs in another — no kill-and-restart needed.
 
+`ingest.sh` also picks the compute device itself: it runs with GPU (adding `docker-compose.gpu.yml`) when a GPU is visible to the host (`nvidia-smi -L` succeeds) and the NVIDIA container toolkit is installed; otherwise it falls back to CPU. The chosen device and the reason are written to the run log as `device=<gpu|cpu> reason="..."` (in `logs/ingest/<lane>/`, or wherever `SHIORI_LOG_DIR` points). To force a device without detection, set `SHIORI_GPU=1` for GPU or `SHIORI_GPU=0` for CPU — any non-empty value other than `1` forces CPU.
+
 ### 6. Adding a new large reference repo to an existing setup
 
 ```bash
