@@ -147,6 +147,13 @@ class TokenSocketProvider(TokenProvider):
     cached token for up to HARD_EXPIRY on failure. Raises when the socket
     fails and no usable cached token is left.
 
+    Transient mint-socket failures are retried a bounded number of times
+    (issue #413): an empty response (a keyring race on the mint side where
+    the socket accepts a connection but returns nothing) or a momentary
+    OSError around systemd socket unit restarts. Permanent failures are a
+    different class that retry cannot save, so after MAX_ATTEMPTS the
+    fallback semantics are unchanged.
+
     Expiry bookkeeping uses the wall clock (``time.time()``), never a
     monotonic clock: a monotonic clock does not advance while the host is
     suspended, which would silently reintroduce the clock-drift bug this
@@ -158,6 +165,8 @@ class TokenSocketProvider(TokenProvider):
     CACHE_SECONDS = 3300      # 55 min
     REFRESH_BEFORE = 300      # 5 min
     HARD_EXPIRY = 3600        # 60 min — fallback window on fetch failure
+    MAX_ATTEMPTS = 3          # bounded retry for transient failures (issue #413)
+    RETRY_BACKOFF = (0.5, 1.0)  # sleep after attempt 1, 2 (seconds); no sleep after the last
 
     def __init__(self, socket_path: str) -> None:
         self._socket_path = socket_path
@@ -170,25 +179,41 @@ class TokenSocketProvider(TokenProvider):
         return self._token
 
     def _refresh(self) -> None:
-        try:
-            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            sock.settimeout(15.0)
-            sock.connect(self._socket_path)
-            data = b""
-            while True:
-                chunk = sock.recv(4096)
-                if not chunk:
-                    break
-                data += chunk
-            sock.close()
-            token = data.decode("utf-8").strip()
-            if token:
-                self._token = token
-                self._fetched_at = time.time()
-                return
-            log.warning("token socket returned empty response from %s", self._socket_path)
-        except OSError as exc:
-            log.warning("token socket connect/read failed: %s", exc)
+        # Transient mint-socket failures are retried a bounded number of
+        # times (issue #413): an empty/whitespace-only response (mint-side
+        # keyring race) or a momentary OSError around systemd socket unit
+        # restarts. Each attempt uses the same 15s timeout; between attempts
+        # sleep RETRY_BACKOFF[i] (no sleep after the last attempt). Permanent
+        # failures exhaust the retries and fall through to the fallback below,
+        # which is unchanged.
+        for attempt in range(1, self.MAX_ATTEMPTS + 1):
+            try:
+                sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                sock.settimeout(15.0)
+                sock.connect(self._socket_path)
+                data = b""
+                while True:
+                    chunk = sock.recv(4096)
+                    if not chunk:
+                        break
+                    data += chunk
+                sock.close()
+                token = data.decode("utf-8").strip()
+                if token:
+                    self._token = token
+                    self._fetched_at = time.time()
+                    return
+                log.warning(
+                    "token socket returned empty response from %s (attempt %d/%d)",
+                    self._socket_path, attempt, self.MAX_ATTEMPTS,
+                )
+            except OSError as exc:
+                log.warning(
+                    "token socket connect/read failed: %s (attempt %d/%d)",
+                    exc, attempt, self.MAX_ATTEMPTS,
+                )
+            if attempt < self.MAX_ATTEMPTS:
+                time.sleep(self.RETRY_BACKOFF[attempt - 1])
         # fallback
         if self._token and time.time() < self._fetched_at + self.HARD_EXPIRY:
             log.warning("token socket refresh failed; reusing cached token")
