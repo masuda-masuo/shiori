@@ -25,14 +25,13 @@ from shiori.github_sync import (
     _propagate_issue_states,
     _should_index,
     _sync_pr_reviews,
-    sync_issues,
     index_issues,
+    sync_issues,
 )
 from shiori.walk_utils import (
     _is_excluded_dir,
     _looks_minified,
 )
-
 
 # ===================================================================
 # ChunkBuffer（issue #72）
@@ -1587,6 +1586,7 @@ class TestCircuitBreakerFetch:
     def test_skips_repo_within_backoff_window(self):
         """Repo with consecutive_failures >= threshold and within backoff is skipped."""
         from datetime import datetime, timezone
+
         from shiori.ingest import run_fetch
 
         mock_conn = MagicMock()
@@ -1662,6 +1662,7 @@ class TestCircuitBreakerFetch:
     def test_healthy_repo_fetched_when_another_skipped(self):
         """Skipping one repo (breakers) does not block fetching another."""
         from datetime import datetime, timezone
+
         from shiori.ingest import run_fetch
 
         mock_conn = MagicMock()
@@ -1703,6 +1704,7 @@ class TestCircuitBreakerFetch:
     def test_explicit_repo_skip_raises_valueerror(self):
         """Explicit repos=... skip raises ValueError, not silent."""
         from datetime import datetime, timezone
+
         from shiori.ingest import run_fetch
 
         mock_conn = MagicMock()
@@ -1731,6 +1733,7 @@ class TestCircuitBreakerFetch:
     def test_below_threshold_repos_not_skipped(self):
         """Repo with failures below threshold is NOT skipped — still fetched."""
         from datetime import datetime, timezone
+
         from shiori.ingest import run_fetch
 
         mock_conn = MagicMock()

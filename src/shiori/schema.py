@@ -84,7 +84,7 @@ def forget_repo(conn: psycopg.Connection, repo: str) -> dict[str, int]:
         for table in REPO_SCOPED_TABLES:
             cur.execute("SELECT to_regclass(%s)", (table,))
             row = cur.fetchone()
-            assert row is not None  # a scalar SELECT always yields one row
+            assert row is not None  # noqa: S101 - invariant; a scalar SELECT always yields one row
             if row[0] is None:
                 deleted[table] = 0
                 continue

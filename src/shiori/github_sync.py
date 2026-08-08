@@ -19,22 +19,29 @@ Subcommand split (issue #306):
 
 from __future__ import annotations
 
-from .api_utils import API, _GitHubAuth, _api_pages, _api_pages_gen
+from .api_utils import API, _api_pages, _api_pages_gen, _GitHubAuth
 from .chunk_buffer import ChunkBuffer
-from .git_utils import _auth_args, _authed_url, _git, _git_delete_ref, _git_fetch_ref, _redact
-from .sync_code import sync_code, index_code
-from .sync_docs import sync_docs, fetch_docs, index_docs
+from .git_utils import (
+    _auth_args,
+    _authed_url,
+    _git,
+    _git_delete_ref,
+    _git_fetch_ref,
+    _redact,
+)
+from .sync_code import index_code, sync_code
+from .sync_docs import fetch_docs, index_docs, sync_docs
 from .sync_issues import (
     _index_item,
     _issue_title_state_kind,
     _propagate_issue_states,
     _sync_pr_reviews,
     _upsert_issue_item,
-    sync_issues,
     fetch_issues,
     index_issues,
+    sync_issues,
 )
-from .sync_utils import _clean_text, _CONTROL_CHARS_RE, _is_bot, _should_index
+from .sync_utils import _CONTROL_CHARS_RE, _clean_text, _is_bot, _should_index
 
 __all__ = [  # re-export (ruff F401 avoidance)
     "API", "_GitHubAuth", "_api_pages", "_api_pages_gen", "ChunkBuffer",

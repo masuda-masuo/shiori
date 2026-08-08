@@ -2,11 +2,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from .registry import mcp
-from .common import _validate_repo_name
-from ..pipeline import _conn, settings
 from .. import db
 from ..github_auth import build_token_provider
+from ..pipeline import _conn, settings
+from .common import _validate_repo_name
+from .registry import mcp
 
 # Floor on the derived staleness threshold (seconds): a misconfigured
 # near-zero timer interval must not make every repo look permanently stale.
@@ -123,8 +123,8 @@ def status(repo: str | None = None) -> dict[str, Any]:
         provider = build_token_provider(settings)
         token_provider = provider.name
         token_provider_error = None
-    except Exception as exc:
-        token_provider = "error"
+    except Exception as exc:  # noqa: BLE001 - status must never raise; reports "error" (issue #193)
+        token_provider = "error"  # noqa: S105 - literal is "error", not a secret; name mirrors the status dict key
         token_provider_error = str(exc)
 
     with _conn() as conn:

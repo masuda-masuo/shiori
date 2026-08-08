@@ -6,9 +6,6 @@ from typing import Any
 
 import httpx
 
-from .registry import mcp
-from .common import _github_client, _resolve_repo
-from ..pipeline import settings
 from ..github_auth import build_token_provider
 from ..github_sync import (
     API,
@@ -19,6 +16,9 @@ from ..github_sync import (
     _git_fetch_ref,
     _is_bot,
 )
+from ..pipeline import settings
+from .common import _github_client, _resolve_repo
+from .registry import mcp
 
 
 @mcp.tool(name="shiori_pr_changes")

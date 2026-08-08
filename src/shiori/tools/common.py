@@ -8,8 +8,8 @@ from typing import Any, Iterator
 
 import httpx
 
-from ..github_auth import build_token_provider
 from ..api_utils import _GitHubAuth
+from ..github_auth import build_token_provider
 from ..pipeline import settings
 
 log = logging.getLogger(__name__)
@@ -41,7 +41,7 @@ def _github_client() -> Iterator[httpx.Client]:
 def _infer_repo_from_cwd() -> str | None:
     """Infer repo from git remote of current working directory."""
     try:
-        result = subprocess.run(  # noqa: S603, S607
+        result = subprocess.run(
             ["git", "remote", "get-url", "origin"],  # noqa: S607
             capture_output=True, text=True, timeout=5,
         )

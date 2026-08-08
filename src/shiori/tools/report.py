@@ -3,17 +3,17 @@ from __future__ import annotations
 import os
 from typing import Any
 
-from .registry import mcp
-from .common import _resolve_repo, _resolve_repos  # noqa: F401 — re-export for tests
 from ..pipeline import _conn, _ensure_phase1, settings
 from ..report import (
     _REPORT_TEMPLATES,
+    _report_api_reference,
+    _report_module_tree,
+    _report_symbol_index,
     _stats_data,
     _stats_to_markdown,
-    _report_symbol_index,
-    _report_module_tree,
-    _report_api_reference,
 )
+from .common import _resolve_repo, _resolve_repos  # noqa: F401 — re-export for tests
+from .registry import mcp
 
 
 @mcp.tool(name="shiori_report")

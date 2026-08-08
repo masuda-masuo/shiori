@@ -23,7 +23,6 @@ from shiori.walk_utils import (
     _walk_code_files,
 )
 
-
 # ── ヘルパー: 仮想ディレクトリツリーを作成 ──
 
 

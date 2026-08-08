@@ -3,10 +3,15 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from .registry import mcp
-from .common import _make_filters, _resolve_repo, _resolve_repo_filter, _resolve_repos  # noqa: F401 — re-export for tests
-from ..pipeline import _conn, _get_embedder, settings
 from .. import search
+from ..pipeline import _conn, _get_embedder, settings
+from .common import (  # noqa: F401 — re-export for tests
+    _make_filters,
+    _resolve_repo,
+    _resolve_repo_filter,
+    _resolve_repos,
+)
+from .registry import mcp
 
 log = logging.getLogger(__name__)
 

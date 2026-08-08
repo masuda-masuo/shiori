@@ -123,7 +123,7 @@ def _is_bulk_path(
             threshold = getattr(settings, "bulk_pending_threshold", 0)
             if isinstance(threshold, (int, float)) and threshold > 0:
                 cur.execute(
-                    f"SELECT count(*) FROM issue_items WHERE repo = ANY(%s) "
+                    f"SELECT count(*) FROM issue_items WHERE repo = ANY(%s) "  # noqa: S608 - interpolates only the module constant; values are %s params
                     f"AND {db.PENDING_ISSUE_ITEMS_WHERE}",
                     (list(targets),),
                 )
@@ -571,7 +571,7 @@ def run_fetch(
             repo = futures[future]
             try:
                 future.result()
-            except Exception:
+            except Exception:  # noqa: BLE001 - fetch failure recorded; raised after the loop
                 failed.append(repo)
 
     if failed:

@@ -104,7 +104,7 @@ def index_code(
             with open(abspath, encoding="utf-8", errors="replace") as fp:
                 text = fp.read()
             text = _clean_text(text)  # Remove NUL etc. (issue #111)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - unreadable file skipped with warning; indexing continues
             log.warning("index_code: skip %s (%s)", path, exc)
             continue
 

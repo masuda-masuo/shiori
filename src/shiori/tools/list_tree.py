@@ -3,11 +3,10 @@ from __future__ import annotations
 import os
 from typing import Any
 
-from .registry import mcp
-from .common import _resolve_repo
 from ..pipeline import _conn, _ensure_phase1, settings
 from ..walk_utils import _match_extension, _walk_code_files
-
+from .common import _resolve_repo
+from .registry import mcp
 
 # Valid values for list_tree source_type
 _VALID_SOURCE_TYPES = {"doc", "code"}

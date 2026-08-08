@@ -79,7 +79,7 @@ class TestForgetRepo:
         ]
         assert len(deletes) == len(REPO_SCOPED_TABLES)
         for table in REPO_SCOPED_TABLES:
-            assert f'DELETE FROM "{table}" WHERE repo = %s' in deletes
+            assert f'DELETE FROM "{table}" WHERE repo = %s' in deletes  # noqa: S608 - assertion on SQL construction; table name comes from the REPO_SCOPED_TABLES constant
         assert deleted == {t: 3 for t in REPO_SCOPED_TABLES}
 
     def test_scopes_the_delete_to_the_given_repo(self):

@@ -26,7 +26,7 @@ _TS_FAILED: set[str] = set()
 try:
     from tree_sitter_language_pack import get_parser  # type: ignore[import-untyped]
     _TS_AVAILABLE = True
-except Exception:
+except Exception:  # noqa: BLE001, S110 - optional tree-sitter import; absence handled via _TS_AVAILABLE
     pass
 
 
@@ -39,7 +39,7 @@ def _ts_get_parser(lang: str):
         parser = get_parser(lang)  # type: ignore[possibly-unbound]
         _TS_PARSER_CACHE[lang] = parser
         return parser
-    except Exception:
+    except Exception:  # noqa: BLE001 - parser availability probe; failure falls back to the plain-text splitter
         _TS_FAILED.add(lang)
         return None
 
@@ -262,7 +262,7 @@ def _ts_node_text(node) -> str:
     try:
         raw = node.text
         return raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else str(raw)
-    except Exception:
+    except Exception:  # noqa: BLE001 - node text extraction failure yields ""
         return ""
 
 
@@ -347,7 +347,7 @@ def split_code(file_path: str, content: str, max_chars: int = _CODE_MAX_CHARS) -
 
     try:
         tree = _ts_parse(parser, bytes(content, "utf-8"))
-    except Exception:
+    except Exception:  # noqa: BLE001 - parse failure falls back to the non-tree-sitter splitter
         return _split_code_fallback(content, file_path, max_chars)
 
     root = tree.root_node
@@ -360,7 +360,7 @@ def split_code(file_path: str, content: str, max_chars: int = _CODE_MAX_CHARS) -
     try:
         from tree_sitter import Query, QueryCursor
         query = Query(_ts_language(parser), query_src)  # type: ignore[arg-type]
-    except Exception:
+    except Exception:  # noqa: BLE001 - query build failure falls back to the non-tree-sitter splitter
         return _split_code_fallback(content, file_path, max_chars)
 
     def_nodes_raw: list[tuple[str, object]] = []
@@ -370,7 +370,7 @@ def split_code(file_path: str, content: str, max_chars: int = _CODE_MAX_CHARS) -
             for capture_name, captured_nodes in capture_map.items():
                 for n in captured_nodes:
                     def_nodes_raw.append((capture_name, n))
-    except Exception:
+    except Exception:  # noqa: BLE001, S110 - no def nodes found; fallback splitter handles the empty result
         pass
 
     if not def_nodes_raw:

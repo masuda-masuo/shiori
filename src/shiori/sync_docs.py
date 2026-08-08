@@ -95,7 +95,7 @@ def index_docs(
         default_branch = _git(
             ["rev-parse", "--abbrev-ref", "origin/HEAD"], cwd=repo_dir
         ).split("/")[-1]
-    except Exception:
+    except Exception:  # noqa: BLE001 - branch detection failure falls back to "main"
         default_branch = "main"
 
     for path in changed:
@@ -164,7 +164,7 @@ def index_docs(
     try:
         head = _git(["rev-parse", "HEAD"], cwd=repo_dir)
         set_cursor(conn, repo, "docs", head)
-    except Exception:
+    except Exception:  # noqa: BLE001, S110 - cursor update failure non-fatal
         pass
 
     return len(changed) + len(removed)

@@ -1,14 +1,15 @@
 from __future__ import annotations
 
-import httpx
 from typing import Any
 
-from .registry import mcp
-from .common import _resolve_repo, _github_client
-from ..pipeline import _conn
+import httpx
+
+from .. import db
 from ..github_sync import API, _api_pages
 from ..links import merge_outbound_refs
-from .. import db
+from ..pipeline import _conn
+from .common import _github_client, _resolve_repo
+from .registry import mcp
 
 
 @mcp.tool(name="shiori_issue_links")

@@ -4,9 +4,9 @@ import os
 import subprocess
 from typing import Any
 
-from .registry import mcp
-from .common import _resolve_repos
 from ..pipeline import _ensure_phase1, settings
+from .common import _resolve_repos
+from .registry import mcp
 
 
 @mcp.tool(name="shiori_grep")

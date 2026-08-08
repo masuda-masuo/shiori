@@ -114,7 +114,7 @@ class TokenCommandProvider(TokenProvider):
 
     def _refresh(self) -> None:
         try:
-            result = subprocess.run(
+            result = subprocess.run(  # noqa: S603 - configured token command; list-form argv, no shell
                 shlex.split(self._command), capture_output=True,
                 text=True, timeout=15.0,
             )
@@ -124,7 +124,7 @@ class TokenCommandProvider(TokenProvider):
                 self._fetched_at = time.time()
                 return
             log.warning("token command returned empty output (stderr: %s)", result.stderr.strip())
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - refresh failure falls back to the cached token
             log.warning("token command failed: %s", exc)
         # fallback
         if self._token and time.time() < self._fetched_at + self.HARD_EXPIRY:
@@ -223,7 +223,7 @@ class TokenSocketProvider(TokenProvider):
         )
 
 
-def build_token_provider(settings: "Settings") -> TokenProvider:  # type: ignore[name-defined]  # noqa: F821
+def build_token_provider(settings: "Settings") -> TokenProvider:  # type: ignore[name-defined]  # noqa: F821 - "Settings" is a by-design string forward-ref, never evaluated
     """Select appropriate TokenProvider from Settings.
     Priority: TokenSocket > TokenCommand > PAT > anonymous.
 

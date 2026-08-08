@@ -9,7 +9,8 @@ from datetime import datetime, timezone
 import httpx
 import psycopg
 
-from .api_utils import API, _GitHubAuth, _api_pages, _api_pages_gen
+from . import db
+from .api_utils import API, _api_pages, _api_pages_gen, _GitHubAuth
 from .chunk_buffer import ChunkBuffer
 from .chunking import detect_language, split_issue_text
 from .config import IndexBudget, Settings
@@ -20,7 +21,6 @@ from .db import (
     insert_chunk,
     set_cursor,
 )
-from . import db
 from .embedding import Embedder
 from .github_auth import TokenProvider
 from .sync_utils import _clean_text, _is_bot, _should_index
@@ -275,7 +275,7 @@ def _sync_pr_reviews(
         })
 
         if do_index and body and _should_index(is_bot, author, settings):
-            assert embedder is not None  # guaranteed by do_index=True
+            assert embedder is not None  # noqa: S101 - guaranteed by do_index=True
             _index_item(
                 settings, conn, embedder,
                 chunk_key=f"pr_review_submission:{repo}:{issue_no}:r{rid}",
@@ -342,7 +342,7 @@ def _fetch_pr_reviews_parallel(
                                 do_index=False,
                             )
                             count += 1
-                        except Exception as exc:
+                        except Exception as exc:  # noqa: BLE001 - review fetch failure logged; batch continues
                             log.warning(
                                 "PR #%d review fetch failed, continuing: %s", no, exc,
                             )
@@ -357,7 +357,7 @@ def _fetch_pr_reviews_parallel(
         for future in as_completed(futures):
             try:
                 n += future.result()
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - batch failure logged; continues
                 log.warning("PR review batch fetch failed: %s", exc)
     return n
 

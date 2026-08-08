@@ -152,7 +152,7 @@ def run_ingest(env: dict[str, str], *args: str) -> subprocess.CompletedProcess[s
     # check=False: the caller asserts on the return code (the wrapper's exit
     # status is the contract under test), so a non-zero exit is not an error
     # here.
-    return subprocess.run(
+    return subprocess.run(  # noqa: S603 - integration harness runs the real ingest.sh; its exit code is the contract under test
         [str(INGEST_SH), *args],
         cwd=REPO_ROOT,
         env=env,
@@ -226,7 +226,7 @@ def test_exit_status_reaches_caller_unchanged(ingest_env: tuple) -> None:
 def test_two_immediate_runs_write_distinct_files(ingest_env: tuple) -> None:
     env, logdir, _ = ingest_env
     procs = [
-        subprocess.Popen(
+        subprocess.Popen(  # noqa: S603 - integration harness runs the real ingest.sh
             [str(INGEST_SH), "run", "--only-dev"],
             cwd=REPO_ROOT,
             env=env,
