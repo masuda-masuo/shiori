@@ -350,7 +350,7 @@ class Settings:
     )
     # MCP server (streamable HTTP)
     mcp_host: str = field(
-        default_factory=lambda: os.environ.get("SHIORI_MCP_HOST", "0.0.0.0")
+        default_factory=lambda: os.environ.get("SHIORI_MCP_HOST", "0.0.0.0")  # noqa: S104 - deliberate: served MCP endpoint binds all interfaces
     )
     # Positive only: this is a served endpoint (mcp_server.run() passes it
     # to mcp.run(port=...)), so 0 (bind an ephemeral random port) and

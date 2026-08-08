@@ -173,7 +173,9 @@ class Embedder:
         # Optional [onnx] extra -- absent by design in [dev] installs, so the
         # missing-import diagnostic is suppressed inline (config-file discovery
         # is cwd-dependent and cannot be relied on by every pyright caller).
-        from optimum.onnxruntime import ORTModelForFeatureExtraction  # pyright: ignore[reportMissingImports]
+        from optimum.onnxruntime import (  # pyright: ignore[reportMissingImports]
+            ORTModelForFeatureExtraction,
+        )
         from transformers import AutoTokenizer  # pyright: ignore[reportMissingImports]
 
         onnx_file = next(f for f in onnx_path.iterdir() if f.suffix == ".onnx")
@@ -190,7 +192,9 @@ class Embedder:
 
     def _init_st(self, model_name: str) -> None:
         # Optional [embed] extra (#179) -- same inline suppression as above.
-        from sentence_transformers import SentenceTransformer  # pyright: ignore[reportMissingImports]
+        from sentence_transformers import (  # pyright: ignore[reportMissingImports]
+            SentenceTransformer,
+        )
 
         # Resolve the device ourselves instead of letting the constructor
         # guess (issue #383): a failed CUDA acquisition must fall back to CPU,

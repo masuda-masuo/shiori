@@ -24,7 +24,7 @@ def _git(args: list[str], cwd: str | None = None) -> str:
     if cwd:
         cmd += ["-c", f"safe.directory={cwd}"]
     cmd += args
-    out = subprocess.run(
+    out = subprocess.run(  # noqa: S603 - list-form argv (no shell); args stay separate elements
         cmd,
         cwd=cwd,
         capture_output=True,

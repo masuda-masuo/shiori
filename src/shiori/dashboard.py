@@ -1,8 +1,10 @@
 import os
+
 from starlette.requests import Request
-from starlette.responses import JSONResponse, HTMLResponse
+from starlette.responses import HTMLResponse, JSONResponse
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
+
 
 def register_dashboard(mcp):
     from .config import load_settings
@@ -15,21 +17,22 @@ def register_dashboard(mcp):
 
     @mcp.custom_route("/api/search", methods=["GET"])
     async def api_search(request: Request):
-        from .mcp_server import _get_embedder, _conn, _resolve_repo_filter, settings
-        from . import search
         from starlette.concurrency import run_in_threadpool
-        
+
+        from . import search
+        from .mcp_server import _conn, _get_embedder, _resolve_repo_filter, settings
+
         query = request.query_params.get("query")
         if not query:
             return JSONResponse({"detail": "query is required"}, status_code=400)
-            
+
         search_type = request.query_params.get("type", "semantic")
         source_type = request.query_params.get("source_type")
         repo = request.query_params.get("repo")
         path_prefix = request.query_params.get("path_prefix")
         prog_lang = request.query_params.get("prog_lang")
         kind = request.query_params.get("kind")
-        
+
         limit_val = request.query_params.get("limit")
         limit = int(limit_val) if limit_val else None
 
@@ -59,28 +62,29 @@ def register_dashboard(mcp):
                         return search.semantic_search(
                             settings, conn, _get_embedder(), query, filters=filters, top_k=limit
                         )
-            
+
             results = await run_in_threadpool(run)
             return JSONResponse({"results": results})
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - API boundary: report as HTTP 500
             return JSONResponse({"detail": str(e)}, status_code=500)
 
     @mcp.custom_route("/api/read_file", methods=["GET"])
     async def api_read_file(request: Request):
-        from .mcp_server import read_file
         from starlette.concurrency import run_in_threadpool
-        
+
+        from .mcp_server import read_file
+
         path = request.query_params.get("path")
         repo = request.query_params.get("repo")
         start_line_val = request.query_params.get("start_line")
         end_line_val = request.query_params.get("end_line")
-        
+
         if not path:
             return JSONResponse({"detail": "path is required"}, status_code=400)
-            
+
         start_line = int(start_line_val) if start_line_val else None
         end_line = int(end_line_val) if end_line_val else None
-        
+
         try:
             result = await run_in_threadpool(
                 read_file,
@@ -90,24 +94,25 @@ def register_dashboard(mcp):
                 repo=repo,
             )
             return JSONResponse(result)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - API boundary: report as HTTP 500
             return JSONResponse({"detail": str(e)}, status_code=500)
 
     @mcp.custom_route("/api/issue", methods=["GET"])
     async def api_issue(request: Request):
-        from .mcp_server import read_issue
         from starlette.concurrency import run_in_threadpool
-        
+
+        from .mcp_server import read_issue
+
         number_val = request.query_params.get("number")
         repo = request.query_params.get("repo")
         exclude_noise_bots_val = request.query_params.get("exclude_noise_bots")
         exclude_noise_bots = exclude_noise_bots_val.lower() == "true" if exclude_noise_bots_val else False
-        
+
         if not number_val:
             return JSONResponse({"detail": "number is required"}, status_code=400)
-            
+
         number = int(number_val)
-        
+
         try:
             result = await run_in_threadpool(
                 read_issue,
@@ -116,33 +121,34 @@ def register_dashboard(mcp):
                 exclude_noise_bots=exclude_noise_bots,
             )
             return JSONResponse(result)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - API boundary: report as HTTP 500
             return JSONResponse({"detail": str(e)}, status_code=500)
 
     @mcp.custom_route("/api/report", methods=["GET"])
     async def api_report(request: Request):
-        from .mcp_server import report
         from starlette.concurrency import run_in_threadpool
-        
+
+        from .mcp_server import report
+
         template = request.query_params.get("template")
         repo = request.query_params.get("repo")
         path = request.query_params.get("path")
         kind = request.query_params.get("kind")
-        
+
         public_only_val = request.query_params.get("public_only")
         public_only = public_only_val.lower() == "true" if public_only_val else True
-        
+
         max_results_val = request.query_params.get("max_results")
         max_results = int(max_results_val) if max_results_val else 500
-        
+
         prog_lang = request.query_params.get("prog_lang")
-        
+
         max_chars_val = request.query_params.get("max_chars")
         max_chars = int(max_chars_val) if max_chars_val else 50000
-        
+
         if not template:
             return JSONResponse({"detail": "template is required"}, status_code=400)
-            
+
         try:
             result = await run_in_threadpool(
                 report,
@@ -158,7 +164,7 @@ def register_dashboard(mcp):
             return JSONResponse(result)
         except ValueError as e:
             return JSONResponse({"detail": str(e)}, status_code=400)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - API boundary: report as HTTP 500
             return JSONResponse({"detail": str(e)}, status_code=500)
 
     # fallback route if dashboard is not built

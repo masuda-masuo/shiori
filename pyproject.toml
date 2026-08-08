@@ -21,7 +21,7 @@ embed = ["sentence-transformers>=3.0"]
 # [embed] and [dev]: it pulls optimum + onnxruntime, which are not needed to
 # run the SentenceTransformer fallback or the test suite.
 onnx = ["optimum[onnxruntime]>=1.16"]
-dev = ["pytest>=8.0"]
+dev = ["pytest>=8.0", "ruff>=0.16"]
 
 [build-system]
 requires = ["setuptools>=68"]
@@ -42,3 +42,27 @@ shiori = ["dashboard_dist/**"]
 # the type gate as an error -- and works regardless of the caller's cwd
 # (pyright's config-file discovery is cwd-based and not every gate runner
 # starts inside the repo).
+
+[tool.ruff.lint]
+# Explicit select -- ruff's defaults drift across versions and must not be
+# relied on (issue #415). S and BLE are enabled because the existing
+# `# noqa` comments in src/ claim exactly those rules; the declarations
+# finally have a gate behind them. E501 is ignored mirroring sunaba's
+# line-length stance. UP / SIM / C4 / PL are a later decision.
+select = ["E", "F", "W", "I", "S", "BLE", "RUF100"]
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+# tests/: assert is the test idiom; S105/S108 flag fake fixture secrets and
+# fixed /tmp paths -- deliberately not real security-sensitive values.
+"tests/**" = ["S101", "S105", "S108"]
+
+# search.py / sync_issues.py: candidate queries are triple-quoted f-strings;
+# interpolations are only module constants (_RESULT_COLS,
+# PENDING_ISSUE_ITEMS_WHERE) and _filter_sql() fragments (whitelisted column
+# names + %s placeholders), so S608 is a false positive here. A same-line
+# noqa is impossible inside a triple-quoted string, hence the file-level
+# carve-out. The db.py / ingest.py sites (single-quoted f-strings) carry
+# inline noqa instead.
+"src/shiori/search.py" = ["S608"]
+"src/shiori/sync_issues.py" = ["S608"]

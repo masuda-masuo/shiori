@@ -82,7 +82,7 @@ def _extract_python_api_from_file(file_path: str, base_path: str) -> list[dict]:
         with open(file_path, "r", encoding="utf-8", errors="replace") as f:
             content = f.read()
         tree = ast.parse(content, filename=file_path)
-    except Exception:
+    except Exception:  # noqa: BLE001 - parse failure returns []; analysis must not stop execution
         return []
 
     rel_path = os.path.relpath(file_path, base_path)

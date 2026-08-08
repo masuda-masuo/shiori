@@ -23,8 +23,8 @@ from .embedding import Embedder
 from .github_auth import build_token_provider
 from .github_sync import ChunkBuffer, sync_code, sync_docs, sync_issues
 from .ingest import (
-    _acquire_repo_lock,
     _BULK_BUFFER_SIZE,
+    _acquire_repo_lock,
     _bulk_covers_all_repos,
     _bulk_run_completed_all_repos,
     _is_bulk_path,
@@ -239,7 +239,7 @@ def _do_sync(
                                     buffer=buffer if is_bulk else None,
                                 )
                                 if is_bulk:
-                                    assert buffer is not None
+                                    assert buffer is not None  # noqa: S101 - type-narrowing assert (guarded by is_bulk)
                                     buffer.flush()
                                     conn.commit()
                                 n_items = sync_issues(
@@ -247,7 +247,7 @@ def _do_sync(
                                     buffer=buffer if is_bulk else None,
                                 )
                                 if is_bulk:
-                                    assert buffer is not None
+                                    assert buffer is not None  # noqa: S101 - type-narrowing assert (guarded by is_bulk)
                                     buffer.flush()
                                     conn.commit()
                                 n_code = sync_code(
@@ -255,7 +255,7 @@ def _do_sync(
                                     buffer=buffer if is_bulk else None,
                                 )
                                 if is_bulk:
-                                    assert buffer is not None
+                                    assert buffer is not None  # noqa: S101 - type-narrowing assert (guarded by is_bulk)
                                     buffer.flush()
                                     conn.commit()
                                 finished_at = db.record_sync_run(
@@ -302,7 +302,7 @@ def _do_sync(
                                 if need_reconnect:
                                     try:
                                         conn.close()
-                                    except Exception:
+                                    except Exception:  # noqa: BLE001, S110 - close failure non-fatal; reconnecting anyway
                                         pass
                                     conn = _conn()
                                     log.warning(

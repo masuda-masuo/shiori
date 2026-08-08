@@ -16,33 +16,46 @@ from .pipeline import (
     _get_embedder,  # noqa: F401 — re-export for dashboard
     settings,
 )
-from .tools.registry import mcp
 from .tools.common import (
     _get_token_provider,  # noqa: F401 — re-export for tests
-    _validate_repo_name,  # noqa: F401 — re-export for tests
     _infer_repo_from_cwd,  # noqa: F401 — re-export for tests
+    _make_filters,  # noqa: F401 — re-export for tests
     _resolve_repo,  # noqa: F401 — re-export for tests
     _resolve_repo_filter,  # noqa: F401 — re-export for dashboard
     _resolve_repos,  # noqa: F401 — re-export for tests
-    _make_filters,  # noqa: F401 — re-export for tests
+    _validate_repo_name,  # noqa: F401 — re-export for tests
 )
+from .tools.registry import mcp
 
 log = logging.getLogger(__name__)
 
 from .tools import (  # noqa: E402, F401 — import registers @mcp.tool as side effect
-    search as _t_search, list_tree as _t_list_tree, read as _t_read,
-    pr as _t_pr, grep as _t_grep, report as _t_report, links as _t_links,
-    status as _t_status,
+    search as _t_search,
 )
+from .tools.grep import grep_search  # noqa: F401, E402
+from .tools.links import issue_links  # noqa: F401, E402
+from .tools.list_tree import list_tree  # noqa: F401, E402
+from .tools.pr import (  # noqa: F401, E402
+    _compute_pr_diff,
+    pr_changes,
+    pr_diff,
+    pr_review_comments,
+)
+from .tools.read import (  # noqa: F401, E402
+    _read_issue_single,
+    read_file,
+    read_issue,
+    read_pr_file,
+)
+from .tools.report import report  # noqa: F401, E402
+
 # Re-export for backward-compatible imports
-from .tools.search import semantic_search, keyword_search  # noqa: F401, E402
-from .tools.list_tree import list_tree                      # noqa: F401, E402
-from .tools.read import read_file, read_issue, read_pr_file, _read_issue_single  # noqa: F401, E402
-from .tools.pr import pr_changes, pr_diff, pr_review_comments, _compute_pr_diff  # noqa: F401, E402
-from .tools.grep import grep_search                          # noqa: F401, E402
-from .tools.report import report                             # noqa: F401, E402
-from .tools.links import issue_links                         # noqa: F401, E402
-from .tools.status import status, _build_warnings, _stale_threshold_seconds  # noqa: F401, E402
+from .tools.search import keyword_search, semantic_search  # noqa: F401, E402
+from .tools.status import (  # noqa: F401, E402
+    _build_warnings,
+    _stale_threshold_seconds,
+    status,
+)
 
 
 def ingest(rebuild: bool = False, repo: str | None = None) -> dict[str, Any]:

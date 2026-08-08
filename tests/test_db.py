@@ -16,8 +16,6 @@ from shiori.schema import (
     migrate_light,
 )
 
-
-
 # ── migrate_light / create_heavy_indexes / drop_heavy_indexes（issue #72）──
 
 class TestMigrateLight:
@@ -371,6 +369,7 @@ class TestGetRepoIndexState:
 
     def test_returns_row_when_exists(self):
         from datetime import datetime, timezone
+
         from shiori.db import get_repo_index_state
 
         conn, cursor = self._mock_conn(
@@ -410,6 +409,7 @@ class TestGetSyncRun:
 
     def test_returns_sync_info_when_exists(self):
         from datetime import datetime, timezone
+
         from shiori.db import get_sync_run
 
         finished_at = datetime(2026, 7, 25, 6, 0, 0, tzinfo=timezone.utc)

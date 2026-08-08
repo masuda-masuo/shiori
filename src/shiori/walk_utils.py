@@ -11,7 +11,6 @@ import os
 
 from .config import Settings
 
-
 # Document extensions (case-insensitive). Excluded from walk; handled by doc_files table
 _DOC_EXTENSIONS = {".md", ".mdx", ".markdown"}
 
@@ -74,7 +73,7 @@ def _looks_minified(content: bytes) -> bool:
     """Heuristic: a single very long line strongly suggests a minified bundle."""
     try:
         sample = content[:8192].decode("utf-8", errors="ignore")
-    except Exception:
+    except Exception:  # noqa: BLE001 - heuristic failure returns False
         return False
     return any(len(line) > _MINIFIED_LINE_THRESHOLD for line in sample.splitlines())
 

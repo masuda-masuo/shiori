@@ -449,7 +449,7 @@ def count_pending_issue_items(conn: psycopg.Connection, repo: str) -> int:
     """
     with conn.cursor() as cur:
         cur.execute(
-            f"SELECT count(*) FROM issue_items "
+            f"SELECT count(*) FROM issue_items "  # noqa: S608 - interpolates only the module constant; values are %s params
             f"WHERE repo = %s AND {PENDING_ISSUE_ITEMS_WHERE}",
             (repo,),
         )
@@ -467,7 +467,7 @@ def count_pending_issue_items_for_repos(
     """
     with conn.cursor() as cur:
         cur.execute(
-            f"SELECT count(*) FROM issue_items "
+            f"SELECT count(*) FROM issue_items "  # noqa: S608 - interpolates only the module constant; values are %s params
             f"WHERE repo = ANY(%s) AND {PENDING_ISSUE_ITEMS_WHERE}",
             (list(repos),),
         )

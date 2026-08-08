@@ -9,7 +9,6 @@ import pytest
 
 from shiori.mcp_server import _do_sync, ingest
 
-
 # ===================================================================
 # _do_sync: allowlist validation
 # ===================================================================
@@ -1309,7 +1308,7 @@ class _RecordingExecutor:
         f: Future = Future()
         try:
             f.set_result(fn(*args, **kwargs))
-        except BaseException as exc:
+        except BaseException as exc:  # noqa: BLE001 - must mirror ThreadPoolExecutor: forward any exception to the Future
             f.set_exception(exc)
         return f
 

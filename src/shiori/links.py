@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import re
 
-
 # Type precedence for cross-reference merging (closes > duplicate > refs > mention)
 _TYPE_PRECEDENCE: dict[str, int] = {
     "closes": 0,
