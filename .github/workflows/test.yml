@@ -41,6 +41,8 @@ jobs:
   test:
     runs-on: ubuntu-latest
     strategy:
+      # 3.11の失敗で3.12を巻き添えキャンセルしない（レッグごとに独立して報告する）
+      fail-fast: false
       matrix:
         python-version: ["3.11", "3.12"]
     timeout-minutes: 10
