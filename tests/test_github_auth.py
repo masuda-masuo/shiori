@@ -224,6 +224,201 @@ def test_token_socket_provider_fallback(clean_env, monkeypatch):
 
 
 #
+# Bounded retry for transient mint-socket failures (issue #413)
+#
+
+
+def _patch_sleep(monkeypatch):
+    """Intercept time.sleep so the suite never actually sleeps; returns a
+    recorder list of the sleep arguments."""
+    sleeps = []
+
+    def _sleep(seconds):
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(github_auth.time, "sleep", _sleep)
+    return sleeps
+
+
+def test_token_socket_retry_transient_oserror(clean_env, monkeypatch):
+    """AC1: attempt 1 raises OSError, attempt 2 succeeds -> token returned,
+    even with no cached token."""
+    attempts = {"n": 0}
+    sleeps = _patch_sleep(monkeypatch)
+
+    class FlakySocket:
+        def __init__(self, family, sock_type):
+            self._timeout = None
+            self._data = b"ghs_retried\n"
+
+        def settimeout(self, timeout):
+            self._timeout = timeout
+
+        def connect(self, path):
+            attempts["n"] += 1
+            if attempts["n"] == 1:
+                raise OSError(f"connection refused: {path}")
+
+        def recv(self, bufsize):
+            chunk = self._data[:bufsize]
+            self._data = self._data[bufsize:]
+            return chunk
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(github_auth.socket, "socket", FlakySocket)
+    p = TokenSocketProvider("/run/shiori/mint.sock")
+    assert p.get_token() == "ghs_retried"
+    assert attempts["n"] == 2
+    assert sleeps == [0.5]
+
+
+def test_token_socket_retry_transient_empty_response(clean_env, monkeypatch):
+    """AC2: attempt 1 returns 0 bytes, attempt 2 returns a token -> success."""
+    attempts = {"n": 0}
+    sleeps = _patch_sleep(monkeypatch)
+
+    class FlakySocket:
+        def __init__(self, family, sock_type):
+            self._timeout = None
+            attempts["n"] += 1
+            self._data = b"" if attempts["n"] == 1 else b"ghs_second\n"
+
+        def settimeout(self, timeout):
+            self._timeout = timeout
+
+        def connect(self, path):
+            pass
+
+        def recv(self, bufsize):
+            chunk = self._data[:bufsize]
+            self._data = self._data[bufsize:]
+            return chunk
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(github_auth.socket, "socket", FlakySocket)
+    p = TokenSocketProvider("/run/shiori/mint.sock")
+    assert p.get_token() == "ghs_second"
+    assert attempts["n"] == 2
+    assert sleeps == [0.5]
+
+
+def test_token_socket_retry_exhausted_raises_without_cache(clean_env, monkeypatch, caplog):
+    """AC3a/AC4: all 3 attempts fail with no cached token -> RuntimeError with
+    the existing message; exactly 3 attempts; sleeps are 0.5 then 1.0 and none
+    after the last attempt; each failed attempt logs a warning carrying the
+    attempt number."""
+    attempts = {"n": 0}
+    sleeps = _patch_sleep(monkeypatch)
+
+    class AlwaysFailSocket:
+        def __init__(self, family, sock_type):
+            self._timeout = None
+
+        def settimeout(self, timeout):
+            self._timeout = timeout
+
+        def connect(self, path):
+            attempts["n"] += 1
+            raise OSError(f"connection refused: {path}")
+
+        def recv(self, bufsize):
+            raise OSError("read error")
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(github_auth.socket, "socket", AlwaysFailSocket)
+    p = TokenSocketProvider("/run/shiori/mint.sock")
+    with caplog.at_level("WARNING"), pytest.raises(RuntimeError) as exc_info:
+        p.get_token()
+    assert str(exc_info.value) == (
+        "token socket /run/shiori/mint.sock failed and no cached token available"
+    )
+    assert attempts["n"] == 3
+    assert sleeps == [0.5, 1.0]
+    attempts_logged = [r.message for r in caplog.records if "attempt" in r.message]
+    assert len(attempts_logged) == 3
+    assert any("attempt 1/3" in m for m in attempts_logged)
+    assert any("attempt 2/3" in m for m in attempts_logged)
+    assert any("attempt 3/3" in m for m in attempts_logged)
+
+
+def test_token_socket_retry_exhausted_falls_back_to_cache(clean_env, monkeypatch, caplog):
+    """AC3b: all 3 attempts fail but a cached token is inside HARD_EXPIRY ->
+    the cached token is returned."""
+    attempts = {"n": 0}
+    sleeps = _patch_sleep(monkeypatch)
+
+    class AlwaysFailSocket:
+        def __init__(self, family, sock_type):
+            self._timeout = None
+
+        def settimeout(self, timeout):
+            self._timeout = timeout
+
+        def connect(self, path):
+            attempts["n"] += 1
+            raise OSError(f"connection refused: {path}")
+
+        def recv(self, bufsize):
+            raise OSError("read error")
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(github_auth.socket, "socket", AlwaysFailSocket)
+    p = TokenSocketProvider("/run/shiori/mint.sock")
+    # prime cache: stale enough that get_token() re-fetches, but still inside
+    # HARD_EXPIRY so the fallback can reuse it
+    p._token = "ghs_old"
+    p._fetched_at = time.time() - (TokenSocketProvider.HARD_EXPIRY - 60)
+    with caplog.at_level("WARNING"):
+        assert p.get_token() == "ghs_old"
+    assert attempts["n"] == 3
+    assert sleeps == [0.5, 1.0]
+    assert any("reusing cached token" in r.message for r in caplog.records)
+
+
+def test_token_socket_retry_real_unix_socket(clean_env, tmp_path):
+    """AC5: a real AF_UNIX socket bound in a tmp dir with a tiny in-test server
+    thread; the first connection is closed with no data, the second serves a
+    token -> success through the real connect/read path (no mocked socket)."""
+    import socket as _socket
+    import threading
+
+    sock_path = str(tmp_path / "mint.sock")
+    server = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+    server.bind(sock_path)
+    server.listen(1)
+    connections = {"n": 0}
+
+    def serve():
+        for _ in range(2):
+            conn, _ = server.accept()
+            connections["n"] += 1
+            if connections["n"] == 1:
+                # empty response: the mint-side keyring race (mcp-launcher #45/#46)
+                conn.close()
+            else:
+                conn.sendall(b"ghs_real_socket\n")
+                conn.close()
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    try:
+        p = TokenSocketProvider(sock_path)
+        assert p.get_token() == "ghs_real_socket"
+        assert connections["n"] == 2
+    finally:
+        server.close()
+        thread.join(timeout=5)
+
+
+#
 # Provider name attribute (issue #188): shiori_status reports this via
 # build_token_provider(settings).name so it can surface the *actual* provider
 # selected, not just what the raw config implies.
