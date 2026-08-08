@@ -55,6 +55,9 @@ jobs:
       - name: 依存関係のインストール
         run: |
           pip install -e .[dev]
+      - name: lint (ruff)
+        run: |
+          ruff check src/ tests/
       - name: pytest の実行
         run: |
           pytest -v --tb=short
