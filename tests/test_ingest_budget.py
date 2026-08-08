@@ -22,6 +22,7 @@ written, never on mock echo.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
@@ -469,32 +470,36 @@ class TestRunIndexBudgetCompletion:
 
         repo = "o/a"  # referenced by _FakeBudget.exhausted's closure
 
-        with (
-            patch("shiori.ingest.db.connect", return_value=mock_conn),
-            patch("shiori.ingest.schema.migrate"),
-            patch("shiori.ingest.schema.migrate_light"),
-            patch("shiori.ingest._is_bulk_path", return_value=bulk),
-            patch("shiori.ingest._bulk_covers_all_repos", return_value=True),
-            patch("shiori.ingest._bulk_run_completed_all_repos",
-                  side_effect=lambda completed, s: set(completed) == set(s.repos)),
-            patch("shiori.ingest.schema.drop_heavy_indexes"),
-            patch("shiori.ingest.schema.create_heavy_indexes") as mock_create,
-            patch("shiori.ingest._acquire_repo_lock", return_value=True),
-            patch("shiori.ingest._release_repo_lock"),
-            patch("shiori.ingest.build_token_provider", return_value=MagicMock()),
-            patch("shiori.ingest.Embedder", return_value=MagicMock()),
-            patch("shiori.ingest.index_docs", return_value=1),
-            patch("shiori.ingest.index_issues", return_value=2),
-            patch("shiori.ingest.index_code", return_value=3),
-            patch("shiori.ingest._index_budget", return_value=budget),
-            patch("shiori.ingest.db.count_pending_issue_items",
-                  side_effect=lambda conn, r: pending_counts.get(r, 0)),
-            patch("shiori.ingest.db.count_pending_issue_items_for_repos",
-                  return_value=0),
-            patch("shiori.ingest.db.record_sync_run") as mock_run,
-            patch("shiori.ingest.db.record_sync_progress") as mock_progress,
-            patch("shiori.ingest.db.record_sync_attempt") as mock_attempt,
-        ):
+        # ExitStack instead of one parenthesized with: 20+ context managers
+        # exceed CPython 3.11's static block-nesting limit at compile time
+        # ("too many statically nested blocks"; fine on 3.12+).
+        with contextlib.ExitStack() as stack:
+            enter = stack.enter_context
+            enter(patch("shiori.ingest.db.connect", return_value=mock_conn))
+            enter(patch("shiori.ingest.schema.migrate"))
+            enter(patch("shiori.ingest.schema.migrate_light"))
+            enter(patch("shiori.ingest._is_bulk_path", return_value=bulk))
+            enter(patch("shiori.ingest._bulk_covers_all_repos", return_value=True))
+            enter(patch("shiori.ingest._bulk_run_completed_all_repos",
+                        side_effect=lambda completed, s: set(completed) == set(s.repos)))
+            enter(patch("shiori.ingest.schema.drop_heavy_indexes"))
+            mock_create = enter(patch("shiori.ingest.schema.create_heavy_indexes"))
+            enter(patch("shiori.ingest._acquire_repo_lock", return_value=True))
+            enter(patch("shiori.ingest._release_repo_lock"))
+            enter(patch("shiori.ingest.build_token_provider", return_value=MagicMock()))
+            enter(patch("shiori.ingest.Embedder", return_value=MagicMock()))
+            enter(patch("shiori.ingest.index_docs", return_value=1))
+            enter(patch("shiori.ingest.index_issues", return_value=2))
+            enter(patch("shiori.ingest.index_code", return_value=3))
+            enter(patch("shiori.ingest._index_budget", return_value=budget))
+            enter(patch("shiori.ingest.db.count_pending_issue_items",
+                        side_effect=lambda conn, r: pending_counts.get(r, 0)))
+            enter(patch("shiori.ingest.db.count_pending_issue_items_for_repos",
+                        return_value=0))
+            mock_run = enter(patch("shiori.ingest.db.record_sync_run"))
+            mock_progress = enter(patch("shiori.ingest.db.record_sync_progress"))
+            mock_attempt = enter(patch("shiori.ingest.db.record_sync_attempt"))
+
             run_index(settings=settings)  # must not raise on truncation
 
         return {

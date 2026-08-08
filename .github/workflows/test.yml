@@ -12,6 +12,11 @@ on:
       - "tests/**"
       - "pyproject.toml"
       - ".github/workflows/test.yml"
+      - "scripts/**"
+      - "docker-compose.yml"
+      - "docker-compose.gpu.yml"
+      - "docker/**"
+      - ".env.example"
   push:
     branches: [main]
     paths:
@@ -19,6 +24,11 @@ on:
       - "tests/**"
       - "pyproject.toml"
       - ".github/workflows/test.yml"
+      - "scripts/**"
+      - "docker-compose.yml"
+      - "docker-compose.gpu.yml"
+      - "docker/**"
+      - ".env.example"
 
 # GITHUB_TOKEN を最小権限に固定する。リポジトリ既定は既に read-only だが、
 # 明示しておけば既定が変わってもこのワークフローは最小のままになる
@@ -30,15 +40,20 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    strategy:
+      # 3.11の失敗で3.12を巻き添えキャンセルしない（レッグごとに独立して報告する）
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python-version }}
+          cache: 'pip'
       - name: 依存関係のインストール
         run: |
-          pip install torch
           pip install -e .[dev]
       - name: pytest の実行
         run: |
