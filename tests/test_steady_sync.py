@@ -220,13 +220,17 @@ class TestStatusAgeStalenessEndToEnd:
     multiplier itself: with a x1 formula it would start warning.
     """
 
-    def _run_status(self, age_seconds):
+    def _run_status(self, age_seconds, repo=None):
         with (
             patch("shiori.tools.status._conn"),
             patch("shiori.tools.status.settings") as mock_settings,
+            patch("shiori.tools.status._validate_repo_name", side_effect=lambda r: r),
             patch("shiori.tools.status.db.get_sync_runs",
                   return_value={"o/dev": {"age_seconds": age_seconds}}),
             patch("shiori.tools.status.db.get_all_repo_index_state", return_value={}),
+            patch("shiori.tools.status.db.get_sync_run",
+                  return_value={"age_seconds": age_seconds}),
+            patch("shiori.tools.status.db.get_repo_index_state", return_value={}),
             patch("shiori.tools.status.db.get_chunk_counts", return_value={}),
             patch("shiori.tools.status.db.get_issue_item_count", return_value=0),
             patch("shiori.tools.status.db.get_cursors",
@@ -238,7 +242,7 @@ class TestStatusAgeStalenessEndToEnd:
             mock_settings.sync_interval_seconds = 5
             mock_settings.dev_sync_interval_seconds = 900
             mock_settings.ref_sync_interval_seconds = 86400
-            return status()
+            return status(repo=repo)
 
     def test_warns_above_role_derived_threshold(self):
         result = self._run_status(age_seconds=2000)
@@ -246,6 +250,10 @@ class TestStatusAgeStalenessEndToEnd:
         assert any("hours since last sync" in w for w in warnings)
 
     def test_no_warning_between_interval_and_threshold(self):
-        result = self._run_status(age_seconds=1500)
+        # The no-repo call filters healthy repos out of `repos` (issue
+        # #423), so the no-warning case is asserted through the
+        # repo-specified path -- the response shape the issue freezes as
+        # unchanged.
+        result = self._run_status(age_seconds=1500, repo="o/dev")
         warnings = result["repos"]["o/dev"]["warnings"]
         assert not any("hours since last sync" in w for w in warnings)
