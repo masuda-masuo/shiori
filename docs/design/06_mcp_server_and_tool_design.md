@@ -19,7 +19,7 @@ Expose retrieval and inspection functionality as Model Context Protocol (MCP) to
 *   `shiori_issue_links(number, repo?)`: Analyzes issue descriptions and comments to identify cross-references (such as closes, duplicate, refs, or mentions), returning target title and state (Issue #97).
 *   `shiori_read_pr_file(number, path, range?, repo?)`: Fetches the file content at the head commit of a PR by pulling a temporary ref (Issue #81).
 *   `shiori_grep(pattern, repo?, path?, regex?, ignore_case?, max_results?)`: Performs line-level ripgrep search inside cloned repositories. Designed as a Stage-2 search. Setting `repo="*"` executes cross-repository searches (Issue #146, #151).
-*   `shiori_status()`: Queries system health, sync state cursors, and database row allocations per repository (Issue #22, #31). Reports `auto_sync_running` thread health, token provider strategies, and warning logs (Issue #187, #196).
+*   `shiori_status(repo?)`: Queries system health, sync state cursors, and database row allocations per repository (Issue #22, #31). Reports `auto_sync_running` thread health, token provider strategies, and warning logs (Issue #187, #196). **Omitting `repo` returns an aggregate summary, not every record** (Issue #423): `summary` carries the fleet-wide counts and `repos` carries full per-repo records only for repos that are *not* healthy (most severe first, up to a size budget; the rest are named in `summary`). Passing `repo` returns that one repo's full record unchanged. See [Status Aggregate Default](#31-status-aggregate-default-issue-423).
 *   `shiori_report(template, repo?, path?, kind?, public_only?, max_results?, prog_lang?, max_chars?)`: Generates a structured report from the on-disk clone (`_ensure_phase1` refreshes it first; the `api_reference` template additionally reads the search index for cross-linking). Templates: `stats`, `module_tree`, `symbol_index`, `api_reference` (Issue #279).
 
 > **v2.0 Deprecation**: The `shiori_ingest` MCP tool has been deprecated. Synchronization is managed via CLI (`python -m shiori ingest`) or background polling (`SHIORI_SYNC_INTERVAL_SECONDS`).
@@ -37,6 +37,51 @@ The `warnings` list in `shiori_status` automatically identifies the following sy
 | Token Provider initialization error | Token configurations are broken (reports `token_provider: "error"`, Issue #193). |
 | `chunks["issue"] + chunks["pr_review"] < items_in_db // 2` | Matched chunks are abnormally low compared to database items. Indicates indexing drops. |
 | Missing categories in sync state | Incremental ingestion is incomplete. |
+
+### 3.1 Status Aggregate Default (Issue #423)
+
+`shiori_status()` **without** `repo` is the tool's dominant call (91% of recorded
+calls omit it), and it was the one that did not fit: a full record per repo came to
+53,836 characters on the 62-repo deployment. The no-repo call therefore returns an
+aggregate instead:
+
+*   `summary` -- total / healthy / unhealthy repo counts, a per-condition breakdown,
+    the `pending_count` total across all repos, and the single oldest repo by
+    `age_seconds` (name, role, age).
+*   `repos` -- full records for **unhealthy repos only**, each carrying exactly the
+    fields it has always carried. Empty when every repo is healthy.
+*   `sync_intervals`, `clone_refresh_debounce_seconds` and `token_provider` are
+    unchanged, so existing consumers keep working.
+
+A repo is **unhealthy** when any of these holds; otherwise it is healthy and is
+counted in `summary` rather than listed:
+
+| Condition | Meaning |
+|---|---|
+| `warnings` non-empty | Any trigger from the table above fired. |
+| `index_stale` | The on-disk clone is ahead of the indexed content. |
+| `never_indexed` | A clone exists but was never indexed. |
+| `consecutive_failures > 0` | Sync attempts are failing. |
+| `pending_count` truthy | An index run left issue items unprocessed. |
+
+The no-repo response is **size-bounded even when the fleet degrades** --
+the case that matters most.  Unhealthy records are emitted in severity
+order (failing syncs first, then never-indexed, then stale, then pending,
+then plain warnings; longest-since-sync first within a class) until the
+serialized `repos` payload would exceed the 8,000-char budget
+(`_NO_REPO_REPOS_CHAR_BUDGET`); every unhealthy repo cut off by the
+budget is named in `summary.omitted_repo_names`, with the count in
+`summary.omitted_repos` -- explicit, never silently truncated.  Without
+this cap the response re-inflates to ~54k chars exactly when the fleet is
+worst-case (e.g. a token-provider outage, Issue #193, or a sync-host
+failure aging every repo past its threshold), i.e. when an operator is
+most likely to call the no-repo form.  The trade-off is deliberate: on a
+badly degraded fleet `repos` is a subset of the unhealthy repos, and the
+omitted ones are named so the operator can still act on each of them.
+
+Making `repo` mandatory was rejected: it would force callers into one call per
+configured repo. Passing `repo` still returns that repo's full record whether it is
+healthy or not, and that response shape is unchanged (no `summary` key).
 
 ---
 
@@ -77,7 +122,7 @@ per-tool docstrings.
 | ②a GitHub REST API | `shiori_read_issue`, `shiori_pr_review_comments`, `shiori_issue_links` | GitHub REST API, live on every call; `issue_items` only as optional enrichment |
 | ②b PR-head git fetch | `shiori_pr_changes`, `shiori_pr_diff`, `shiori_read_pr_file` | own `git fetch` of the PR head/base ref against the on-disk clone -- neither the Phase 1 refresh nor the REST API |
 | ③ clone read | `shiori_read_file`, `shiori_grep`, `shiori_list_tree` | clone on disk (`_ensure_phase1`); exception: `shiori_list_tree(source_type='doc')` reads the `doc_files` index instead of walking the clone |
-| ④ state | `shiori_status`, `shiori_report` | DB metadata (`shiori_report` also refreshes the clone, and reads the search index for its `api_reference` template) |
+| ④ state | `shiori_status`, `shiori_report` | DB metadata (`shiori_status` without `repo` returns an aggregate summary plus full records for the most severe unhealthy repos up to a size budget, Issue #423; `shiori_report` also refreshes the clone, and reads the search index for its `api_reference` template) |
 
 Frozen design decisions (ratified in Issue #340/#347; do not re-litigate without a new issue):
 
