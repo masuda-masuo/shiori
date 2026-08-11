@@ -501,3 +501,116 @@ class TestReadIssueLabels:
 
         assert result["labels"] == ["question"]
         assert len(result["items"]) == 2  # body + comment
+
+
+# Issue #421: issue_number / issue_no aliases for number -----------------
+
+class TestReadIssueNumberAliases:
+    """read_issue accepts issue_number / issue_no as aliases for number."""
+
+    def _patched_client(self, mock_gh, issue_data):
+        client = MagicMock()
+        mock_gh.return_value.__enter__.return_value = client
+        client.get.side_effect = [
+            _mock_api_response(issue_data),
+            _mock_api_response([]),
+        ]
+        return client
+
+    def test_issue_number_string_alias(self):
+        """Observed failure shape: {"issue_number": "199", "repo": "kusabi"}."""
+        issue_data = _mock_issue_response(number=199, title="Aliased")
+        with patch("shiori.tools.read._github_client") as mock_gh:
+            self._patched_client(mock_gh, issue_data)
+            with patch("shiori.tools.read._resolve_repo", return_value="o/kusabi"):
+                result = read_issue(issue_number="199", repo="kusabi")
+        assert result["number"] == 199
+        assert result["title"] == "Aliased"
+
+    def test_issue_number_int_alias(self):
+        """Observed failure shape: {"issue_number": 45, "repo": "masuda-masuo/sagasu"}."""
+        issue_data = _mock_issue_response(number=45)
+        with patch("shiori.tools.read._github_client") as mock_gh:
+            self._patched_client(mock_gh, issue_data)
+            with patch("shiori.tools.read._resolve_repo", return_value="masuda-masuo/sagasu"):
+                result = read_issue(issue_number=45, repo="masuda-masuo/sagasu")
+        assert result["number"] == 45
+        assert result["repo"] == "masuda-masuo/sagasu"
+
+    def test_issue_no_string_alias(self):
+        """Observed failure shape: {"issue_no": "82", "repo": "masuda-masuo/kusabi"}."""
+        issue_data = _mock_issue_response(number=82)
+        with patch("shiori.tools.read._github_client") as mock_gh:
+            self._patched_client(mock_gh, issue_data)
+            with patch("shiori.tools.read._resolve_repo", return_value="masuda-masuo/kusabi"):
+                result = read_issue(issue_no="82", repo="masuda-masuo/kusabi")
+        assert result["number"] == 82
+
+    def test_alias_reaches_single_reader_as_int(self):
+        """Alias values are coerced and forwarded exactly like number."""
+        with patch("shiori.tools.read._read_issue_single") as mock_single, \
+             patch("shiori.tools.read._resolve_repo", return_value="o/r"):
+            mock_single.return_value = {"repo": "o/r", "number": 199}
+            read_issue(issue_number="199")
+        mock_single.assert_called_once_with("o/r", 199, False)
+
+    def test_conflicting_number_and_issue_number_raises(self):
+        """Different values for number and issue_number name the conflict."""
+        with patch("shiori.tools.read._resolve_repo", return_value="o/r"):
+            with pytest.raises(ValueError) as exc:
+                read_issue(number=1, issue_number=2)
+        msg = str(exc.value)
+        assert "number=1" in msg
+        assert "issue_number=2" in msg
+
+    def test_conflicting_issue_number_and_issue_no_raises(self):
+        with patch("shiori.tools.read._resolve_repo", return_value="o/r"):
+            with pytest.raises(ValueError) as exc:
+                read_issue(issue_number=7, issue_no=8)
+        msg = str(exc.value)
+        assert "issue_number=7" in msg
+        assert "issue_no=8" in msg
+
+    def test_equal_values_pass(self):
+        """Equal values across aliases (including "42" vs 42) are accepted."""
+        with patch("shiori.tools.read._read_issue_single") as mock_single, \
+             patch("shiori.tools.read._resolve_repo", return_value="o/r"):
+            mock_single.return_value = {"repo": "o/r", "number": 42}
+            read_issue(number=42, issue_number="42", issue_no=42)
+        mock_single.assert_called_once_with("o/r", 42, False)
+
+    def test_no_args_still_raises_specify_number(self):
+        """The 'nothing supplied' error is unchanged by the aliases."""
+        with patch("shiori.tools.read._resolve_repo", return_value="o/r"):
+            with pytest.raises(ValueError, match="specify number or numbers"):
+                read_issue()
+
+    def test_alias_with_numbers_is_mutually_exclusive(self):
+        """An alias counts as number for the number/numbers exclusivity check."""
+        with patch("shiori.tools.read._resolve_repo", return_value="o/r"):
+            with pytest.raises(ValueError, match="cannot be specified together"):
+                read_issue(issue_number=42, numbers=[42, 43])
+
+    def test_non_numeric_alias_raises(self):
+        """A non-numeric alias value fails with a message naming the parameter."""
+        with patch("shiori.tools.read._resolve_repo", return_value="o/r"):
+            with pytest.raises(ValueError, match="issue_number must be an integer"):
+                read_issue(issue_number="not-a-number")
+
+    def test_alias_honours_exclude_noise_bots(self):
+        """Aliases behave exactly like number for the other parameters."""
+        with patch("shiori.tools.read._read_issue_single") as mock_single, \
+             patch("shiori.tools.read._resolve_repo", return_value="o/r"):
+            mock_single.return_value = {"repo": "o/r", "number": 82}
+            read_issue(issue_no=82, exclude_noise_bots=True)
+        mock_single.assert_called_once_with("o/r", 82, True)
+
+    def test_aliases_visible_in_tool_schema(self):
+        """The MCP-visible tool exposes the aliases; number stays canonical."""
+        import inspect
+
+        params = inspect.signature(read_issue).parameters
+        assert "number" in params
+        assert "issue_number" in params
+        assert "issue_no" in params
+        assert "issue_numbers" not in params  # no alias for the batch parameter
