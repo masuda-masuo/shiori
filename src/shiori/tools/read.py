@@ -193,15 +193,55 @@ def _read_issue_single(target: str, number: int, exclude_noise_bots: bool) -> di
     }
 
 
+def _coerce_number(value: Any, param: str) -> int:
+    """Coerce a caller-supplied issue number to int ("199" -> 199)."""
+    if isinstance(value, int):
+        return value
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        raise ValueError(f"{param} must be an integer (got {value!r})")
+
+
+def _resolve_number(
+    number: int | None,
+    issue_number: int | None,
+    issue_no: int | None,
+) -> int | None:
+    """Fold the issue_number/issue_no aliases into the canonical number (issue #421).
+
+    GitHub REST and gh both spell this issue_number, so callers guess it; the
+    aliases are accepted rather than coached against. Conflicting values raise.
+    """
+    supplied = {
+        param: _coerce_number(value, param)
+        for param, value in (
+            ("number", number),
+            ("issue_number", issue_number),
+            ("issue_no", issue_no),
+        )
+        if value is not None
+    }
+    if len(set(supplied.values())) > 1:
+        detail = ", ".join(f"{param}={value}" for param, value in supplied.items())
+        raise ValueError(
+            f"conflicting issue numbers: {detail}; specify only one (number is canonical)"
+        )
+    return next(iter(supplied.values()), None)
+
+
 @mcp.tool(name="shiori_read_issue")
 def read_issue(
     number: int | None = None,
     repo: str | None = None,
     exclude_noise_bots: bool = False,
     numbers: list[int] | None = None,
+    issue_number: int | None = None,
+    issue_no: int | None = None,
 ) -> dict[str, Any] | list[dict[str, Any]]:
     """Fetch full issue/PR thread chronologically (body + comments + review).
     Data sources: GitHub API (live); no clone/index read. Does not call _ensure_phase1.
+    number also accepts the aliases issue_number / issue_no (same meaning; batch numbers does not).
     Bot comments included (identifiable via is_bot).
     Each item has a state field: for kind='pr_review' it is the review
     submission state (APPROVED/COMMENTED/CHANGES_REQUESTED); for other
@@ -209,6 +249,7 @@ def read_issue(
     Items have a kind field: 'issue', 'pr', 'comment', 'pr_review', or
     'pr_review_comment'.
     An unresolvable repo raises immediately with the indexed-repo list."""
+    number = _resolve_number(number, issue_number, issue_no)
     if number is not None and numbers is not None:
         raise ValueError("number and numbers cannot be specified together")
     target = _resolve_repo(repo)
