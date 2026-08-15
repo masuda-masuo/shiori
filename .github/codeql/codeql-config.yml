@@ -1,0 +1,10 @@
+name: "Shiori CodeQL config"
+
+# dashboard/dist と src/shiori/dashboard_dist は Vite のビルド成果物
+# （mermaid 等のベンダーコード込み）をコミットしたものなので解析対象から外す。
+# アセットのハッシュが変わるたびに js/incomplete-sanitization が再発する
+# （issue #428、CodeQL alert #2 #3 #4）。
+# 実際のダッシュボード実装である dashboard/src は解析対象のまま残す。
+paths-ignore:
+  - dashboard/dist
+  - src/shiori/dashboard_dist
