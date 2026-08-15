@@ -12,84 +12,190 @@ const templates = {
   module_tree: { title: "Module Tree", desc: "Directory structure and module dependencies." },
 };
 
+const isTestPath = (p = "") =>
+  /(^|\/)tests?\//i.test(p) ||
+  /(^|\/)test_[^/]*$/i.test(p) ||
+  /[._-](test|spec)\.[a-z]+$/i.test(p);
+
+const STATS_SCOPES = [
+  ["all", "All"],
+  ["src", "Source"],
+  ["test", "Tests"],
+];
+
+const STATS_COLUMNS = [
+  ["language", "Language"],
+  ["files", "Files"],
+  ["code", "Code"],
+  ["comments", "Comments"],
+  ["blanks", "Blanks"],
+];
+
 const StatsView = ({ data }) => {
   const [expandedLang, setExpandedLang] = useState(null);
+  const [scope, setScope] = useState("all");
+  const [sort, setSort] = useState({ key: "code", dir: "desc" });
 
   if (!data || !data.rows) return null;
 
+  const inScope = (file) =>
+    scope === "all" || (scope === "test" ? isTestPath(file.name) : !isTestPath(file.name));
+
+  // Re-aggregate per language from the file list so the table, the expanded
+  // list and the Total row all agree with the selected scope.
+  const rows = data.rows
+    .map((row) => {
+      // A row without a file list cannot be scoped; show it as the server sent it.
+      if (!row.reports) return { ...row, reports: [] };
+      const files = row.reports.filter(inScope);
+      return {
+        language: row.language,
+        files: files.length,
+        code: files.reduce((a, f) => a + (f.code || 0), 0),
+        comments: files.reduce((a, f) => a + (f.comments || 0), 0),
+        blanks: files.reduce((a, f) => a + (f.blanks || 0), 0),
+        reports: files,
+      };
+    })
+    .filter((row) => row.files > 0);
+
+  const dir = sort.dir === "asc" ? 1 : -1;
+  rows.sort((a, b) =>
+    sort.key === "language"
+      ? dir * String(a.language).localeCompare(String(b.language))
+      : dir * ((a[sort.key] || 0) - (b[sort.key] || 0))
+  );
+
+  const total = rows.reduce(
+    (acc, row) => ({
+      files: acc.files + (row.files || 0),
+      code: acc.code + (row.code || 0),
+      comments: acc.comments + (row.comments || 0),
+      blanks: acc.blanks + (row.blanks || 0),
+    }),
+    { files: 0, code: 0, comments: 0, blanks: 0 }
+  );
+
+  const onSort = (key) =>
+    setSort((s) => ({
+      key,
+      dir:
+        s.key === key
+          ? s.dir === "desc"
+            ? "asc"
+            : "desc"
+          : key === "language"
+          ? "asc"
+          : "desc",
+    }));
+
+  const arrow = (key) => (sort.key === key ? (sort.dir === "asc" ? " ↑" : " ↓") : "");
+  const num = (n) => (n || 0).toLocaleString("en-US");
+
   return (
-    <div className="card">
-      <div className="table-container">
-        <table>
-          <thead>
-            <tr>
-              <th>Language</th>
-              <th>Files</th>
-              <th>Code</th>
-              <th>Comments</th>
-              <th>Blanks</th>
-            </tr>
-          </thead>
-          <tbody>
-            {data.rows.map((row) => (
-              <React.Fragment key={row.language}>
-                <tr 
-                  className="stats-row clickable"
-                  onClick={() => setExpandedLang(expandedLang === row.language ? null : row.language)}
-                  style={{ cursor: "pointer" }}
-                >
-                  <td style={{ display: "flex", alignItems: "center", gap: "0.5rem", fontWeight: "500", color: "var(--accent-color)" }}>
-                    <span style={{ fontSize: "0.75rem", display: "inline-block", width: "12px" }}>
-                      {expandedLang === row.language ? "▼" : "▶"}
-                    </span>
-                    {row.language}
-                  </td>
-                  <td>{row.files}</td>
-                  <td>{row.code}</td>
-                  <td>{row.comments}</td>
-                  <td>{row.blanks}</td>
-                </tr>
-                {expandedLang === row.language && row.reports && (
-                  <tr>
-                    <td colSpan={5} style={{ padding: "0.75rem 1.5rem", background: "rgba(0,0,0,0.15)" }}>
-                      <div className="stats-file-list" style={{ maxHeight: "300px", overflowY: "auto" }}>
-                        <table style={{ width: "100%", fontSize: "0.875rem" }}>
-                          <thead>
-                            <tr style={{ background: "transparent", borderBottom: "1px solid rgba(255,255,255,0.05)" }}>
-                              <th style={{ textAlign: "left", padding: "0.5rem" }}>File Name</th>
-                              <th style={{ textAlign: "right", padding: "0.5rem" }}>Code</th>
-                              <th style={{ textAlign: "right", padding: "0.5rem" }}>Comments</th>
-                              <th style={{ textAlign: "right", padding: "0.5rem" }}>Blanks</th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {row.reports.map((file) => (
-                              <tr key={file.name} style={{ borderBottom: "1px solid rgba(255,255,255,0.02)" }}>
-                                <td style={{ textAlign: "left", padding: "0.5rem", fontFamily: "monospace", wordBreak: "break-all" }}>{file.name}</td>
-                                <td style={{ textAlign: "right", padding: "0.5rem" }}>{file.code}</td>
-                                <td style={{ textAlign: "right", padding: "0.5rem" }}>{file.comments}</td>
-                                <td style={{ textAlign: "right", padding: "0.5rem" }}>{file.blanks}</td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                      </div>
-                    </td>
-                  </tr>
-                )}
-              </React.Fragment>
-            ))}
-            <tr style={{ fontWeight: "bold", borderTop: "2px solid var(--panel-border)" }}>
-              <td>Total</td>
-              <td>{data.total.files}</td>
-              <td>{data.total.code}</td>
-              <td>{data.total.comments}</td>
-              <td>{data.total.blanks}</td>
-            </tr>
-          </tbody>
-        </table>
+    <>
+      <div className="stats-scope">
+        <div className="search-type-toggle">
+          {STATS_SCOPES.map(([id, label]) => (
+            <button
+              key={id}
+              type="button"
+              className={`toggle-btn ${scope === id ? "active" : ""}`}
+              onClick={() => setScope(id)}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
       </div>
-    </div>
+
+      <div className="card">
+        <div className="table-container">
+          <table className="stats-table">
+            <thead>
+              <tr>
+                {STATS_COLUMNS.map(([key, label]) => (
+                  <th
+                    key={key}
+                    onClick={() => onSort(key)}
+                    title={`Sort by ${label}`}
+                    style={{ cursor: "pointer", userSelect: "none" }}
+                  >
+                    {label}
+                    {arrow(key)}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((row) => (
+                <React.Fragment key={row.language}>
+                  <tr
+                    className="stats-row clickable"
+                    onClick={() => setExpandedLang(expandedLang === row.language ? null : row.language)}
+                    style={{ cursor: "pointer" }}
+                  >
+                    <td style={{ display: "flex", alignItems: "center", gap: "0.5rem", fontWeight: "500", color: "var(--accent-color)" }}>
+                      <span style={{ fontSize: "0.75rem", display: "inline-block", width: "12px" }}>
+                        {expandedLang === row.language ? "▼" : "▶"}
+                      </span>
+                      {row.language}
+                    </td>
+                    <td>{num(row.files)}</td>
+                    <td>{num(row.code)}</td>
+                    <td>{num(row.comments)}</td>
+                    <td>{num(row.blanks)}</td>
+                  </tr>
+                  {expandedLang === row.language && row.reports.length > 0 && (
+                    <tr>
+                      <td colSpan={5} style={{ padding: "0.75rem 1.5rem", background: "rgba(0,0,0,0.15)" }}>
+                        <div className="stats-file-list" style={{ maxHeight: "320px", overflowY: "auto" }}>
+                          <table style={{ width: "100%", fontSize: "0.875rem" }}>
+                            <thead>
+                              <tr style={{ background: "transparent", borderBottom: "1px solid rgba(255,255,255,0.05)" }}>
+                                <th style={{ textAlign: "left", padding: "0.5rem" }}>File Name</th>
+                                <th style={{ textAlign: "right", padding: "0.5rem" }}>Code</th>
+                                <th style={{ textAlign: "right", padding: "0.5rem" }}>Comments</th>
+                                <th style={{ textAlign: "right", padding: "0.5rem" }}>Blanks</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {row.reports.map((file) => (
+                                <tr key={file.name} style={{ borderBottom: "1px solid rgba(255,255,255,0.02)" }}>
+                                  <td style={{ textAlign: "left", padding: "0.5rem", fontFamily: "monospace", wordBreak: "break-all" }}>
+                                    {file.name}{" "}
+                                    <span
+                                      className={`badge ${isTestPath(file.name) ? "function" : "class"}`}
+                                      style={{ fontSize: "0.7rem", padding: "0.05rem 0.35rem" }}
+                                    >
+                                      {isTestPath(file.name) ? "test" : "src"}
+                                    </span>
+                                  </td>
+                                  <td style={{ textAlign: "right", padding: "0.5rem" }}>{num(file.code)}</td>
+                                  <td style={{ textAlign: "right", padding: "0.5rem" }}>{num(file.comments)}</td>
+                                  <td style={{ textAlign: "right", padding: "0.5rem" }}>{num(file.blanks)}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </td>
+                    </tr>
+                  )}
+                </React.Fragment>
+              ))}
+              <tr style={{ fontWeight: "bold", borderTop: "2px solid var(--panel-border)" }}>
+                <td>Total</td>
+                <td>{num(total.files)}</td>
+                <td>{num(total.code)}</td>
+                <td>{num(total.comments)}</td>
+                <td>{num(total.blanks)}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </>
   );
 };
 
