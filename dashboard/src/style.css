@@ -73,24 +73,30 @@ body {
 
 .repo-selector label {
   display: block;
-  font-size: 0.75rem;
-  color: var(--text-secondary);
-  margin-bottom: 0.4rem;
+  font-size: 0.8rem;
+  color: #cbd5e1;
+  margin-bottom: 0.45rem;
   font-weight: 500;
 }
 
 .repo-selector select {
   width: 100%;
-  padding: 0.5rem 0.75rem;
+  padding: 0.55rem 0.75rem;
   border-radius: 6px;
-  border: 1px solid var(--panel-border);
-  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: #151a29;
   color: var(--text-primary);
-  font-size: 0.85rem;
+  font-size: 0.9rem;
+  font-weight: 500;
   font-family: inherit;
   cursor: pointer;
   outline: none;
   transition: border-color 0.2s;
+}
+
+.repo-selector select option {
+  background: #151a29;
+  color: #f0f2f5;
 }
 
 .repo-selector select:hover,
@@ -299,4 +305,52 @@ tbody tr:hover {
   background: rgba(255, 255, 255, 0.1);
   padding: 0.2rem 0.4rem;
   border-radius: 4px;
+}
+
+/* Segmented toggle (shared by Search view and Stats scope control) */
+.search-type-toggle {
+  display: flex;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 8px;
+  padding: 0.25rem;
+}
+
+.toggle-btn {
+  padding: 0.4rem 1rem;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 0.85rem;
+  font-weight: 500;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.toggle-btn.active {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text-primary);
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+}
+
+/* Stats view */
+.stats-scope {
+  display: flex;
+  justify-content: flex-start;
+  margin-bottom: 1.25rem;
+}
+
+.stats-table th {
+  color: #cbd5e1;
+  font-weight: 600;
+  font-size: 0.85rem;
+  white-space: nowrap;
+}
+
+.stats-table td {
+  font-variant-numeric: tabular-nums;
 }
