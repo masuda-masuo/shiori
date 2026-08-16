@@ -25,6 +25,22 @@ _STALE_SECONDS_FLOOR = 300
 _NO_REPO_REPOS_CHAR_BUDGET = 8_000
 
 
+def _wire_dumps(value: Any) -> str:
+    """Serialize *value* exactly as the MCP transport serializes a response body.
+
+    The installed streamable-HTTP transport writes the body with
+    ``json.dumps(body, separators=(",", ":"))``
+    (mcp/server/_streamable_http_modern.py) -- compact separators and
+    ``ensure_ascii`` left at its ``True`` default, so every non-ASCII char
+    leaves the process as a 6-char ``\\uXXXX`` escape.  The budget below
+    used to be measured with ``ensure_ascii=False``, which under-counted a
+    CJK payload by ~1.22x on the live fleet: a cap has to be an invariant
+    on the bytes that actually leave the process, so the length that
+    decides a fit is measured with the wire serializer (issue #425).
+    """
+    return json.dumps(value, separators=(",", ":"))
+
+
 def _expected_sync_interval_seconds(repo: str) -> int:
     """Return the EXPECTED host-timer cadence (seconds) for *repo*'s role.
 
@@ -233,10 +249,7 @@ def _no_repo_response(
     omitted: list[str] = []
     for name, info in unhealthy:
         candidate = {**selected, name: info}
-        if (
-            len(json.dumps(candidate, ensure_ascii=False))
-            <= _NO_REPO_REPOS_CHAR_BUDGET
-        ):
+        if len(_wire_dumps(candidate)) <= _NO_REPO_REPOS_CHAR_BUDGET:
             selected = candidate
         else:
             omitted.append(name)
