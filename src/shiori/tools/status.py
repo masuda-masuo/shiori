@@ -3,6 +3,9 @@ from __future__ import annotations
 import json
 from typing import Any
 
+import pydantic_core
+from mcp_types import CallToolResult, JSONRPCResponse, TextContent
+
 from .. import db
 from ..github_auth import build_token_provider
 from ..pipeline import _conn, settings
@@ -13,32 +16,87 @@ from .registry import mcp
 # near-zero timer interval must not make every repo look permanently stale.
 _STALE_SECONDS_FLOOR = 300
 
-# Hard cap (chars) on the serialized `repos` payload of the no-repo call
-# (issue #423).  A full per-repo record is ~870 chars on the live 62-repo
-# fleet, so this admits roughly the top nine records before the remainder
-# is reported by name in `summary.omitted_repo_names`.  The cap exists so
-# the response stays inside an MCP client context window even when a
-# fleet-wide condition -- token-provider outage (#193), sync-host failure
-# aging every repo past its threshold -- makes every repo unhealthy at
-# once: without it the no-repo response re-inflates to ~54k chars exactly
-# when the operator is most likely to call it.
+# Nominal ceiling (chars) on the no-repo call's FastMCP-wrapped tool
+# result (issue #423, measured after convert_result wrapping since
+# #431).  The budget is compared against _wrapped_result_dumps -- the
+# response the MCP client actually receives (pretty-printed text content
+# plus a structured content copy, inside the streamable-HTTP JSON-RPC
+# envelope) -- not against the inner `repos` dict, whose ~7.7k chars
+# reached the client as a ~20k-char response (the old measurement named
+# one unit and spent another).  On the CJK degraded-fleet fixture one
+# full unhealthy record wraps to ~3.3k chars and the loop's first
+# candidate (which also names the other 61 unhealthy repos as omitted)
+# to ~4.9k, so 8,000 admits the top two-to-five records before the
+# remainder is named in `summary.omitted_repo_names`.  8,000 is NOT a
+# guarantee that one full record fits, though: `last_error` is an
+# unbounded production string (record_sync_attempt truncates it with a
+# char slice, src/shiori/db.py, so a 2000-char CJK error survives), and
+# one record with a 2000-char CJK last_error wraps to ~22.7k chars --
+# ~470 CJK chars of last_error already push a single record past 8,000.
+# The budget loop therefore applies a per-call effective ceiling
+# (_no_repo_budget): this constant, raised to the measured wrapped size
+# of the payload containing only the most severe record when that alone
+# cannot fit -- so at least one full unhealthy record is always emitted
+# (issue #431, criterion 7).  The ceiling exists so the response stays
+# inside an MCP client context window even when a fleet-wide condition
+# -- token-provider outage (#193), sync-host failure aging every repo
+# past its threshold -- makes every repo unhealthy at once: without it
+# the no-repo response re-inflates exactly when the operator is most
+# likely to call it.
 _NO_REPO_REPOS_CHAR_BUDGET = 8_000
 
 
 def _wire_dumps(value: Any) -> str:
-    """Serialize *value* exactly as the MCP transport serializes a response body.
+    """Serialize *value* with the streamable-HTTP transport's body dumps.
 
-    The installed streamable-HTTP transport writes the body with
+    The installed transport writes its JSON-RPC body with
     ``json.dumps(body, separators=(",", ":"))``
     (mcp/server/_streamable_http_modern.py) -- compact separators and
     ``ensure_ascii`` left at its ``True`` default, so every non-ASCII char
-    leaves the process as a 6-char ``\\uXXXX`` escape.  The budget below
-    used to be measured with ``ensure_ascii=False``, which under-counted a
-    CJK payload by ~1.22x on the live fleet: a cap has to be an invariant
-    on the bytes that actually leave the process, so the length that
-    decides a fit is measured with the wire serializer (issue #425).
+    serializes as a 6-char ``\\uXXXX`` escape (issue #425).  This is the
+    serializer applied to the transport envelope; it is NOT the whole wire
+    story for a tool call: FastMCP's convert_result wrapping turns a dict
+    return into pretty-printed text content plus a structured content
+    copy, and that wrapped object is what actually leaves the process.
+    The char budget is therefore measured with _wrapped_result_dumps,
+    which calls this function for the final envelope dumps.
     """
     return json.dumps(value, separators=(",", ":"))
+
+
+def _wrapped_result_dumps(value: dict[str, Any]) -> str:
+    """Serialize *value* as the MCP client actually receives a tool result.
+
+    Replicates the installed FastMCP convert_result wrapping plus the
+    streamable-HTTP JSON-RPC envelope (mcp 2.0.0 in this container):
+
+    - convert_result wraps a ``dict[str, Any]`` tool return in
+      ``CallToolResult(content=[TextContent(text=pydantic_core.to_json(
+      value, indent=2))], structuredContent=<the same dict>)``, so the
+      payload rides the wire twice -- as pretty-printed text (indent=2)
+      and as the structured copy;
+    - the transport (mcp/server/_streamable_http_modern.py) compact-dumps
+      the JSON-RPC envelope around that result.
+
+    Built from the installed ``mcp_types`` models and ``pydantic_core``
+    rather than a hand-written shape, so the measurement cannot drift
+    from the transport the way the inner ``repos`` measurement did.  The
+    measured unit is the convert_result object inside a fixed-size
+    JSON-RPC envelope (jsonrpc/id); per-request stamps the transport may
+    add (e.g. the modern-protocol serverInfo ``_meta``) are a fixed few
+    hundred chars and are not included.
+    """
+    text = pydantic_core.to_json(value, fallback=str, indent=2).decode()
+    call_tool_result = CallToolResult(
+        content=[TextContent(type="text", text=text)],
+        structured_content=value,
+    )
+    result = call_tool_result.model_dump(
+        by_alias=True, mode="json", exclude_none=True
+    )
+    envelope = JSONRPCResponse(jsonrpc="2.0", id=1, result=result)
+    body = envelope.model_dump(mode="json", by_alias=True, exclude_none=True)
+    return _wire_dumps(body)
 
 
 def _expected_sync_interval_seconds(repo: str) -> int:
@@ -221,6 +279,73 @@ def _severity_key(name: str, info: dict) -> tuple[Any, ...]:
     )
 
 
+def _no_repo_candidate_response(
+    all_repos: dict[str, Any],
+    candidate: dict[str, Any],
+    omitted_names: list[str],
+    *,
+    clone_refresh_debounce_seconds: int,
+    sync_intervals: dict[str, int],
+    token_provider: str,
+) -> dict[str, Any]:
+    """Build the no-repo payload *candidate* would finish as.
+
+    The summary counts every repo but names *omitted_names* -- the
+    not-yet-admitted unhealthy repos -- as omitted, so measuring this
+    dict is measuring the candidate's pessimistic final state (issue
+    #431).  Each call builds a fresh summary (_summarize returns a new
+    dict), so callers may reuse this freely.
+    """
+    summary = _summarize(all_repos)
+    summary["omitted_repos"] = len(omitted_names)
+    summary["omitted_repo_names"] = omitted_names
+    return {
+        "repos": candidate,
+        "clone_refresh_debounce_seconds": clone_refresh_debounce_seconds,
+        "sync_intervals": sync_intervals,
+        "token_provider": token_provider,
+        "summary": summary,
+    }
+
+
+def _no_repo_budget(
+    unhealthy: list[tuple[str, dict[str, Any]]],
+    *,
+    all_repos: dict[str, Any],
+    clone_refresh_debounce_seconds: int,
+    sync_intervals: dict[str, int],
+    token_provider: str,
+) -> int:
+    """Effective char ceiling for this call: the nominal budget, raised
+    when even the payload containing only the most severe unhealthy
+    record cannot fit it.
+
+    A record's wrapped form is not bounded by the constant: `last_error`
+    is an unbounded production string (record_sync_attempt truncates
+    with a char slice, so 2000 CJK chars survive), and a single such
+    record wraps to ~22.7k chars.  A fit-or-skip loop would then emit
+    ZERO full records on a fully degraded fleet -- exactly when the
+    operator needs them most (issue #431, criterion 7).  The ceiling
+    for this call is therefore floored at the measured wrapped size of
+    the payload containing only the most severe record (every other
+    unhealthy repo named as omitted); the budget loop's first candidate
+    IS that payload, so at least one full record always fits.  The
+    constant stays the nominal ceiling everywhere else.
+    """
+    if not unhealthy:
+        return _NO_REPO_REPOS_CHAR_BUDGET
+    name, info = unhealthy[0]
+    one_record = _no_repo_candidate_response(
+        all_repos,
+        {name: info},
+        [n for n, _ in unhealthy[1:]],
+        clone_refresh_debounce_seconds=clone_refresh_debounce_seconds,
+        sync_intervals=sync_intervals,
+        token_provider=token_provider,
+    )
+    return max(_NO_REPO_REPOS_CHAR_BUDGET, len(_wrapped_result_dumps(one_record)))
+
+
 def _no_repo_response(
     all_repos: dict[str, Any],
     *,
@@ -233,10 +358,21 @@ def _no_repo_response(
     Pure: finished records and the top-level scalars in, the full payload
     out -- no DB, no connection, no mocks, which is what makes the
     degraded-fleet cases directly testable.  Health (_is_healthy) decides
-    which repos are eligible for a full record; a hard char budget
-    (_NO_REPO_REPOS_CHAR_BUDGET) decides how many of them are actually
-    emitted, in severity order (_severity_key).  Unhealthy repos cut off
-    by the budget are not dropped silently: `summary` reports the count
+    which repos are eligible for a full record; a char budget decides how
+    many of them are actually emitted, in severity order (_severity_key).
+    The budget is measured on the FastMCP-wrapped tool result
+    (_wrapped_result_dumps) of the would-be return dict -- summary and
+    top-level scalars included, not just `repos` -- because the
+    client-visible response is the wrapped one, not the inner dict
+    (issue #431).  The applied ceiling is _no_repo_budget: the nominal
+    _NO_REPO_REPOS_CHAR_BUDGET, raised to fit the most severe record
+    alone when its wrapped form cannot fit, so at least one full
+    unhealthy record is always emitted (criterion 7).  Each candidate is
+    measured in its pessimistic final state (the candidate admitted,
+    every not-yet-admitted unhealthy repo named as omitted), so the
+    emitted payload is exactly a candidate that fit.  Unhealthy repos
+    cut off by the budget are not dropped silently: `summary` reports
+    the count
     (omitted_repos) and the names (omitted_repo_names) of everything not
     emitted (issue #423).
     """
@@ -245,11 +381,41 @@ def _no_repo_response(
     ]
     unhealthy.sort(key=lambda pair: _severity_key(pair[0], pair[1]))
 
+    # Effective ceiling for this call: at least one full record must
+    # always fit, even when the most severe record's wrapped form alone
+    # exceeds the nominal budget (last_error is an unbounded production
+    # string -- a 2000-char CJK error wraps to ~22.7k chars).  The floor
+    # is the measured payload containing only that record, which is
+    # exactly the loop's first candidate, so the first iteration always
+    # admits (issue #431, criterion 7).
+    budget = _no_repo_budget(
+        unhealthy,
+        all_repos=all_repos,
+        clone_refresh_debounce_seconds=clone_refresh_debounce_seconds,
+        sync_intervals=sync_intervals,
+        token_provider=token_provider,
+    )
+
     selected: dict[str, Any] = {}
     omitted: list[str] = []
     for name, info in unhealthy:
         candidate = {**selected, name: info}
-        if len(_wire_dumps(candidate)) <= _NO_REPO_REPOS_CHAR_BUDGET:
+        # Measure the payload this candidate would finish as: itself
+        # admitted and every not-yet-admitted unhealthy repo named as
+        # omitted.  A later admission only replaces a name in that list
+        # with a larger full record, and the last candidate that fit IS
+        # the emitted payload, so this keeps the emitted wrapped result
+        # inside the budget (issue #431).
+        presumed_omitted = [n for n, _ in unhealthy if n not in candidate]
+        candidate_response = _no_repo_candidate_response(
+            all_repos,
+            candidate,
+            presumed_omitted,
+            clone_refresh_debounce_seconds=clone_refresh_debounce_seconds,
+            sync_intervals=sync_intervals,
+            token_provider=token_provider,
+        )
+        if len(_wrapped_result_dumps(candidate_response)) <= budget:
             selected = candidate
         else:
             omitted.append(name)
@@ -282,13 +448,17 @@ def status(repo: str | None = None) -> dict[str, Any]:
 
     The no-repo response is size-bounded even when the fleet degrades:
     unhealthy records are emitted in severity order (failing syncs first)
-    until the serialized `repos` payload would exceed the
-    _NO_REPO_REPOS_CHAR_BUDGET char budget, and every unhealthy repo cut
-    off by that budget is named in `summary.omitted_repo_names` (count in
+    until the FastMCP-wrapped tool result -- the pretty-printed text
+    content plus the structured content copy that the MCP client actually
+    receives -- would exceed the effective char budget for that call
+    (the _NO_REPO_REPOS_CHAR_BUDGET ceiling, raised only when the most
+    severe record's wrapped form alone cannot fit it, so at least one
+    full record is always emitted).  Every unhealthy repo cut off by the
+    budget is named in `summary.omitted_repo_names` (count in
     `summary.omitted_repos`) rather than dropped silently -- so the
-    response stays inside an MCP client context window even when a
-    fleet-wide condition (e.g. a token-provider outage) makes every repo
-    unhealthy at once.
+    client-visible response stays inside an MCP context window even when
+    a fleet-wide condition (e.g. a token-provider outage) makes every
+    repo unhealthy at once.
 
     Data sources: DB metadata only (sync_run, index_state, chunk counts); no
     clone read, no GitHub API call.
@@ -366,10 +536,12 @@ def status(repo: str | None = None) -> dict[str, Any]:
         # Issue #423: the all-repos response did not fit an MCP client
         # context window (53,836 chars at 62 repos) and 91% of real calls
         # omit repo.  The no-repo payload is a separate view built under a
-        # hard char budget (_NO_REPO_REPOS_CHAR_BUDGET): healthy repos are
-        # counted in `summary` only, and even unhealthy repos are emitted
-        # only until the budget is spent, with the cut-off remainder named
-        # in `summary` so nothing disappears silently.
+        # char budget (the nominal _NO_REPO_REPOS_CHAR_BUDGET as a
+        # per-call effective ceiling, _no_repo_budget) measured on the
+        # FastMCP-wrapped tool result (#431): healthy repos are counted in
+        # `summary` only, and even unhealthy repos are emitted only until
+        # the budget is spent, with the cut-off remainder named in
+        # `summary` so nothing disappears silently.
         return _no_repo_response(
             repos,
             sync_intervals={
