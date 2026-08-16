@@ -13,14 +13,20 @@ from __future__ import annotations
 
 import json
 from contextlib import contextmanager
+from typing import Any
 from unittest.mock import MagicMock, patch
+
+from mcp.server.mcpserver.tools.base import Tool
+from mcp_types import JSONRPCResponse
 
 from shiori.tools.status import (
     _NO_REPO_REPOS_CHAR_BUDGET,
     _is_healthy,
+    _no_repo_budget,
     _no_repo_response,
+    _severity_key,
     _summarize,
-    _wire_dumps,
+    _wrapped_result_dumps,
     status,
 )
 
@@ -200,12 +206,16 @@ class TestMixedFleet:
             return status()
 
     def test_only_unhealthy_repos_are_listed(self):
-        assert sorted(self._run_mixed()["repos"]) == [
-            "o/failing",
-            "o/pending",
-            "o/stale",
-            "o/warned",
-        ]
+        result = self._run_mixed()
+        emitted = list(result["repos"])
+        severity_order = ["o/failing", "o/stale", "o/pending", "o/warned"]
+        # The wrapped-result budget (#431) can cut the least-severe
+        # unhealthy repos -- here o/warned tips four full records over
+        # 8,000 chars -- but every emitted repo is unhealthy and emission
+        # keeps severity order; the cut is named in the summary.
+        assert set(emitted) <= set(severity_order)
+        assert emitted == [name for name in severity_order if name in emitted]
+        assert set(result["summary"]["omitted_repo_names"]) == set(severity_order) - set(emitted)
 
     def test_healthy_repo_is_not_listed(self):
         assert "o/healthy" not in self._run_mixed()["repos"]
@@ -239,7 +249,10 @@ class TestMixedFleet:
         assert summary["total_repos"] == 5
         assert summary["unhealthy_repos"] == 4
         assert summary["healthy_repos"] == 1
-        assert summary["unhealthy_repos"] == len(result["repos"])
+        # Every unhealthy repo is either emitted or named as omitted --
+        # the wrapped-result budget (#431) may cut the tail, it never
+        # drops one silently.
+        assert summary["unhealthy_repos"] == len(result["repos"]) + summary["omitted_repos"]
 
     def test_condition_counts_match_the_repos_that_carry_them(self):
         result = self._run_mixed()
@@ -454,24 +467,28 @@ class TestDegradedFleetBudget:
             for i in range(n)
         }
 
-    def test_repos_payload_respects_the_char_budget(self):
+    def test_wrapped_result_respects_the_char_budget(self):
         result = TestNoRepoResponseView._view(self._degraded_records())
-        payload = _wire_dumps(result["repos"])
-        assert len(payload) <= _NO_REPO_REPOS_CHAR_BUDGET
+        # The cap applies to what the MCP client receives: FastMCP's
+        # convert_result wrapping (pretty text + structuredContent inside
+        # the JSON-RPC envelope), not the inner `repos` dict (issue #431).
+        payload = _wrapped_result_dumps(result)
+        assert len(payload) <= _NO_REPO_REPOS_CHAR_BUDGET, f"{len(payload)} chars"
 
     def test_serialized_response_stays_bounded(self):
         result = TestNoRepoResponseView._view(self._degraded_records())
-        # Measured with the same serializer as the budget: a total-size cap
-        # spelled in a different dumps than the budget it contains would
-        # disagree with that budget again (issue #425).
-        total = len(_wire_dumps(result))
-        # Budget + summary base + up to 62 names (~31 chars each) + the
-        # four top-level scalars -- an order of magnitude under the old
-        # 53,836-char response.
-        assert total < 15000, f"{total} chars"
+        # Measured with the same serializer as the budget loop: the
+        # wrapped tool result must sit inside the budget that decided its
+        # contents.  (The old inner-dict 15000 cap was met by a selection
+        # whose client-visible wrapped form was ~22.7k chars -- the same
+        # unit mismatch as the loop, issue #431.)
+        total = len(_wrapped_result_dumps(result))
+        assert total <= _NO_REPO_REPOS_CHAR_BUDGET, f"{total} chars"
 
     def test_not_every_repo_fits_so_some_are_omitted(self):
         result = TestNoRepoResponseView._view(self._degraded_records())
+        # Non-vacuity: at least one full record emitted, at least one cut.
+        assert len(result["repos"]) >= 1
         assert len(result["repos"]) < 62
 
     def test_omitted_repos_are_named_and_counted(self):
@@ -489,10 +506,10 @@ class TestDegradedFleetBudget:
     def test_severity_order_failing_repo_wins_the_budget(self):
         # 25 warned-only repos plus one failing repo: the failing one must
         # be emitted and the cut must fall inside the warned class.
-        # The warning text is deliberately long: measured with the wire
-        # serializer (compact separators, issue #425) 26 records must NOT
-        # fit the 8000-char budget, or the cut would not fall inside the
-        # warned class and this test would silently stop exercising it.
+        # Measured with the wrapped serializer (issue #431), all 26
+        # records must NOT fit the 8000-char budget, or the cut would not
+        # fall inside the warned class and this test would silently stop
+        # exercising severity order.
         records = {
             f"o/w{i:02d}": {
                 **_healthy_run(100),
@@ -532,12 +549,13 @@ class TestCJKDegradedFleetBudget:
 
     Shape implemented: rather than hand-tuning a one-record crossover,
     every record here is CJK-heavy, so the crossover falls out of the
-    budget loop itself.  The old loop admitted records until their
-    ``ensure_ascii=False`` length passed 8000 -- a selection whose wire
-    length is ~1.2x larger, i.e. well over the budget.  The wire
-    assertion below therefore fails on the pre-#425 loop and passes on
-    this one, and the non-vacuity assertions pin that the budget really
-    binds, so it cannot pass by emitting everything or nothing.
+    budget loop itself.  The pre-#431 loop admitted records until their
+    compact inner `repos` length passed 8000 -- a selection whose
+    FastMCP-wrapped form is ~2.6x larger (20,290 chars for a 7,741-char
+    `repos` payload), i.e. well over the budget.  The wrapped assertion
+    below therefore fails on the pre-#431 loop and passes on this one,
+    and the non-vacuity assertions pin that the budget really binds, so
+    it cannot pass by emitting everything or nothing.
     """
 
     @staticmethod
@@ -570,7 +588,12 @@ class TestCJKDegradedFleetBudget:
 
     def test_wire_payload_respects_the_char_budget(self):
         result = TestNoRepoResponseView._view(self._cjk_degraded_records())
-        payload = _wire_dumps(result["repos"])
+        # The client-visible form: convert_result wrapping duplicates the
+        # payload (pretty text + structuredContent) and escapes each CJK
+        # char to 6 chars in the compact envelope -- the inner `repos`
+        # dumps measured 7,741 chars for a selection whose wrapped form
+        # was 20,290 (issue #431).
+        payload = _wrapped_result_dumps(result)
         assert len(payload) <= _NO_REPO_REPOS_CHAR_BUDGET, f"{len(payload)} chars"
 
     def test_budget_actually_binds_on_the_cjk_fleet(self):
@@ -597,8 +620,156 @@ class TestCJKDegradedFleetBudget:
 
     def test_serialized_cjk_response_stays_bounded(self):
         result = TestNoRepoResponseView._view(self._cjk_degraded_records())
-        total = len(_wire_dumps(result))
-        assert total < 15000, f"{total} chars"
+        # Same serializer as the budget loop: the wrapped tool result must
+        # sit inside the budget that decided its contents (the old 15000
+        # cap on the inner dict was met while the client-visible form
+        # exceeded 20k -- issue #431).
+        total = len(_wrapped_result_dumps(result))
+        assert total <= _NO_REPO_REPOS_CHAR_BUDGET, f"{total} chars"
+
+
+class TestOversizedRecordStillEmitted:
+    """Criterion 7 as a construction (issue #431): a record whose wrapped
+    form alone exceeds the nominal 8,000-char budget must still be
+    emitted, or a fully degraded fleet reports zero error detail exactly
+    when the operator needs it most.
+
+    `last_error` is an unbounded production string -- record_sync_attempt
+    truncates it with a char slice ((error or "")[:2000], src/shiori/db.py),
+    so a 2000-char CJK error survives -- and with ensure_ascii escaping
+    plus the text/structuredContent duplication a single such record
+    wraps to ~22.7k chars (measured in the container; a single record
+    already exceeds 8,000 at ~470 CJK chars of last_error).  The old
+    fit-or-skip loop dropped it silently -- and with it every other
+    record, so the fleet-wide outage emitted ZERO full records.  The
+    loop now measures against a per-call effective ceiling floored at
+    the one-record payload's wrapped size (_no_repo_budget), so the
+    most severe record always fits.
+    """
+
+    @staticmethod
+    def _oversized_records(n=62, error_chars=2000):
+        # ~2000 CJK chars, the production truncation bound of
+        # record_sync_attempt's char slice.
+        error = (
+            "同期に失敗しました（トークンプロバイダーへの接続に失敗しました）" * 100
+        )[:error_chars]
+        return {
+            f"o/r{i:02d}": {
+                **_healthy_run(100 + i),
+                "consecutive_failures": 3,
+                "last_error": error,
+                "warnings": [f"3 consecutive sync failures. last_error: {error}"],
+            }
+            for i in range(n)
+        }
+
+    @staticmethod
+    def _effective_budget(records):
+        # The same computation the budget loop applies (issue #431): the
+        # nominal constant, raised to the one-record payload's wrapped
+        # size when that alone cannot fit.
+        unhealthy = sorted(
+            (
+                (name, info)
+                for name, info in records.items()
+                if not _is_healthy(info)
+            ),
+            key=lambda pair: _severity_key(pair[0], pair[1]),
+        )
+        return _no_repo_budget(
+            unhealthy,
+            all_repos=records,
+            clone_refresh_debounce_seconds=300,
+            sync_intervals={"dev": 900, "ref": 86400},
+            token_provider="static",  # noqa: S106 - provider name literal, not a secret
+        )
+
+    def test_fixture_one_record_wraps_past_the_nominal_budget(self):
+        # Guards the regression tests: if the fixture ever shrinks below
+        # the crossover, the floor never binds and they would silently
+        # stop exercising the degradation rule.
+        effective = self._effective_budget(self._oversized_records())
+        assert effective > _NO_REPO_REPOS_CHAR_BUDGET
+
+    def test_most_severe_oversized_record_is_still_emitted(self):
+        records = self._oversized_records()
+        result = TestNoRepoResponseView._view(records)
+        effective = self._effective_budget(records)
+        # The most severe record (all failing; o/r61 synced longest ago)
+        # is emitted in full, and the emitted payload sits inside the
+        # same effective ceiling the loop applied.
+        assert len(result["repos"]) >= 1
+        assert "o/r61" in result["repos"]
+        assert result["repos"]["o/r61"] == records["o/r61"]
+        assert len(_wrapped_result_dumps(result)) <= effective
+        # The rest are named as omitted, not dropped.
+        summary = result["summary"]
+        assert summary["unhealthy_repos"] == len(records)
+        assert summary["omitted_repos"] == len(records) - 1
+        assert set(summary["omitted_repo_names"]) == set(records) - {"o/r61"}
+
+    def test_mixed_fleet_emits_the_failing_oversized_record(self):
+        # The finding's mixed case: six warned repos must not crowd out
+        # a failing repo whose oversized error used to be skipped, so the
+        # operator keeps the most actionable record (severity order).
+        error = self._oversized_records(1)["o/r00"]["last_error"]
+        records = {
+            f"o/w{i:02d}": {
+                **_healthy_run(100),
+                "warnings": ["token_provider unavailable: boom"],
+            }
+            for i in range(6)
+        }
+        records["o/failing"] = {
+            **_healthy_run(50),
+            "consecutive_failures": 4,
+            "last_error": error,
+            "warnings": [f"4 consecutive sync failures. last_error: {error}"],
+        }
+        result = TestNoRepoResponseView._view(records)
+        assert "o/failing" in result["repos"]
+        assert result["repos"]["o/failing"]["consecutive_failures"] == 4
+        # The oversized failing record alone already exceeds the nominal
+        # budget, so the warned repos stay named as omitted.
+        assert set(result["summary"]["omitted_repo_names"]) == set(records) - {
+            "o/failing"
+        }
+
+
+class TestWrappedResultDumpsMatchesInstalledFastMCP:
+    """The wrap helper must serialize exactly what the installed FastMCP
+    convert_result wrapping plus the streamable-HTTP envelope put on the
+    wire for a shiori_status return (issue #431: budget the wrapped tool
+    result, not the inner dict).
+
+    The ground truth is computed from the installed SDK pieces -- real
+    convert_result metadata for a ``dict[str, Any]`` tool plus the
+    transport's JSON-RPC envelope dumps -- not from a hard-coded length,
+    so an SDK upgrade that changes the wrapping fails this test and
+    forces a re-measure instead of silently drifting.
+    """
+
+    @staticmethod
+    def _sdk_wire(payload):
+        def _probe(repo: str | None = None) -> dict[str, Any]:
+            ...
+
+        tool = Tool.from_function(_probe, name="shiori_status", description="probe")
+        call_tool_result = tool.fn_metadata.convert_result(payload)
+        result = call_tool_result.model_dump(
+            by_alias=True, mode="json", exclude_none=True
+        )
+        envelope = JSONRPCResponse(jsonrpc="2.0", id=1, result=result)
+        body = envelope.model_dump(mode="json", by_alias=True, exclude_none=True)
+        return json.dumps(body, separators=(",", ":"))
+
+    def test_helper_matches_the_installed_wire_serialization(self):
+        # A CJK degraded payload: the escape expansion and the text /
+        # structuredContent duplication both have to match the SDK.
+        records = TestCJKDegradedFleetBudget._cjk_degraded_records(2)
+        payload = TestNoRepoResponseView._view(records)
+        assert _wrapped_result_dumps(payload) == self._sdk_wire(payload)
 
 
 class TestTokenProviderDegradedFleetStaysBounded:
@@ -630,9 +801,10 @@ class TestTokenProviderDegradedFleetStaysBounded:
             result = status()
 
         assert result["token_provider"] == "error"
-        payload = _wire_dumps(result["repos"])
-        assert len(payload) <= _NO_REPO_REPOS_CHAR_BUDGET
-        assert len(_wire_dumps(result)) < 15000
+        # The budget is on the wrapped tool result the client receives
+        # (issue #431); the inner `repos` dumps is not the cap.
+        payload = _wrapped_result_dumps(result)
+        assert len(payload) <= _NO_REPO_REPOS_CHAR_BUDGET, f"{len(payload)} chars"
         summary = result["summary"]
         assert summary["unhealthy_repos"] == 62
         assert summary["omitted_repos"] + len(result["repos"]) == 62
