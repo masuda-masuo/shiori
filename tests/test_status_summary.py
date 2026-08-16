@@ -20,6 +20,7 @@ from shiori.tools.status import (
     _is_healthy,
     _no_repo_response,
     _summarize,
+    _wire_dumps,
     status,
 )
 
@@ -455,12 +456,15 @@ class TestDegradedFleetBudget:
 
     def test_repos_payload_respects_the_char_budget(self):
         result = TestNoRepoResponseView._view(self._degraded_records())
-        payload = json.dumps(result["repos"], ensure_ascii=False)
+        payload = _wire_dumps(result["repos"])
         assert len(payload) <= _NO_REPO_REPOS_CHAR_BUDGET
 
     def test_serialized_response_stays_bounded(self):
         result = TestNoRepoResponseView._view(self._degraded_records())
-        total = len(json.dumps(result))
+        # Measured with the same serializer as the budget: a total-size cap
+        # spelled in a different dumps than the budget it contains would
+        # disagree with that budget again (issue #425).
+        total = len(_wire_dumps(result))
         # Budget + summary base + up to 62 names (~31 chars each) + the
         # four top-level scalars -- an order of magnitude under the old
         # 53,836-char response.
@@ -485,8 +489,15 @@ class TestDegradedFleetBudget:
     def test_severity_order_failing_repo_wins_the_budget(self):
         # 25 warned-only repos plus one failing repo: the failing one must
         # be emitted and the cut must fall inside the warned class.
+        # The warning text is deliberately long: measured with the wire
+        # serializer (compact separators, issue #425) 26 records must NOT
+        # fit the 8000-char budget, or the cut would not fall inside the
+        # warned class and this test would silently stop exercising it.
         records = {
-            f"o/w{i:02d}": {**_healthy_run(100), "warnings": ["w"]}
+            f"o/w{i:02d}": {
+                **_healthy_run(100),
+                "warnings": ["token_provider unavailable: boom"],
+            }
             for i in range(25)
         }
         records["o/failing"] = {
@@ -507,6 +518,87 @@ class TestDegradedFleetBudget:
         result = TestNoRepoResponseView._view(records)
         for name, info in result["repos"].items():
             assert info == records[name]
+
+
+class TestCJKDegradedFleetBudget:
+    """The budget must hold when the degraded fleet speaks Japanese (#425).
+
+    The MCP streamable-HTTP transport serializes the body with
+    ``ensure_ascii`` left at its default, so each CJK char costs 6 chars
+    on the wire but only 1 under the old ``ensure_ascii=False``
+    measurement.  ASCII-only fixtures cannot catch that: for pure ASCII
+    the wire form is *smaller* than the old measurement (compact
+    separators), so the wrong dumps stayed green.
+
+    Shape implemented: rather than hand-tuning a one-record crossover,
+    every record here is CJK-heavy, so the crossover falls out of the
+    budget loop itself.  The old loop admitted records until their
+    ``ensure_ascii=False`` length passed 8000 -- a selection whose wire
+    length is ~1.2x larger, i.e. well over the budget.  The wire
+    assertion below therefore fails on the pre-#425 loop and passes on
+    this one, and the non-vacuity assertions pin that the budget really
+    binds, so it cannot pass by emitting everything or nothing.
+    """
+
+    @staticmethod
+    def _cjk_degraded_records(n=62):
+        # Same #193 fleet-wide outage as _degraded_records, with the
+        # operator-facing strings in Japanese as they are on the live
+        # deployment.
+        return {
+            f"o/r{i:02d}": {
+                **_healthy_run(100 + i),
+                "consecutive_failures": 3,
+                "last_error": (
+                    f"同期に失敗しました（{i}回目）: "
+                    "トークンプロバイダに接続できません"
+                ),
+                "warnings": [
+                    "token_provider を判定できませんでした: 認証情報が見つかりません",
+                    f"インデックスが古くなっています（最終同期から {100 + i} 秒）",
+                ],
+            }
+            for i in range(n)
+        }
+
+    def test_fixture_is_actually_non_ascii(self):
+        # Guards the regression test itself: an ASCII-ified fixture would
+        # silently stop exercising the escape expansion.
+        record = next(iter(self._cjk_degraded_records().values()))
+        assert any(ord(ch) > 0x7F for ch in record["last_error"])
+        assert any(ord(ch) > 0x7F for w in record["warnings"] for ch in w)
+
+    def test_wire_payload_respects_the_char_budget(self):
+        result = TestNoRepoResponseView._view(self._cjk_degraded_records())
+        payload = _wire_dumps(result["repos"])
+        assert len(payload) <= _NO_REPO_REPOS_CHAR_BUDGET, f"{len(payload)} chars"
+
+    def test_budget_actually_binds_on_the_cjk_fleet(self):
+        # Non-vacuity: some records fit, some are cut -- otherwise the
+        # assertion above could hold trivially.
+        result = TestNoRepoResponseView._view(self._cjk_degraded_records())
+        assert len(result["repos"]) >= 1
+        assert result["summary"]["omitted_repos"] > 0
+
+    def test_omitted_cjk_repos_are_still_named(self):
+        records = self._cjk_degraded_records()
+        result = TestNoRepoResponseView._view(records)
+        summary = result["summary"]
+        emitted, omitted = set(result["repos"]), set(summary["omitted_repo_names"])
+        assert summary["omitted_repos"] == len(omitted)
+        assert emitted | omitted == set(records)
+        assert emitted.isdisjoint(omitted)
+
+    def test_emitted_cjk_records_keep_every_field(self):
+        records = self._cjk_degraded_records()
+        result = TestNoRepoResponseView._view(records)
+        for name, info in result["repos"].items():
+            assert info == records[name]
+
+    def test_serialized_cjk_response_stays_bounded(self):
+        result = TestNoRepoResponseView._view(self._cjk_degraded_records())
+        total = len(_wire_dumps(result))
+        assert total < 15000, f"{total} chars"
 
 
 class TestTokenProviderDegradedFleetStaysBounded:
@@ -538,9 +630,9 @@ class TestTokenProviderDegradedFleetStaysBounded:
             result = status()
 
         assert result["token_provider"] == "error"
-        payload = json.dumps(result["repos"], ensure_ascii=False)
+        payload = _wire_dumps(result["repos"])
         assert len(payload) <= _NO_REPO_REPOS_CHAR_BUDGET
-        assert len(json.dumps(result)) < 15000
+        assert len(_wire_dumps(result)) < 15000
         summary = result["summary"]
         assert summary["unhealthy_repos"] == 62
         assert summary["omitted_repos"] + len(result["repos"]) == 62
