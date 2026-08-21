@@ -27,23 +27,89 @@ _STALE_SECONDS_FLOOR = 300
 # full unhealthy record wraps to ~3.3k chars and the loop's first
 # candidate (which also names the other 61 unhealthy repos as omitted)
 # to ~4.9k, so 8,000 admits the top two-to-five records before the
-# remainder is named in `summary.omitted_repo_names`.  8,000 is NOT a
-# guarantee that one full record fits, though: `last_error` is an
-# unbounded production string (record_sync_attempt truncates it with a
-# char slice, src/shiori/db.py, so a 2000-char CJK error survives), and
-# one record with a 2000-char CJK last_error wraps to ~22.7k chars --
-# ~470 CJK chars of last_error already push a single record past 8,000.
-# The budget loop therefore applies a per-call effective ceiling
+# remainder is named in `summary.omitted_repo_names`.
+#
+# `last_error` is DUPLICATED at the status surface: the record's own
+# `last_error` field AND the `consecutive_failures > 0` warning copy
+# both quote it (issue #433).  It is an unbounded production string
+# (record_sync_attempt truncates it with a char slice, src/shiori/db.py,
+# so a 2000-char CJK error survives into the record field), and with the
+# warning copy the duplication used to re-inflate one record with a
+# 2000-char CJK last_error to ~50k chars -- the #433 finding, the same
+# size class as the #423 incident (53,836) -- re-inflating exactly when
+# the operator most needs the tool.  The status surface therefore
+# truncates `last_error` to _STATUS_LAST_ERROR_CHAR_CAP (cap=250) and
+# applies the SAME truncated form to BOTH copies, so the duplication
+# cost is bounded: the canonical degraded-fleet floor -- the payload a
+# fully degraded fleet actually emits, i.e. ONE worst-case record
+# (2000-char CJK last_error, consecutive_failures > 0) PLUS the other 61
+# unhealthy repos named in `summary.omitted_repo_names` -- wraps to
+# ~11,009 chars (measured with _wrapped_result_dumps over the 62-repo
+# CJK oversized fixture through the real status() path), under the
+# 12,000 acceptance bound (#433 criterion 2).  The degenerate single-repo
+# payload (one record, ZERO omitted names) is smaller (~9,400 chars) and
+# is NOT what criterion 2 binds on; the prior round's "~11,888" figure
+# was measured on exactly that degenerate substrate and was falsely
+# attributed to criterion 2.  The DB keeps the full (2000-capped) error;
+# only the status surface truncates.  Errors at or under the cap pass
+# through byte-identical.
+#
+# The budget loop still applies a per-call effective ceiling
 # (_no_repo_budget): this constant, raised to the measured wrapped size
 # of the payload containing only the most severe record when that alone
 # cannot fit -- so at least one full unhealthy record is always emitted
-# (issue #431, criterion 7).  The ceiling exists so the response stays
-# inside an MCP client context window even when a fleet-wide condition
-# -- token-provider outage (#193), sync-host failure aging every repo
-# past its threshold -- makes every repo unhealthy at once: without it
-# the no-repo response re-inflates exactly when the operator is most
-# likely to call it.
+# (issue #431, criterion 7).  The ceiling does NOT guarantee the
+# response fits an MCP client context window when a record's error is
+# large: by design (issue #433) truncation bounds the per-record cost
+# rather than guaranteeing a window fit, and the floor guarantees the
+# most severe record is emitted even when its wrapped form alone
+# exceeds the nominal budget.  Without the floor a fit-or-skip loop
+# would emit ZERO full records on a fully degraded fleet -- exactly when
+# the operator needs them most.
 _NO_REPO_REPOS_CHAR_BUDGET = 8_000
+
+# Status-surface cap (chars) on a record's `last_error` when it enters
+# the shiori_status payload (issue #433).  `last_error` is quoted twice
+# at the status surface -- the record's `last_error` field AND the
+# `consecutive_failures > 0` warning copy -- so the cap is applied to
+# the SAME value used for both copies (see _truncate_last_error_for_status)
+# to bound the duplication.  Chosen by measurement against the canonical
+# degraded-fleet floor -- NOT the degenerate single-repo payload -- using
+# the existing 62-repo CJK oversized fixture through the real status()
+# path (issue #433).  The floor is the payload a fully degraded fleet
+# emits: one worst-case record (2000-char CJK last_error,
+# consecutive_failures > 0) PLUS the other 61 unhealthy repos named in
+# `summary.omitted_repo_names`.  250 is the largest round cap in the
+# 200-400 band that keeps that floored wrapped payload <= 12,000 chars:
+# cap=250 -> ~11,009 chars; cap=280 -> ~11,729 (only ~2% margin, so 250
+# is chosen for ~8% margin against fleet-shape variance such as longer
+# repo names in omitted_repo_names).  cap=300 already exceeds it
+# (~12,209); 400 ~14,609.  The DB keeps the full (2000-capped) error;
+# only the status surface truncates (criterion 1).
+_STATUS_LAST_ERROR_CHAR_CAP = 250
+
+
+def _truncate_last_error_for_status(value: str | None) -> str | None:
+    """Truncate `last_error` for the status payload, identically for both copies.
+
+    Returns *value* unchanged when it is None or already at or under
+    _STATUS_LAST_ERROR_CHAR_CAP; otherwise the leading cap chars followed
+    by a marker that names the stored length, e.g.
+    "... (truncated, 2000 chars stored)".  "stored", not "total": the DB
+    write path itself slices at 2000 chars (src/shiori/db.py), so the true
+    production-original length is unknowable here -- the marker names the
+    stored length it truncated from.  The same return value is used
+    for the record's `last_error` field and the consecutive_failures
+    warning copy so the two stay consistent (issue #433, criterion 1).
+    The DB write path stores the full (2000-capped) error and is
+    untouched by this truncation.
+    """
+    if value is None or len(value) <= _STATUS_LAST_ERROR_CHAR_CAP:
+        return value
+    return (
+        value[:_STATUS_LAST_ERROR_CHAR_CAP]
+        + f"\u2026 (truncated, {len(value)} chars stored)"
+    )
 
 
 def _wire_dumps(value: Any) -> str:
@@ -320,17 +386,26 @@ def _no_repo_budget(
     when even the payload containing only the most severe unhealthy
     record cannot fit it.
 
-    A record's wrapped form is not bounded by the constant: `last_error`
-    is an unbounded production string (record_sync_attempt truncates
-    with a char slice, so 2000 CJK chars survive), and a single such
-    record wraps to ~22.7k chars.  A fit-or-skip loop would then emit
-    ZERO full records on a fully degraded fleet -- exactly when the
-    operator needs them most (issue #431, criterion 7).  The ceiling
-    for this call is therefore floored at the measured wrapped size of
-    the payload containing only the most severe record (every other
-    unhealthy repo named as omitted); the budget loop's first candidate
-    IS that payload, so at least one full record always fits.  The
-    constant stays the nominal ceiling everywhere else.
+    `last_error` is duplicated at the status surface: the record's
+    `last_error` field AND the `consecutive_failures > 0` warning copy
+    both quote it (issue #433).  The status surface truncates it to
+    _STATUS_LAST_ERROR_CHAR_CAP (cap=250, applied to both copies), so the
+    canonical degraded-fleet floor -- one worst-case record (2000-char
+    CJK last_error) PLUS every other unhealthy repo named in
+    `summary.omitted_repo_names` -- wraps to ~11,009 chars (measured via
+    _wrapped_result_dumps over the 62-repo CJK oversized fixture through
+    the real status() path) instead of the pre-#433 ~50k.  A fit-or-skip
+    loop would
+    still emit ZERO full records on a fully degraded fleet without the
+    floor -- exactly when the operator needs them most (issue #431,
+    criterion 7) -- so the ceiling for this call is floored at the
+    measured wrapped size of the payload containing only the most severe
+    record (every other unhealthy repo named as omitted); the budget
+    loop's first candidate IS that payload, so at least one full record
+    always fits.  The constant stays the nominal ceiling everywhere else.
+    The response is NOT guaranteed to fit an MCP client context window
+    when a record's error is large: by design, truncation bounds the
+    per-record cost rather than guaranteeing a window fit (#433).
     """
     if not unhealthy:
         return _NO_REPO_REPOS_CHAR_BUDGET
@@ -383,11 +458,15 @@ def _no_repo_response(
 
     # Effective ceiling for this call: at least one full record must
     # always fit, even when the most severe record's wrapped form alone
-    # exceeds the nominal budget (last_error is an unbounded production
-    # string -- a 2000-char CJK error wraps to ~22.7k chars).  The floor
-    # is the measured payload containing only that record, which is
-    # exactly the loop's first candidate, so the first iteration always
-    # admits (issue #431, criterion 7).
+    # exceeds the nominal budget.  `last_error` is duplicated and
+    # truncated at the status surface (cap=250, issue #433), so the
+    # canonical floor -- one worst-case record PLUS every other unhealthy
+    # repo named in `summary.omitted_repo_names` -- wraps to ~11,009
+    # chars (measured via _wrapped_result_dumps over the 62-repo CJK
+    # oversized fixture through the real status() path), not the pre-#433
+    # ~50k; the floor is its measured payload, which is exactly the
+    # loop's first candidate, so the first iteration always admits
+    # (issue #431, criterion 7).
     budget = _no_repo_budget(
         unhealthy,
         all_repos=all_repos,
@@ -455,10 +534,13 @@ def status(repo: str | None = None) -> dict[str, Any]:
     severe record's wrapped form alone cannot fit it, so at least one
     full record is always emitted).  Every unhealthy repo cut off by the
     budget is named in `summary.omitted_repo_names` (count in
-    `summary.omitted_repos`) rather than dropped silently -- so the
-    client-visible response stays inside an MCP context window even when
-    a fleet-wide condition (e.g. a token-provider outage) makes every
-    repo unhealthy at once.
+    `summary.omitted_repos`) rather than dropped silently.  The response
+    is NOT guaranteed to fit an MCP client context window when a record's
+    error is large: by design (issue #433) `last_error` is truncated at
+    the status surface so the worst-case single record stays near the
+    nominal 8,000-char budget, and the floor still guarantees the most
+    severe record is emitted even when its wrapped form alone exceeds
+    the nominal budget.
 
     Data sources: DB metadata only (sync_run, index_state, chunk counts); no
     clone read, no GitHub API call.
@@ -527,6 +609,11 @@ def status(repo: str | None = None) -> dict[str, Any]:
                 target_repo
             )
             threshold = _stale_threshold_seconds(target_repo)
+            # Truncate last_error at the status surface (issue #433): the
+            # SAME truncated value feeds both the record's `last_error`
+            # field and the consecutive_failures warning copy below, so the
+            # duplication cost is bounded (criterion 1).
+            info["last_error"] = _truncate_last_error_for_status(info.get("last_error"))
             warnings = _build_warnings(info, chunk_counts, items_in_db, cursors, threshold)
             info.pop("token_provider_error", None)
             info["warnings"] = warnings

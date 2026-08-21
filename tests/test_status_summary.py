@@ -21,11 +21,13 @@ from mcp_types import JSONRPCResponse
 
 from shiori.tools.status import (
     _NO_REPO_REPOS_CHAR_BUDGET,
+    _STATUS_LAST_ERROR_CHAR_CAP,
     _is_healthy,
     _no_repo_budget,
     _no_repo_response,
     _severity_key,
     _summarize,
+    _truncate_last_error_for_status,
     _wrapped_result_dumps,
     status,
 )
@@ -892,3 +894,109 @@ class TestSummarize:
             "with_pending": 1,
         }
         assert summary["pending_total"] == 5
+
+
+
+# ── last_error truncation at the status surface (issue #433) ──
+
+
+def _cjk_error(chars: int = 2000) -> str:
+    # Same CJK-heavy production error shape as TestCJKDegradedFleetBudget /
+    # TestOversizedRecordStillEmitted: every char is non-ASCII, so it costs
+    # 6 wire chars under the transport's ensure_ascii default.
+    return ("同期に失敗しました（トークンプロバイダーへの接続に失敗しました）" * 100)[:chars]
+
+
+class TestLastErrorStatusSurfaceTruncation:
+    """Criterion 1 & 2 (issue #433): last_error is truncated to the SAME
+    form in the record field and the consecutive_failures warning, and a
+    single worst-case record stays inside the 12,000-char bound."""
+
+    @staticmethod
+    def _single_failing_repo_payload(last_error, consecutive_failures=3):
+        # Drive the real status() surface (no-repo path) so the truncation
+        # point in status() is exercised exactly as in production.
+        runs = {
+            "o/r": {
+                **_healthy_run(100),
+                "consecutive_failures": consecutive_failures,
+                "last_error": last_error,
+            }
+        }
+        with _patched_status(["o/r"], sync_runs=runs):
+            return status()
+
+    def test_oversized_cjk_last_error_is_truncated_in_record_and_warning(self):
+        raw = _cjk_error(2000)
+        result = self._single_failing_repo_payload(raw)
+        record = result["repos"]["o/r"]
+        expected = _truncate_last_error_for_status(raw)
+        # record field carries the shared truncated form
+        assert record["last_error"] == expected
+        assert record["last_error"].startswith(raw[:_STATUS_LAST_ERROR_CHAR_CAP])
+        # marker names the original length
+        assert record["last_error"].endswith("… (truncated, 2000 chars stored)")
+        # warning carries the SAME truncated form (raw is not duplicated)
+        assert len(record["warnings"]) == 1
+        assert record["warnings"][0].endswith(expected)
+        assert raw not in record["warnings"][0]
+        # repo-specified path truncates identically
+        with _patched_status(
+            ["o/r"],
+            sync_runs={
+                "o/r": {
+                    **_healthy_run(100),
+                    "consecutive_failures": 3,
+                    "last_error": raw,
+                }
+            },
+        ):
+            repo_result = status(repo="o/r")
+        assert repo_result["repos"]["o/r"]["last_error"] == expected
+        assert repo_result["repos"]["o/r"]["warnings"][0].endswith(expected)
+
+    def test_wrapped_worst_case_record_stays_under_twelve_thousand(self):
+        # Criterion 2: the payload a fully degraded fleet actually emits --
+        # exactly ONE worst-case record (2000-char CJK last_error,
+        # consecutive_failures > 0) in `repos` PLUS every other unhealthy
+        # repo named in `summary.omitted_repo_names` -- must never exceed
+        # 12,000 chars.  This drives the REAL status() surface with the
+        # existing 62-repo CJK oversized fixture (issue #433), so the
+        # `omitted_repo_names` overhead the prior round's degenerate
+        # single-repo test hid is included.  That floor -- not the
+        # zero-omitted happy path -- is the criterion-2 subject; the
+        # degenerate payload is smaller (~9,400 chars) and must not be the
+        # only thing guarding the bound.
+        records = TestOversizedRecordStillEmitted._oversized_records(62)
+        with _patched_status(list(records.keys()), sync_runs=records):
+            result = status()
+        # Exactly one worst-case record is emitted; the rest are named.
+        assert len(result["repos"]) == 1
+        assert result["summary"]["omitted_repos"] == 61
+        wrapped = _wrapped_result_dumps(result)
+        # Criterion 2 bound, measured with the existing wrap helper.
+        assert len(wrapped) <= 12_000, f"{len(wrapped)} chars"
+        # The chosen cap (250) keeps a healthy margin under the bound.
+        assert len(wrapped) <= 11_500, f"{len(wrapped)} chars"
+
+    def test_short_last_error_passes_through_unmarked(self):
+        raw = "git fetch failed"  # under the cap, ASCII
+        result = self._single_failing_repo_payload(raw, consecutive_failures=1)
+        record = result["repos"]["o/r"]
+        # byte-identical, no marker
+        assert record["last_error"] == raw
+        assert "truncated" not in record["last_error"]
+        assert len(record["warnings"]) == 1
+        assert record["warnings"][0].endswith(raw)
+        assert len(record["last_error"]) == len(raw)
+
+    def test_truncate_helper_none_and_short_and_over(self):
+        assert _truncate_last_error_for_status(None) is None
+        short = "boom"
+        assert _truncate_last_error_for_status(short) is short
+        over = _cjk_error(2000)
+        trunc = _truncate_last_error_for_status(over)
+        assert trunc != over
+        assert trunc.endswith("… (truncated, 2000 chars stored)")
+        assert trunc.startswith(over[:_STATUS_LAST_ERROR_CHAR_CAP])
+        assert "truncated" in trunc
