@@ -191,6 +191,9 @@ def run_forget(
                         f"sync is running for {repo} in another process; try again later"
                     )
                 deleted = schema.forget_repo(conn, repo)
+                db.refresh_chunk_counts(conn, repo)
+                with conn.cursor() as cur:
+                    cur.execute("DELETE FROM repo_chunk_counts WHERE repo = %s", (repo,))
                 conn.commit()
                 result[repo] = deleted
                 log.info(
@@ -743,6 +746,7 @@ def run_index(
                     # indexed_head too, or shiori_status reports it stale /
                     # never-indexed forever despite a fully caught-up index.
                     db.advance_indexed_head(conn, repo)
+                    db.refresh_chunk_counts(conn, repo)
                     synced_ts = (
                         finished_at.isoformat() if finished_at is not None else "?"
                     )
@@ -1171,6 +1175,7 @@ def run_ingest(
                     # pull-sync path -- a repo indexed only via `ingest run`
                     # must not stay stale/never-indexed in shiori_status.
                     db.advance_indexed_head(conn, repo)
+                    db.refresh_chunk_counts(conn, repo)
                     synced_ts = (
                         finished_at.isoformat() if finished_at is not None else "?"
                     )

@@ -51,7 +51,7 @@ class TestRepoScopedTablesCoversSchema:
         return found
 
     def test_schema_parse_finds_the_known_tables(self):
-        """先に検算器自体を疑う（正規表現が空振りしていたら以降のテストは無意味）。"""
+        """先に見検証器自体を疑う（正規表現が空振りしていたら以降のテストは無意味）。"""
         assert self._tables_with_repo_column() == {
             "chunks",
             "doc_files",
@@ -59,6 +59,7 @@ class TestRepoScopedTablesCoversSchema:
             "repo_index_state",
             "sync_state",
             "sync_runs",
+            "repo_chunk_counts",
         }
 
     def test_no_repo_scoped_table_is_missing(self):

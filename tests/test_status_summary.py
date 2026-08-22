@@ -51,6 +51,7 @@ def _patched_status(
     index_state=None,
     cursors=None,
     chunk_counts=None,
+    all_chunk_counts=None,
     items_in_db=0,
 ):
     """Run status() against fully mocked DB accessors.
@@ -66,6 +67,12 @@ def _patched_status(
             return dict(_ALL_CURSORS)
         return cursors.get(target_repo, dict(_ALL_CURSORS))
 
+    if all_chunk_counts is None:
+        c_counts = chunk_counts if chunk_counts is not None else {}
+        all_chunk_map = {r: dict(c_counts) for r in repos}
+    else:
+        all_chunk_map = all_chunk_counts
+
     with (
         patch("shiori.tools.status._conn"),
         patch("shiori.tools.status.settings") as mock_settings,
@@ -80,9 +87,14 @@ def _patched_status(
         patch("shiori.tools.status.db.get_repo_index_state", side_effect=
               lambda _c, r: (index_state or {}).get(r, {})),
         patch(
+            "shiori.tools.status.db.get_all_chunk_counts",
+            return_value=all_chunk_map,
+        ),
+        patch(
             "shiori.tools.status.db.get_chunk_counts",
             return_value=chunk_counts if chunk_counts is not None else {},
         ),
+        patch("shiori.tools.status.db.refresh_chunk_counts", return_value={}),
         patch("shiori.tools.status.db.get_issue_item_count", return_value=items_in_db),
         patch("shiori.tools.status.db.get_cursors", side_effect=_cursors_for),
         patch("shiori.tools.status._validate_repo_name", side_effect=lambda r: r),
@@ -1000,3 +1012,134 @@ class TestLastErrorStatusSurfaceTruncation:
         assert trunc.endswith("… (truncated, 2000 chars stored)")
         assert trunc.startswith(over[:_STATUS_LAST_ERROR_CHAR_CAP])
         assert "truncated" in trunc
+
+
+class TestChunkCountsCaching:
+    """Acceptance criteria 1 & 2: per-repo chunk counts caching behavior in status()."""
+
+    def test_no_repo_chunk_counts_caching_sources(self):
+        """Acceptance criterion 1: 3 repos where cache has 2 -> get_all_chunk_counts 1x,
+        get_chunk_counts 1x, refresh_chunk_counts 1x, source == 'mixed';
+        all 3 cached -> get_chunk_counts 0x, source == 'cached'.
+        """
+        repos = ["o/r1", "o/r2", "o/r3"]
+        cached_map = {
+            "o/r1": {"code": 10},
+            "o/r2": {"issue": 5},
+        }
+
+        with (
+            patch("shiori.tools.status._conn"),
+            patch("shiori.tools.status.settings") as mock_settings,
+            patch("shiori.tools.status.build_token_provider") as mock_tp,
+            patch("shiori.tools.status.db.get_sync_runs", return_value={}),
+            patch("shiori.tools.status.db.get_all_repo_index_state", return_value={}),
+            patch("shiori.tools.status.db.get_cursors", return_value=dict(_ALL_CURSORS)),
+            patch("shiori.tools.status.db.get_issue_item_count", return_value=0),
+            patch(
+                "shiori.tools.status.db.get_all_chunk_counts",
+                return_value=cached_map,
+            ) as mock_get_all,
+            patch(
+                "shiori.tools.status.db.get_chunk_counts",
+                return_value={"code": 2},
+            ) as mock_get_single,
+            patch("shiori.tools.status.db.refresh_chunk_counts") as mock_refresh,
+            patch("shiori.tools.status._validate_repo_name", side_effect=lambda r: r),
+        ):
+            mock_settings.repos = repos
+            mock_settings.dev_repos = set()
+            mock_settings.sync_interval_seconds = 300
+            mock_settings.dev_sync_interval_seconds = 900
+            mock_settings.ref_sync_interval_seconds = 86400
+            mock_tp.return_value.name = "static"
+
+            res = status()
+            assert res["summary"]["chunk_counts_source"] == "mixed"
+            assert mock_get_all.call_count == 1
+            assert mock_get_single.call_count == 1
+            assert mock_get_single.call_args[0][1] == "o/r3"
+            assert mock_refresh.call_count == 1
+            assert mock_refresh.call_args[0][1] == "o/r3"
+
+        cached_map_all = {
+            "o/r1": {"code": 10},
+            "o/r2": {"issue": 5},
+            "o/r3": {"code": 2},
+        }
+        with (
+            patch("shiori.tools.status._conn"),
+            patch("shiori.tools.status.settings") as mock_settings,
+            patch("shiori.tools.status.build_token_provider") as mock_tp,
+            patch("shiori.tools.status.db.get_sync_runs", return_value={}),
+            patch("shiori.tools.status.db.get_all_repo_index_state", return_value={}),
+            patch("shiori.tools.status.db.get_cursors", return_value=dict(_ALL_CURSORS)),
+            patch("shiori.tools.status.db.get_issue_item_count", return_value=0),
+            patch(
+                "shiori.tools.status.db.get_all_chunk_counts",
+                return_value=cached_map_all,
+            ) as mock_get_all,
+            patch("shiori.tools.status.db.get_chunk_counts") as mock_get_single,
+            patch("shiori.tools.status.db.refresh_chunk_counts") as mock_refresh,
+            patch("shiori.tools.status._validate_repo_name", side_effect=lambda r: r),
+        ):
+            mock_settings.repos = repos
+            mock_settings.dev_repos = set()
+            mock_settings.sync_interval_seconds = 300
+            mock_settings.dev_sync_interval_seconds = 900
+            mock_settings.ref_sync_interval_seconds = 86400
+            mock_tp.return_value.name = "static"
+
+            res = status()
+            assert res["summary"]["chunk_counts_source"] == "cached"
+            assert mock_get_single.call_count == 0
+            assert mock_refresh.call_count == 0
+
+    def test_zero_chunk_repo_cached_hit(self):
+        """0-chunk repos present in get_all_chunk_counts as {} trigger a cache hit, not live query."""
+        repos = ["o/empty"]
+        cached_map = {"o/empty": {}}
+        with (
+            patch("shiori.tools.status._conn"),
+            patch("shiori.tools.status.settings") as mock_settings,
+            patch("shiori.tools.status.build_token_provider") as mock_tp,
+            patch("shiori.tools.status.db.get_sync_runs", return_value={}),
+            patch("shiori.tools.status.db.get_all_repo_index_state", return_value={}),
+            patch("shiori.tools.status.db.get_cursors", return_value=dict(_ALL_CURSORS)),
+            patch("shiori.tools.status.db.get_issue_item_count", return_value=0),
+            patch(
+                "shiori.tools.status.db.get_all_chunk_counts",
+                return_value=cached_map,
+            ),
+            patch("shiori.tools.status.db.get_chunk_counts") as mock_get_single,
+            patch("shiori.tools.status.db.refresh_chunk_counts") as mock_refresh,
+            patch("shiori.tools.status._validate_repo_name", side_effect=lambda r: r),
+        ):
+            mock_settings.repos = repos
+            mock_settings.dev_repos = set()
+            mock_settings.sync_interval_seconds = 300
+            mock_settings.dev_sync_interval_seconds = 900
+            mock_settings.ref_sync_interval_seconds = 86400
+            mock_tp.return_value.name = "static"
+
+            res = status()
+            assert res["summary"]["chunk_counts_source"] == "cached"
+            assert mock_get_single.call_count == 0
+            assert mock_refresh.call_count == 0
+
+    def test_no_repo_fields_identical_with_cached_counts(self):
+        """Acceptance criterion 2: per-repo records in no-repo response are identical
+        to today's for the same counts.
+        """
+        counts = {"code": 12, "issue": 4, "pr_review": 1}
+        with _patched_status(
+            ["o/unhealthy"],
+            all_chunk_counts={"o/unhealthy": counts},
+            sync_runs={"o/unhealthy": {"last_error": "boom", "consecutive_failures": 1}},
+        ):
+            res = status()
+            rec = res["repos"]["o/unhealthy"]
+            assert rec["chunks"] == counts
+            assert rec["code_chunks"] == 12
+            assert rec["code_indexed"] is True
+            assert any("1 consecutive sync failures" in w for w in rec["warnings"])

@@ -20,6 +20,7 @@ REPO_SCOPED_TABLES: tuple[str, ...] = (
     "sync_state",
     "sync_runs",
     "repo_index_state",
+    "repo_chunk_counts",
 )
 
 
@@ -38,7 +39,7 @@ def reindex_prepare(conn: psycopg.Connection, repos: list[str] | None) -> None:
     (issue #352): rebuilds ``chunks`` (re-chunk + re-embed) without re-fetching
     from GitHub.
 
-    Deletes only from ``chunks`` and ``doc_files`` -- ``doc_files`` is a
+    Deletes only from ``chunks``, ``repo_chunk_counts``, and ``doc_files`` -- ``doc_files`` is a
     path+sha cache, not the content itself (the on-disk clone is), so
     clearing it forces re-chunking with no network fetch. ``issue_items``
     rows are preserved; only ``indexed_at`` is reset to NULL so
@@ -57,10 +58,12 @@ def reindex_prepare(conn: psycopg.Connection, repos: list[str] | None) -> None:
     with conn.cursor() as cur:
         if repos is None:
             cur.execute("TRUNCATE chunks")
+            cur.execute("TRUNCATE repo_chunk_counts")
             cur.execute("UPDATE issue_items SET indexed_at = NULL")
             cur.execute("DELETE FROM doc_files")
         else:
             cur.execute("DELETE FROM chunks WHERE repo = ANY(%s)", (repos,))
+            cur.execute("DELETE FROM repo_chunk_counts WHERE repo = ANY(%s)", (repos,))
             cur.execute(
                 "UPDATE issue_items SET indexed_at = NULL WHERE repo = ANY(%s)",
                 (repos,),
@@ -148,6 +151,14 @@ CREATE TABLE IF NOT EXISTS repo_index_state (
     indexed_head TEXT,             -- Phase 2 completed indexed HEAD
     last_sync_at TIMESTAMPTZ,
     last_sync_error TEXT
+);
+
+CREATE TABLE IF NOT EXISTS repo_chunk_counts (
+    repo TEXT,
+    source_type TEXT,
+    n INTEGER NOT NULL,
+    computed_at TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (repo, source_type)
 );
 
 CREATE TABLE IF NOT EXISTS doc_files (
@@ -477,6 +488,26 @@ def _run_alter_statements(conn: psycopg.Connection) -> None:
         log.info(
             "migrate: executed issue_items columns %s", [c for c, _ in missing_issue_items_cols]
         )
+
+    # 9. Add repo_chunk_counts table for cached per-repo chunk counts (#435)
+    with conn.cursor() as cur:
+        cur.execute("SELECT to_regclass('repo_chunk_counts')")
+        row = cur.fetchone()
+        if row is not None and row[0] is None:
+            cur.execute(
+                """
+                CREATE TABLE repo_chunk_counts (
+                    repo TEXT,
+                    source_type TEXT,
+                    n INTEGER NOT NULL,
+                    computed_at TIMESTAMPTZ NOT NULL,
+                    PRIMARY KEY (repo, source_type)
+                )
+                """
+            )
+            ran_any = True
+            log.info("migrate: executed repo_chunk_counts table create")
+    conn.commit()
 
     if not ran_any:
         log.info("schema up to date (no DDL executed)")
