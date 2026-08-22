@@ -125,6 +125,13 @@ See [docs/guides/setup.md](docs/guides/setup.md) for:
 - **Reference (read-only) setup** — public repos, no token, one-shot bounded ingest
 - **Development (writable) setup** — code indexing, PR review sync, GitHub App token
 
+### Environment Variables
+
+- **`SHIORI_REPOS`**: Comma-separated target repos (`owner/name`).
+- **`SHIORI_DEV_REPOS`**: Comma-separated repos (`owner/name`) that have source code indexed and PR review comments synced.
+- **`SHIORI_DOCS_ONLY_REPOS`**: Comma-separated repos (`owner/name`) whose issue trackers (issues, PRs, comments, reviews) are neither fetched nor indexed. Docs are still synced. This setting is independent of `SHIORI_DEV_REPOS` (a repo's code indexing status is decided solely by `SHIORI_DEV_REPOS`). Setting this variable for an already-indexed repo leaves its existing issue rows in place without deleting them.
+- **`SHIORI_INDEX_BOT_LOGINS`**: Comma-separated bot logins to allowlist for indexing.
+
 The [design doc](docs/design/01_data_ingestion_and_sync.md) covers the architecture: three cursor streams, per-repo PG advisory locks for parallel containers, dev-first ordering, and the ingest strategy.
 
 ### Removing Repositories from the Index

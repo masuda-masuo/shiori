@@ -368,3 +368,34 @@ class TestSettingsConstructionSurvivesComposeEmptyForm:
         assert s.rate_limit_max_wait == 60.0
         assert s.rate_limit_max_retries == 3
         assert s.max_parallel_maintenance_workers == 0
+
+
+class TestDocsOnlyReposConfig:
+    """SHIORI_DOCS_ONLY_REPOS -- issue #441."""
+
+    def test_unset_defaults_to_empty_set(self, monkeypatch):
+        monkeypatch.delenv("SHIORI_DOCS_ONLY_REPOS", raising=False)
+        s = Settings()
+        assert s.docs_only_repos == set()
+        assert not s.is_docs_only("owner/repo")
+
+    def test_empty_string_returns_empty_set(self, monkeypatch):
+        monkeypatch.setenv("SHIORI_DOCS_ONLY_REPOS", "")
+        s = Settings()
+        assert s.docs_only_repos == set()
+        assert not s.is_docs_only("owner/repo")
+
+    def test_whitespace_string_returns_empty_set(self, monkeypatch):
+        monkeypatch.setenv("SHIORI_DOCS_ONLY_REPOS", "   ")
+        s = Settings()
+        assert s.docs_only_repos == set()
+
+    def test_valid_comma_separated_repos(self, monkeypatch):
+        monkeypatch.setenv(
+            "SHIORI_DOCS_ONLY_REPOS", "cockroachdb/cockroach, golang/go "
+        )
+        s = Settings()
+        assert s.docs_only_repos == {"cockroachdb/cockroach", "golang/go"}
+        assert s.is_docs_only("cockroachdb/cockroach")
+        assert s.is_docs_only("golang/go")
+        assert not s.is_docs_only("masuda-masuo/shiori")

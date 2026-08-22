@@ -25,7 +25,7 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 
 from . import db, schema
-from .config import IndexBudget, Settings, load_settings
+from .config import IndexBudget, Settings, is_docs_only, load_settings
 from .embedding import Embedder
 from .github_auth import build_token_provider
 from .github_sync import (
@@ -548,10 +548,13 @@ def run_fetch(
                 # Fetch issues/PRs/comments/reviews (API only)
                 try:
                     t0 = time.monotonic()
-                    resolved_since = _resolve_backfill_since(backfill_since, settings, repo)
-                    n_fetched = fetch_issues(settings, conn, repo, provider, backfill_since=resolved_since)
-                    log.info("fetch issues: %d items fetched (%.1fs)",
-                             n_fetched, time.monotonic() - t0)
+                    if is_docs_only(settings, repo):
+                        log.info("fetch issues: skipping %s (docs-only repo)", repo)
+                    else:
+                        resolved_since = _resolve_backfill_since(backfill_since, settings, repo)
+                        n_fetched = fetch_issues(settings, conn, repo, provider, backfill_since=resolved_since)
+                        log.info("fetch issues: %d items fetched (%.1fs)",
+                                 n_fetched, time.monotonic() - t0)
                 except Exception as exc:
                     conn.rollback()
                     db.record_sync_attempt(conn, repo, success=False, error=str(exc))
@@ -702,15 +705,19 @@ def run_index(
 
                 # Index issues/PRs
                 t0 = time.monotonic()
-                n_items = index_issues(
-                    settings, conn, embedder, repo,
-                    buffer=buffer if is_bulk else None,
-                    budget=budget,
-                )
-                if is_bulk and buffer is not None:
-                    n_flushed = buffer.flush()
-                    conn.commit()
-                    log.info("issues flushed: %d chunks", n_flushed)
+                if is_docs_only(settings, repo):
+                    log.info("index issues: skipping %s (docs-only repo)", repo)
+                    n_items = 0
+                else:
+                    n_items = index_issues(
+                        settings, conn, embedder, repo,
+                        buffer=buffer if is_bulk else None,
+                        budget=budget,
+                    )
+                    if is_bulk and buffer is not None:
+                        n_flushed = buffer.flush()
+                        conn.commit()
+                        log.info("issues flushed: %d chunks", n_flushed)
                 t_issues = time.monotonic() - t0
                 log.info("index issues: %d items indexed (%.1fs)", n_items, t_issues)
 
@@ -736,7 +743,7 @@ def run_index(
                 # trustworthy completion signal in the system) -- and keep
                 # the repo out of `completed`, so the bulk path's heavy-index
                 # gate cannot rebuild HNSW/pgroonga mid-drain.
-                pending = db.count_pending_issue_items(conn, repo)
+                pending = 0 if is_docs_only(settings, repo) else db.count_pending_issue_items(conn, repo)
                 if pending == 0:
                     finished_at = db.record_sync_run(
                         conn, repo, route, n_docs, n_items, n_code
@@ -817,7 +824,12 @@ def run_index(
     # Run summary (issue #377): fixed key=value shape, greppable.  An
     # exhausted budget is a normal outcome: truncated=1 with a non-zero
     # exit only when a repo actually FAILED below.
-    remaining = db.count_pending_issue_items_for_repos(conn, targets)
+    active_issue_targets = [r for r in targets if not is_docs_only(settings, r)]
+    remaining = (
+        db.count_pending_issue_items_for_repos(conn, active_issue_targets)
+        if active_issue_targets
+        else 0
+    )
     log.info(
         "index run summary: route=%s targets=%d completed_repos=%d "
         "truncated=%d remaining_pending=%d elapsed_s=%.1f",
@@ -1036,10 +1048,13 @@ def run_ingest(
 
                 t0 = time.monotonic()
                 try:
-                    resolved_since = _resolve_backfill_since(backfill_since, settings, repo)
-                    n_fetched = fetch_issues(settings, conn2, repo, provider, backfill_since=resolved_since)
-                    log.info("fetch issues: %d items fetched (%.1fs)",
-                             n_fetched, time.monotonic() - t0)
+                    if is_docs_only(settings, repo):
+                        log.info("fetch issues: skipping %s (docs-only repo)", repo)
+                    else:
+                        resolved_since = _resolve_backfill_since(backfill_since, settings, repo)
+                        n_fetched = fetch_issues(settings, conn2, repo, provider, backfill_since=resolved_since)
+                        log.info("fetch issues: %d items fetched (%.1fs)",
+                                 n_fetched, time.monotonic() - t0)
                 except Exception as exc:
                     conn2.rollback()
                     db.record_sync_attempt(conn2, repo, success=False, error=str(exc))
@@ -1133,15 +1148,19 @@ def run_ingest(
 
                 # issues: read issue_items + chunk + embed
                 t0 = time.monotonic()
-                n_items = index_issues(
-                    settings, conn, embedder, repo,
-                    buffer=buffer if is_bulk else None,
-                    budget=budget,
-                )
-                if is_bulk and buffer is not None:
-                    n_flushed = buffer.flush()
-                    conn.commit()
-                    log.info("issues flushed: %d chunks", n_flushed)
+                if is_docs_only(settings, repo):
+                    log.info("index issues: skipping %s (docs-only repo)", repo)
+                    n_items = 0
+                else:
+                    n_items = index_issues(
+                        settings, conn, embedder, repo,
+                        buffer=buffer if is_bulk else None,
+                        budget=budget,
+                    )
+                    if is_bulk and buffer is not None:
+                        n_flushed = buffer.flush()
+                        conn.commit()
+                        log.info("issues flushed: %d chunks", n_flushed)
                 t_issues = time.monotonic() - t0
                 log.info("index issues: %d items indexed (%.1fs)", n_items, t_issues)
 
@@ -1165,7 +1184,7 @@ def run_ingest(
                 # pass was cut short by the budget => record progress only,
                 # NO finished_at, and keep the repo out of `completed` so
                 # the bulk path's heavy-index gate cannot rebuild mid-drain.
-                pending = db.count_pending_issue_items(conn, repo)
+                pending = 0 if is_docs_only(settings, repo) else db.count_pending_issue_items(conn, repo)
                 if pending == 0:
                     finished_at = db.record_sync_run(
                         conn, repo, route, n_docs, n_items, n_code
@@ -1247,7 +1266,12 @@ def run_ingest(
     # Run summary (issue #377): fixed key=value shape, greppable.  An
     # exhausted budget is a normal outcome: truncated=1 with a non-zero
     # exit only when a repo actually FAILED below.
-    remaining = db.count_pending_issue_items_for_repos(conn, targets)
+    active_issue_targets = [r for r in targets if not is_docs_only(settings, r)]
+    remaining = (
+        db.count_pending_issue_items_for_repos(conn, active_issue_targets)
+        if active_issue_targets
+        else 0
+    )
     log.info(
         "ingest run summary: route=%s targets=%d completed_repos=%d "
         "truncated=%d remaining_pending=%d elapsed_s=%.1f",

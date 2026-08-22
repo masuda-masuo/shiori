@@ -18,7 +18,7 @@ from typing import Any
 import psycopg
 
 from . import db, schema
-from .config import Settings, load_settings
+from .config import Settings, is_docs_only, load_settings
 from .embedding import Embedder
 from .github_auth import build_token_provider
 from .github_sync import ChunkBuffer, sync_code, sync_docs, sync_issues
@@ -242,14 +242,18 @@ def _do_sync(
                                     assert buffer is not None  # noqa: S101 - type-narrowing assert (guarded by is_bulk)
                                     buffer.flush()
                                     conn.commit()
-                                n_items = sync_issues(
-                                    settings, conn, embedder, repo, provider,
-                                    buffer=buffer if is_bulk else None,
-                                )
-                                if is_bulk:
-                                    assert buffer is not None  # noqa: S101 - type-narrowing assert (guarded by is_bulk)
-                                    buffer.flush()
-                                    conn.commit()
+                                if is_docs_only(settings, repo):
+                                    log.info("sync issues: skipping %s (docs-only repo)", repo)
+                                    n_items = 0
+                                else:
+                                    n_items = sync_issues(
+                                        settings, conn, embedder, repo, provider,
+                                        buffer=buffer if is_bulk else None,
+                                    )
+                                    if is_bulk:
+                                        assert buffer is not None  # noqa: S101 - type-narrowing assert (guarded by is_bulk)
+                                        buffer.flush()
+                                        conn.commit()
                                 n_code = sync_code(
                                     settings, conn, embedder, repo, provider,
                                     buffer=buffer if is_bulk else None,
