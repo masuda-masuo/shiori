@@ -491,6 +491,22 @@ def get_issue_item_count(conn: psycopg.Connection, repo: str) -> int:
         return row[0] if row else 0
 
 
+def get_all_issue_item_counts(conn: psycopg.Connection) -> dict[str, int]:
+    """Return total issue_item row counts per repo as ``{repo: count}``.
+
+    One ``GROUP BY`` replaces the per-repo ``get_issue_item_count`` loop when
+    status() reports every repo (this change).  Repos with no issue_items
+    rows are simply absent -- callers treat a missing key as 0.
+    """
+    result: dict[str, int] = {}
+    with conn.cursor() as cur:
+        cur.execute("SELECT repo, count(*) FROM issue_items GROUP BY repo")
+        rows = cur.fetchall() or []
+        for r, n in rows:
+            result[r] = int(n)
+    return result
+
+
 def count_pending_issue_items(conn: psycopg.Connection, repo: str) -> int:
     """Count *repo*'s issue_items rows still pending (re)indexing (issue #377).
 

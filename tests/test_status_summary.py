@@ -53,6 +53,7 @@ def _patched_status(
     chunk_counts=None,
     all_chunk_counts=None,
     items_in_db=0,
+    all_issue_item_counts=None,
 ):
     """Run status() against fully mocked DB accessors.
 
@@ -72,6 +73,11 @@ def _patched_status(
         all_chunk_map = {r: dict(c_counts) for r in repos}
     else:
         all_chunk_map = all_chunk_counts
+
+    if all_issue_item_counts is None:
+        issue_map = {r: items_in_db for r in repos}
+    else:
+        issue_map = all_issue_item_counts
 
     with (
         patch("shiori.tools.status._conn"),
@@ -96,6 +102,10 @@ def _patched_status(
         ),
         patch("shiori.tools.status.db.refresh_chunk_counts", return_value={}),
         patch("shiori.tools.status.db.get_issue_item_count", return_value=items_in_db),
+        patch(
+            "shiori.tools.status.db.get_all_issue_item_counts",
+            return_value=issue_map,
+        ),
         patch("shiori.tools.status.db.get_cursors", side_effect=_cursors_for),
         patch("shiori.tools.status._validate_repo_name", side_effect=lambda r: r),
     ):
@@ -1143,3 +1153,106 @@ class TestChunkCountsCaching:
             assert rec["code_chunks"] == 12
             assert rec["code_indexed"] is True
             assert any("1 consecutive sync failures" in w for w in rec["warnings"])
+
+
+class TestAllIssueItemCounts:
+    """Issue #438: get_all_issue_item_counts is called once on the no-repo path."""
+
+    def test_no_repo_calls_get_all_issue_item_counts_once(self):
+        """3 repos, no-repo call -> get_all_issue_item_counts 1x,
+        get_issue_item_count 0x, and each repo's items_in_db matches
+        the dict value (missing repo -> 0).
+        """
+        repos = ["o/r1", "o/r2", "o/r3"]
+        all_issue_map = {"o/r1": 42, "o/r2": 7, "o/r3": 0}
+        # Make all repos unhealthy so they appear in the no-repo repos dict
+        sync_runs = {
+            r: {"last_error": "boom", "consecutive_failures": 1}
+            for r in repos
+        }
+        provider = MagicMock()
+        provider.name = "static"
+
+        with (
+            patch("shiori.tools.status._conn"),
+            patch("shiori.tools.status.settings") as mock_settings,
+            patch("shiori.tools.status.build_token_provider", return_value=provider),
+            patch("shiori.tools.status.db.get_sync_runs", return_value=sync_runs),
+            patch("shiori.tools.status.db.get_all_repo_index_state", return_value={}),
+            patch("shiori.tools.status.db.get_all_chunk_counts", return_value={r: {} for r in repos}),
+            patch("shiori.tools.status.db.get_chunk_counts", return_value={}),
+            patch("shiori.tools.status.db.refresh_chunk_counts", return_value={}),
+            patch("shiori.tools.status.db.get_cursors", return_value=dict(_ALL_CURSORS)),
+            patch("shiori.tools.status._validate_repo_name", side_effect=lambda r: r),
+            patch(
+                "shiori.tools.status.db.get_all_issue_item_counts",
+                return_value=all_issue_map,
+            ) as mock_get_all,
+            patch(
+                "shiori.tools.status.db.get_issue_item_count", return_value=0,
+            ) as mock_get_single,
+        ):
+            mock_settings.repos = repos
+            mock_settings.dev_repos = set()
+            mock_settings.sync_interval_seconds = 300
+            mock_settings.dev_sync_interval_seconds = 900
+            mock_settings.ref_sync_interval_seconds = 86400
+
+            res = status()
+            assert mock_get_all.call_count == 1
+            assert mock_get_single.call_count == 0
+            for r in repos:
+                assert res["repos"][r]["items_in_db"] == all_issue_map.get(r, 0)
+
+    def test_no_repo_missing_repo_in_dict_yields_zero(self):
+        """A repo absent from get_all_issue_item_counts result gets items_in_db == 0."""
+        repos = ["o/r1", "o/missing"]
+        all_issue_map = {"o/r1": 5}
+        sync_runs = {
+            r: {"last_error": "boom", "consecutive_failures": 1}
+            for r in repos
+        }
+
+        with _patched_status(
+            repos,
+            all_issue_item_counts=all_issue_map,
+            sync_runs=sync_runs,
+        ):
+            res = status()
+            assert res["repos"]["o/r1"]["items_in_db"] == 5
+            assert res["repos"]["o/missing"]["items_in_db"] == 0
+
+    def test_single_repo_calls_get_issue_item_count(self):
+        """Single-repo call -> get_issue_item_count 1x,
+        get_all_issue_item_counts not called.
+        """
+        provider = MagicMock()
+        provider.name = "static"
+
+        with (
+            patch("shiori.tools.status._conn"),
+            patch("shiori.tools.status.settings") as mock_settings,
+            patch("shiori.tools.status.build_token_provider", return_value=provider),
+            patch("shiori.tools.status.db.get_sync_run", return_value=None),
+            patch("shiori.tools.status.db.get_repo_index_state", return_value={}),
+            patch("shiori.tools.status.db.get_chunk_counts", return_value={}),
+            patch("shiori.tools.status.db.get_cursors", return_value=dict(_ALL_CURSORS)),
+            patch("shiori.tools.status._validate_repo_name", side_effect=lambda r: r),
+            patch(
+                "shiori.tools.status.db.get_issue_item_count", return_value=3,
+            ) as mock_get_single,
+            patch(
+                "shiori.tools.status.db.get_all_issue_item_counts",
+            ) as mock_get_all,
+        ):
+            mock_settings.repos = ["o/only"]
+            mock_settings.dev_repos = set()
+            mock_settings.sync_interval_seconds = 300
+            mock_settings.dev_sync_interval_seconds = 900
+            mock_settings.ref_sync_interval_seconds = 86400
+
+            res = status(repo="o/only")
+            assert mock_get_single.call_count == 1
+            assert mock_get_single.call_args[0][1] == "o/only"
+            assert mock_get_all.call_count == 0
+            assert res["repos"]["o/only"]["items_in_db"] == 3
