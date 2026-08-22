@@ -77,7 +77,10 @@ def index_docs(
                 current[rel] = hashlib.sha256(fp.read()).hexdigest()
 
     with conn.cursor() as cur:
-        cur.execute("SELECT path, content_sha FROM doc_files WHERE repo = %s", (repo,))
+        cur.execute(
+            "SELECT path, content_sha FROM doc_files WHERE repo = %s AND kind = 'doc'",
+            (repo,),
+        )
         indexed = dict(cur.fetchall())
 
     removed = set(indexed) - set(current)
@@ -87,7 +90,8 @@ def index_docs(
         delete_chunks_by_key(conn, f"doc:{repo}:{path}")
         with conn.cursor() as cur:
             cur.execute(
-                "DELETE FROM doc_files WHERE repo = %s AND path = %s", (repo, path)
+                "DELETE FROM doc_files WHERE repo = %s AND path = %s AND kind = 'doc'",
+                (repo, path),
             )
 
     # Determine default branch for URL generation
@@ -146,10 +150,10 @@ def index_docs(
                     )
         with conn.cursor() as cur:
             cur.execute(
-                """ INSERT INTO doc_files (repo, path, content_sha, language)
-                VALUES (%s, %s, %s, %s)
+                """ INSERT INTO doc_files (repo, path, content_sha, language, kind)
+                VALUES (%s, %s, %s, %s, 'doc')
                 ON CONFLICT (repo, path) DO UPDATE
-                SET content_sha = EXCLUDED.content_sha, language = EXCLUDED.language
+                SET content_sha = EXCLUDED.content_sha, language = EXCLUDED.language, kind = 'doc'
                 """,
                 (repo, path, current[path], language),
             )
@@ -205,7 +209,10 @@ def sync_docs(
                 current[rel] = hashlib.sha256(fp.read()).hexdigest()
 
     with conn.cursor() as cur:
-        cur.execute("SELECT path, content_sha FROM doc_files WHERE repo = %s", (repo,))
+        cur.execute(
+            "SELECT path, content_sha FROM doc_files WHERE repo = %s AND kind = 'doc'",
+            (repo,),
+        )
         indexed = dict(cur.fetchall())
 
     removed = set(indexed) - set(current)
@@ -215,7 +222,8 @@ def sync_docs(
         delete_chunks_by_key(conn, f"doc:{repo}:{path}")
         with conn.cursor() as cur:
             cur.execute(
-                "DELETE FROM doc_files WHERE repo = %s AND path = %s", (repo, path)
+                "DELETE FROM doc_files WHERE repo = %s AND path = %s AND kind = 'doc'",
+                (repo, path),
             )
 
     default_branch = _git(
@@ -270,10 +278,10 @@ def sync_docs(
                     )
         with conn.cursor() as cur:
             cur.execute(
-                """ INSERT INTO doc_files (repo, path, content_sha, language)
-                VALUES (%s, %s, %s, %s)
+                """ INSERT INTO doc_files (repo, path, content_sha, language, kind)
+                VALUES (%s, %s, %s, %s, 'doc')
                 ON CONFLICT (repo, path) DO UPDATE
-                SET content_sha = EXCLUDED.content_sha, language = EXCLUDED.language
+                SET content_sha = EXCLUDED.content_sha, language = EXCLUDED.language, kind = 'doc'
                 """,
                 (repo, path, current[path], language),
             )
