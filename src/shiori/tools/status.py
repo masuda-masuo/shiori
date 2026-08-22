@@ -560,6 +560,9 @@ def status(repo: str | None = None) -> dict[str, Any]:
         all_repos: dict[str, Any] = {}
         cached_hits = 0
         live_hits = 0
+        # Filled only on the no-repo path (one GROUP BY, issue #438); the
+        # single-repo path keeps the per-repo count below.
+        all_issue_item_counts: dict[str, int] = {}
 
         if repo:
             resolved = _validate_repo_name(repo)
@@ -574,6 +577,7 @@ def status(repo: str | None = None) -> dict[str, Any]:
             runs = db.get_sync_runs(conn)
             index_state = db.get_all_repo_index_state(conn)
             all_cached_chunk_counts = db.get_all_chunk_counts(conn)
+            all_issue_item_counts = db.get_all_issue_item_counts(conn)
 
         for target_repo in targets:
             info = runs.get(target_repo) or {
@@ -613,7 +617,10 @@ def status(repo: str | None = None) -> dict[str, Any]:
                     live_hits += 1
             else:
                 chunk_counts = db.get_chunk_counts(conn, target_repo)
-            items_in_db = db.get_issue_item_count(conn, target_repo)
+            if not repo:
+                items_in_db = all_issue_item_counts.get(target_repo, 0)
+            else:
+                items_in_db = db.get_issue_item_count(conn, target_repo)
             cursors = db.get_cursors(conn, target_repo)
             info["chunks"] = chunk_counts
             info["code_chunks"] = chunk_counts.get("code", 0)

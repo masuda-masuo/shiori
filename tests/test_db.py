@@ -427,3 +427,42 @@ class TestGetSyncRun:
         assert result["code_added"] == 3
         assert result["last_error"] is None
         assert result["consecutive_failures"] == 0
+
+
+# -- get_all_issue_item_counts (issue #438) --------------------------------
+
+class TestGetAllIssueItemCounts:
+    """get_all_issue_item_counts: one GROUP BY over issue_items."""
+
+    def _mock_conn(self):
+        conn = MagicMock()
+        cursor = MagicMock()
+        conn.cursor.return_value.__enter__.return_value = cursor
+        return conn, cursor
+
+    def test_returns_counts_for_two_repos_and_omits_third(self):
+        """Rows for repo_a and repo_b present; repo_c has no rows -> absent."""
+        from shiori.db import get_all_issue_item_counts
+
+        conn, cursor = self._mock_conn()
+        cursor.fetchall.return_value = [
+            ("owner/repo_a", 10),
+            ("owner/repo_b", 3),
+        ]
+
+        result = get_all_issue_item_counts(conn)
+        assert result == {"owner/repo_a": 10, "owner/repo_b": 3}
+        assert "owner/repo_c" not in result
+        # Verify the SQL executed is the GROUP BY one
+        sql = cursor.execute.call_args[0][0]
+        assert "GROUP BY repo" in sql
+
+    def test_empty_table_returns_empty_dict(self):
+        """No rows at all -> empty dict."""
+        from shiori.db import get_all_issue_item_counts
+
+        conn, cursor = self._mock_conn()
+        cursor.fetchall.return_value = []
+
+        result = get_all_issue_item_counts(conn)
+        assert result == {}
