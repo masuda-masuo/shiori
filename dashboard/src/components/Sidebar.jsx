@@ -1,9 +1,10 @@
 import React from "react";
-import { BarChart2, Hash, FileCode, GitFork, Search } from "lucide-react";
+import { Activity, BarChart2, Hash, FileCode, GitFork, Search } from "lucide-react";
 
 const Sidebar = ({ currentView, repos, currentRepo, onRepoChange }) => {
   const links = [
     { id: "search", label: "Search", icon: <Search size={18} /> },
+    { id: "status", label: "Status", icon: <Activity size={18} /> },
     { id: "stats", label: "Stats", icon: <BarChart2 size={18} /> },
     { id: "symbol_index", label: "Symbols", icon: <Hash size={18} /> },
     { id: "api_reference", label: "API Reference", icon: <FileCode size={18} /> },

@@ -11,7 +11,7 @@ const App = () => {
     // Initial load: parse hash for view
     const handleHash = () => {
       const hash = window.location.hash.slice(1);
-      if (["search", "stats", "symbol_index", "api_reference", "module_tree"].includes(hash)) {
+      if (["search", "status", "stats", "symbol_index", "api_reference", "module_tree"].includes(hash)) {
         setView(hash);
       }
     };

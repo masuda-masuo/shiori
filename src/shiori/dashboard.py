@@ -167,6 +167,22 @@ def register_dashboard(mcp):
         except Exception as e:  # noqa: BLE001 - API boundary: report as HTTP 500
             return JSONResponse({"detail": str(e)}, status_code=500)
 
+    @mcp.custom_route("/api/status", methods=["GET"])
+    async def api_status(request: Request):
+        from starlette.concurrency import run_in_threadpool
+
+        from .tools.status import status
+
+        repo = request.query_params.get("repo")
+
+        try:
+            result = await run_in_threadpool(status, repo=repo)
+            return JSONResponse(result)
+        except ValueError as e:
+            return JSONResponse({"detail": str(e)}, status_code=400)
+        except Exception as e:  # noqa: BLE001 - API boundary: report as HTTP 500
+            return JSONResponse({"error": str(e)}, status_code=500)
+
     # fallback route if dashboard is not built
     async def index_fallback(request: Request):
         return HTMLResponse(
