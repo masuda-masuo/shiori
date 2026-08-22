@@ -399,3 +399,70 @@ class TestDocsOnlyReposConfig:
         assert s.is_docs_only("cockroachdb/cockroach")
         assert s.is_docs_only("golang/go")
         assert not s.is_docs_only("masuda-masuo/shiori")
+
+
+class TestSearchLoggingConfig:
+    """SHIORI_SEARCH_LOGGING -- boolean, defaults to True (enabled)."""
+
+    def test_unset_defaults_to_true(self, monkeypatch):
+        monkeypatch.delenv("SHIORI_SEARCH_LOGGING", raising=False)
+        assert Settings().search_logging_enabled is True
+
+    def test_empty_string_defaults_to_true(self, monkeypatch):
+        monkeypatch.setenv("SHIORI_SEARCH_LOGGING", "")
+        assert Settings().search_logging_enabled is True
+
+    def test_unparseable_defaults_to_true(self, monkeypatch):
+        monkeypatch.setenv("SHIORI_SEARCH_LOGGING", "garbage_value")
+        assert Settings().search_logging_enabled is True
+
+    @pytest.mark.parametrize("val", ["false", "0", "no", "off", "FALSE", "NO"])
+    def test_disabled_values(self, monkeypatch, val):
+        monkeypatch.setenv("SHIORI_SEARCH_LOGGING", val)
+        assert Settings().search_logging_enabled is False
+
+    @pytest.mark.parametrize("val", ["true", "1", "yes", "on", "TRUE", "YES"])
+    def test_enabled_values(self, monkeypatch, val):
+        monkeypatch.setenv("SHIORI_SEARCH_LOGGING", val)
+        assert Settings().search_logging_enabled is True
+
+
+class TestSearchCallerConfig:
+    """SHIORI_SEARCH_CALLER -- optional string label."""
+
+    def test_unset_defaults_to_none(self, monkeypatch):
+        monkeypatch.delenv("SHIORI_SEARCH_CALLER", raising=False)
+        assert Settings().search_caller is None
+
+    def test_empty_string_defaults_to_none(self, monkeypatch):
+        monkeypatch.setenv("SHIORI_SEARCH_CALLER", "  ")
+        assert Settings().search_caller is None
+
+    def test_valid_caller_string(self, monkeypatch):
+        monkeypatch.setenv("SHIORI_SEARCH_CALLER", "mcp_agent")
+        assert Settings().search_caller == "mcp_agent"
+
+
+class TestSearchLogRetentionDaysConfig:
+    """SHIORI_SEARCH_LOG_RETENTION_DAYS -- non-negative integer, default 30."""
+
+    def test_unset_defaults_to_30(self, monkeypatch):
+        monkeypatch.delenv("SHIORI_SEARCH_LOG_RETENTION_DAYS", raising=False)
+        assert Settings().search_log_retention_days == 30
+
+    @pytest.mark.parametrize("bad", BAD_STRINGS)
+    def test_bad_string_falls_back(self, monkeypatch, bad):
+        monkeypatch.setenv("SHIORI_SEARCH_LOG_RETENTION_DAYS", bad)
+        assert Settings().search_log_retention_days == 30
+
+    def test_valid_value(self, monkeypatch):
+        monkeypatch.setenv("SHIORI_SEARCH_LOG_RETENTION_DAYS", "14")
+        assert Settings().search_log_retention_days == 14
+
+    def test_zero_disables_retention(self, monkeypatch):
+        monkeypatch.setenv("SHIORI_SEARCH_LOG_RETENTION_DAYS", "0")
+        assert Settings().search_log_retention_days == 0
+
+    def test_negative_falls_back(self, monkeypatch):
+        monkeypatch.setenv("SHIORI_SEARCH_LOG_RETENTION_DAYS", "-5")
+        assert Settings().search_log_retention_days == 30

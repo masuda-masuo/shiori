@@ -131,6 +131,26 @@ See [docs/guides/setup.md](docs/guides/setup.md) for:
 - **`SHIORI_DEV_REPOS`**: Comma-separated repos (`owner/name`) that have source code indexed and PR review comments synced.
 - **`SHIORI_DOCS_ONLY_REPOS`**: Comma-separated repos (`owner/name`) whose issue trackers (issues, PRs, comments, reviews) are neither fetched nor indexed. Docs are still synced. This setting is independent of `SHIORI_DEV_REPOS` (a repo's code indexing status is decided solely by `SHIORI_DEV_REPOS`). Setting this variable for an already-indexed repo leaves its existing issue rows in place without deleting them.
 - **`SHIORI_INDEX_BOT_LOGINS`**: Comma-separated bot logins to allowlist for indexing.
+- **`SHIORI_SEARCH_LOGGING`**: Controls search execution logging to the `search_log` table (`true` | `false`, default: `true`). An unset, empty, or unparseable value defaults to `true` (enabled) so calibration data is recorded out-of-the-box. Set to `false` or `0` to disable.
+- **`SHIORI_SEARCH_CALLER`**: Optional string label to attribute the caller population in log entries (e.g., `mcp`, `agent`, `eval`, `human`). Default: unset (`None`).
+- **`SHIORI_SEARCH_LOG_RETENTION_DAYS`**: Number of days to retain search log rows before automatic pruning (default: `30` days; `0` disables retention pruning). Bounds table growth over time.
+
+### Search Execution Logging
+
+> [!NOTE]
+> **The search log exists to calibrate a relevance floor and is not a user-facing feature.**
+
+Search execution events are stored in the `search_log` PostgreSQL table for offline analysis and relevance calibration:
+*   `id` (`BIGSERIAL PRIMARY KEY`): Log entry sequence ID.
+*   `query` (`TEXT NOT NULL`): Executed search query text.
+*   `search_type` (`TEXT NOT NULL`): Function type (`semantic` or `keyword`).
+*   `caller` (`TEXT`): Optional identity attribution label (`SHIORI_SEARCH_CALLER`).
+*   `top_k` (`INTEGER NOT NULL`): Requested top-k hit count.
+*   `filters` (`JSONB`): Active filter dictionary (e.g., `{"repo": "owner/repo"}`).
+*   `results` (`JSONB NOT NULL`): JSON array of returned `{"id": chunk_id, "score": score}` pairs.
+*   `created_at` (`TIMESTAMPTZ`): Execution timestamp.
+
+Table growth is bounded by `SHIORI_SEARCH_LOG_RETENTION_DAYS` (default: 30 days) via periodic maintenance (`prune_search_log(conn, retention_days)`), indexed by `search_log_created_at_idx` to prevent full table scans. Interactive search queries perform fast non-blocking inserts only, so log writes never degrade search latency.
 
 The [design doc](docs/design/01_data_ingestion_and_sync.md) covers the architecture: three cursor streams, per-repo PG advisory locks for parallel containers, dev-first ordering, and the ingest strategy.
 

@@ -57,6 +57,28 @@ def _docs_only_repos_from_env() -> set[str]:
     return set()
 
 
+def _search_logging_enabled_from_env() -> bool:
+    """Return SHIORI_SEARCH_LOGGING as a bool (issue #445).
+
+    Unset, empty, whitespace-only, or unparseable values fall back to True (enabled).
+    Explicitly setting to 'false', '0', 'no', or 'off' (case-insensitive) disables logging.
+    """
+    raw = os.environ.get("SHIORI_SEARCH_LOGGING", "").strip().lower()
+    if not raw:
+        return True
+    if raw in ("0", "false", "no", "off"):
+        return False
+    if raw in ("1", "true", "yes", "on"):
+        return True
+    return True
+
+
+def _search_caller_from_env() -> str | None:
+    """Return SHIORI_SEARCH_CALLER string or None if unset/empty (issue #445)."""
+    raw = os.environ.get("SHIORI_SEARCH_CALLER", "").strip()
+    return raw or None
+
+
 def is_docs_only(settings: Settings, repo: str) -> bool:
     """Return True if issue fetching and indexing should be skipped for repo."""
     return repo in settings.docs_only_repos
@@ -500,6 +522,25 @@ class Settings:
     # it). Enforced in the CLI index loops (run_index / run_ingest) only.
     ingest_time_budget: float | None = field(
         default_factory=_ingest_time_budget_from_env
+    )
+    # --- Search execution logging (issue #445) ---
+    # Whether search execution logging to search_log is enabled.
+    # Unset/empty/unparseable values fall back to True (enabled) so calibration data
+    # is captured out-of-the-box. Set SHIORI_SEARCH_LOGGING=false to disable.
+    search_logging_enabled: bool = field(
+        default_factory=_search_logging_enabled_from_env
+    )
+    # Caller identity attribution label carried into search_log rows.
+    # Unset/empty values default to None.
+    search_caller: str | None = field(
+        default_factory=_search_caller_from_env
+    )
+    # Search log retention window in days. Rows older than retention_days are pruned.
+    # 0 disables retention pruning. Default: 30 days.
+    search_log_retention_days: int = field(
+        default_factory=lambda: _int_from_env(
+            "SHIORI_SEARCH_LOG_RETENTION_DAYS", 30, minimum=0
+        )
     )
 
     def repo_dir(self, repo: str) -> str:
