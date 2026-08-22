@@ -52,6 +52,12 @@ class TestReindexPrepareUnscoped:
         sqls = [_sql_of(c) for c in cursor.execute.call_args_list]
         assert "TRUNCATE chunks" in sqls
 
+    def test_truncates_repo_chunk_counts(self):
+        conn, cursor = _mock_conn()
+        schema.reindex_prepare(conn, None)
+        sqls = [_sql_of(c) for c in cursor.execute.call_args_list]
+        assert "TRUNCATE repo_chunk_counts" in sqls
+
     def test_resets_indexed_at_without_deleting_issue_items(self):
         conn, cursor = _mock_conn()
         schema.reindex_prepare(conn, None)
@@ -83,6 +89,17 @@ class TestReindexPrepareScoped:
         calls = [
             c for c in cursor.execute.call_args_list
             if _sql_of(c).startswith("DELETE FROM chunks")
+        ]
+        assert len(calls) == 1
+        assert "WHERE repo = ANY" in _sql_of(calls[0])
+        assert calls[0].args[1] == (["owner/a", "owner/b"],)
+
+    def test_scopes_repo_chunk_counts_delete_to_repos(self):
+        conn, cursor = _mock_conn()
+        schema.reindex_prepare(conn, ["owner/a", "owner/b"])
+        calls = [
+            c for c in cursor.execute.call_args_list
+            if _sql_of(c).startswith("DELETE FROM repo_chunk_counts")
         ]
         assert len(calls) == 1
         assert "WHERE repo = ANY" in _sql_of(calls[0])
@@ -796,3 +813,111 @@ class TestDoSyncBulkHeavyIndexGates:
         )
         assert mock_drop.called
         mock_create.assert_not_called()
+
+
+# ===================================================================
+# repo_chunk_counts caching tests (#435)
+# ===================================================================
+
+
+class TestRefreshChunkCounts:
+    """Acceptance criterion 3: refresh_chunk_counts deletes old cached rows and replaces
+    them with exact new GROUP BY result.
+    """
+
+    def test_refresh_chunk_counts_replaces_old_counts(self):
+        """Given a GROUP BY result {code: 5, issue: 2} for a repo that previously
+        had {code: 9, doc: 1}, the table ends with exactly code=5, issue=2 rows.
+        """
+        from shiori import db
+
+        conn, cursor = _mock_conn()
+        cursor.fetchall.return_value = [("code", 5), ("issue", 2)]
+
+        result = db.refresh_chunk_counts(conn, "owner/repo")
+        assert result == {"code": 5, "issue": 2}
+
+        delete_calls = [
+            c for c in cursor.execute.call_args_list
+            if "DELETE FROM repo_chunk_counts" in _sql_of(c)
+        ]
+        assert len(delete_calls) == 1
+        assert delete_calls[0].args[1] == ("owner/repo",)
+
+        assert cursor.executemany.call_count == 1
+        insert_sql = cursor.executemany.call_args[0][0]
+        insert_args = cursor.executemany.call_args[0][1]
+        assert "INSERT INTO repo_chunk_counts" in insert_sql
+        assert len(insert_args) == 2
+        assert ("owner/repo", "code", 5) in insert_args
+        assert ("owner/repo", "issue", 2) in insert_args
+
+        # Finding 1 fix: refresh_chunk_counts commits transaction so changes persist on conn.close()
+        assert conn.commit.call_count == 1
+
+    def test_refresh_chunk_counts_zero_chunks_inserts_sentinel(self):
+        """When a repo has 0 chunks, refresh_chunk_counts inserts a sentinel row
+        so that get_all_chunk_counts recognizes it as cached with empty count dict.
+        """
+        from shiori import db
+
+        conn, cursor = _mock_conn()
+        cursor.fetchall.return_value = []
+
+        result = db.refresh_chunk_counts(conn, "owner/empty")
+        assert result == {}
+
+        delete_calls = [
+            c for c in cursor.execute.call_args_list
+            if "DELETE FROM repo_chunk_counts" in _sql_of(c)
+        ]
+        assert len(delete_calls) == 1
+
+        insert_calls = [
+            c for c in cursor.execute.call_args_list
+            if "INSERT INTO repo_chunk_counts" in _sql_of(c)
+        ]
+        assert len(insert_calls) == 1
+        assert insert_calls[0].args[1] == ("owner/empty", db.SENTINEL_SOURCE_TYPE)
+
+    def test_get_all_chunk_counts_and_get_cached_chunk_counts_with_sentinel(self):
+        """get_all_chunk_counts returns {} for 0-chunk cached repos and filters out sentinel."""
+        from shiori import db
+
+        conn, cursor = _mock_conn()
+        cursor.fetchall.return_value = [
+            ("owner/repo1", "code", 5),
+            ("owner/empty", db.SENTINEL_SOURCE_TYPE, 0),
+        ]
+
+        all_counts = db.get_all_chunk_counts(conn)
+        assert all_counts == {
+            "owner/repo1": {"code": 5},
+            "owner/empty": {},
+        }
+
+        cursor.fetchall.return_value = [(db.SENTINEL_SOURCE_TYPE, 0)]
+        cached_empty = db.get_cached_chunk_counts(conn, "owner/empty")
+        assert cached_empty == {}
+
+        cursor.fetchall.return_value = []
+        cached_uncached = db.get_cached_chunk_counts(conn, "owner/uncached")
+        assert cached_uncached is None
+
+
+class TestRunForgetClearsChunkCounts:
+    """Acceptance criterion 4: run_forget calls db.refresh_chunk_counts for the repo."""
+
+    def test_run_forget_refreshes_chunk_counts(self):
+        conn, cursor = _mock_conn()
+        cursor.fetchone.return_value = ("chunks",)
+        cursor.rowcount = 1
+
+        with patch("shiori.ingest.db.connect", return_value=conn), \
+             patch("shiori.ingest.db.refresh_chunk_counts") as mock_refresh, \
+             patch("shiori.ingest.repo_lock"):
+
+            from shiori.ingest import run_forget
+            run_forget(["owner/repo"], keep_clone=True)
+
+            mock_refresh.assert_called_once_with(conn, "owner/repo")

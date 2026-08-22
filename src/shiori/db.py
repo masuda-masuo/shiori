@@ -417,6 +417,9 @@ def get_sync_attempt(
         return (0, None)
 
 
+SENTINEL_SOURCE_TYPE = "__cached__"
+
+
 def get_chunk_counts(conn: psycopg.Connection, repo: str) -> dict[str, int]:
     """Chunk count by source_type (issue #31)."""
     with conn.cursor() as cur:
@@ -425,6 +428,57 @@ def get_chunk_counts(conn: psycopg.Connection, repo: str) -> dict[str, int]:
             (repo,),
         )
         return dict(cur.fetchall())
+
+
+def refresh_chunk_counts(conn: psycopg.Connection, repo: str) -> dict[str, int]:
+    """Recompute repo_chunk_counts for *repo* from chunks table and return count dict."""
+    counts = get_chunk_counts(conn, repo)
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM repo_chunk_counts WHERE repo = %s", (repo,))
+        if counts:
+            cur.executemany(
+                """
+                INSERT INTO repo_chunk_counts (repo, source_type, n, computed_at)
+                VALUES (%s, %s, %s, now())
+                """,
+                [(repo, st, n) for st, n in counts.items()],
+            )
+        else:
+            cur.execute(
+                """
+                INSERT INTO repo_chunk_counts (repo, source_type, n, computed_at)
+                VALUES (%s, %s, 0, now())
+                """,
+                (repo, SENTINEL_SOURCE_TYPE),
+            )
+    conn.commit()
+    return counts
+
+
+def get_all_chunk_counts(conn: psycopg.Connection) -> dict[str, dict[str, int]]:
+    """Return all cached chunk counts from repo_chunk_counts keyed by repo then source_type."""
+    result: dict[str, dict[str, int]] = {}
+    with conn.cursor() as cur:
+        cur.execute("SELECT repo, source_type, n FROM repo_chunk_counts")
+        rows = cur.fetchall() or []
+        for r, source_type, n in rows:
+            result.setdefault(r, {})
+            if source_type != SENTINEL_SOURCE_TYPE:
+                result[r][source_type] = int(n)
+    return result
+
+
+def get_cached_chunk_counts(conn: psycopg.Connection, repo: str) -> dict[str, int] | None:
+    """Return cached chunk counts for *repo*, or None if no rows exist in repo_chunk_counts."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT source_type, n FROM repo_chunk_counts WHERE repo = %s",
+            (repo,),
+        )
+        rows = cur.fetchall()
+        if not rows:
+            return None
+        return {st: int(n) for st, n in rows if st != SENTINEL_SOURCE_TYPE}
 
 
 def get_issue_item_count(conn: psycopg.Connection, repo: str) -> int:

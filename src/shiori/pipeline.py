@@ -263,6 +263,7 @@ def _do_sync(
                                 )
                                 db.record_sync_attempt(conn, repo, success=True)
                                 db.advance_indexed_head(conn, repo)
+                                db.refresh_chunk_counts(conn, repo)
                                 result["repos"][repo] = {
                                     "docs_updated": n_docs,
                                     "issues_indexed": n_items,

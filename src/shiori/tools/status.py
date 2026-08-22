@@ -353,6 +353,7 @@ def _no_repo_candidate_response(
     clone_refresh_debounce_seconds: int,
     sync_intervals: dict[str, int],
     token_provider: str,
+    chunk_counts_source: str = "cached",
 ) -> dict[str, Any]:
     """Build the no-repo payload *candidate* would finish as.
 
@@ -365,6 +366,7 @@ def _no_repo_candidate_response(
     summary = _summarize(all_repos)
     summary["omitted_repos"] = len(omitted_names)
     summary["omitted_repo_names"] = omitted_names
+    summary["chunk_counts_source"] = chunk_counts_source
     return {
         "repos": candidate,
         "clone_refresh_debounce_seconds": clone_refresh_debounce_seconds,
@@ -427,17 +429,16 @@ def _no_repo_response(
     sync_intervals: dict[str, int],
     clone_refresh_debounce_seconds: int,
     token_provider: str,
+    chunk_counts_source: str = "cached",
 ) -> dict[str, Any]:
-    """Build the complete no-repo response from assembled per-repo records.
+    """Assemble the no-repo view: `summary` plus full records for unhealthy repos.
 
-    Pure: finished records and the top-level scalars in, the full payload
-    out -- no DB, no connection, no mocks, which is what makes the
-    degraded-fleet cases directly testable.  Health (_is_healthy) decides
-    which repos are eligible for a full record; a char budget decides how
-    many of them are actually emitted, in severity order (_severity_key).
-    The budget is measured on the FastMCP-wrapped tool result
-    (_wrapped_result_dumps) of the would-be return dict -- summary and
-    top-level scalars included, not just `repos` -- because the
+    Filters *all_repos* for unhealthy records, sorts them by severity
+    (never_indexed > index_stale > sync failure > pending_count > age),
+    and admits them into `repos` in severity order until the char budget is
+    spent.  The budget check measures candidate payload size directly using
+    _wrapped_result_dumps, so the budget is enforced on the EXACT JSON
+    string that will be served to the MCP client -- because the
     client-visible response is the wrapped one, not the inner dict
     (issue #431).  The applied ceiling is _no_repo_budget: the nominal
     _NO_REPO_REPOS_CHAR_BUDGET, raised to fit the most severe record
@@ -493,6 +494,7 @@ def _no_repo_response(
             clone_refresh_debounce_seconds=clone_refresh_debounce_seconds,
             sync_intervals=sync_intervals,
             token_provider=token_provider,
+            chunk_counts_source=chunk_counts_source,
         )
         if len(_wrapped_result_dumps(candidate_response)) <= budget:
             selected = candidate
@@ -502,6 +504,7 @@ def _no_repo_response(
     summary = _summarize(all_repos)
     summary["omitted_repos"] = len(omitted)
     summary["omitted_repo_names"] = omitted
+    summary["chunk_counts_source"] = chunk_counts_source
     return {
         "repos": selected,
         "clone_refresh_debounce_seconds": clone_refresh_debounce_seconds,
@@ -542,8 +545,8 @@ def status(repo: str | None = None) -> dict[str, Any]:
     severe record is emitted even when its wrapped form alone exceeds
     the nominal budget.
 
-    Data sources: DB metadata only (sync_run, index_state, chunk counts); no
-    clone read, no GitHub API call.
+    Data sources: DB metadata only (sync_run, index_state; chunk counts are read from
+    repo_chunk_counts, refreshed at the end of each index run); no clone read, no GitHub API call.
     """
     try:
         provider = build_token_provider(settings)
@@ -554,7 +557,9 @@ def status(repo: str | None = None) -> dict[str, Any]:
         token_provider_error = str(exc)
 
     with _conn() as conn:
-        repos: dict[str, Any] = {}
+        all_repos: dict[str, Any] = {}
+        cached_hits = 0
+        live_hits = 0
 
         if repo:
             resolved = _validate_repo_name(repo)
@@ -563,10 +568,12 @@ def status(repo: str | None = None) -> dict[str, Any]:
             runs = {resolved: run_info} if run_info else {}
             index_state_row = db.get_repo_index_state(conn, resolved)
             index_state = {resolved: index_state_row} if index_state_row else {}
+            all_cached_chunk_counts: dict[str, dict[str, int]] = {}
         else:
             targets = settings.repos
             runs = db.get_sync_runs(conn)
             index_state = db.get_all_repo_index_state(conn)
+            all_cached_chunk_counts = db.get_all_chunk_counts(conn)
 
         for target_repo in targets:
             info = runs.get(target_repo) or {
@@ -595,7 +602,17 @@ def status(repo: str | None = None) -> dict[str, Any]:
             else:
                 info["index_stale"] = False
             info["never_indexed"] = bool(clone_head and not indexed_head)
-            chunk_counts = db.get_chunk_counts(conn, target_repo)
+            if not repo:
+                cached_counts = all_cached_chunk_counts.get(target_repo)
+                if cached_counts is not None:
+                    chunk_counts = cached_counts
+                    cached_hits += 1
+                else:
+                    chunk_counts = db.get_chunk_counts(conn, target_repo)
+                    db.refresh_chunk_counts(conn, target_repo)
+                    live_hits += 1
+            else:
+                chunk_counts = db.get_chunk_counts(conn, target_repo)
             items_in_db = db.get_issue_item_count(conn, target_repo)
             cursors = db.get_cursors(conn, target_repo)
             info["chunks"] = chunk_counts
@@ -617,9 +634,16 @@ def status(repo: str | None = None) -> dict[str, Any]:
             warnings = _build_warnings(info, chunk_counts, items_in_db, cursors, threshold)
             info.pop("token_provider_error", None)
             info["warnings"] = warnings
-            repos[target_repo] = info
+            all_repos[target_repo] = info
 
     if not repo:
+        if live_hits == 0:
+            chunk_counts_source = "cached"
+        elif cached_hits == 0:
+            chunk_counts_source = "live"
+        else:
+            chunk_counts_source = "mixed"
+
         # Issue #423: the all-repos response did not fit an MCP client
         # context window (53,836 chars at 62 repos) and 91% of real calls
         # omit repo.  The no-repo payload is a separate view built under a
@@ -630,18 +654,19 @@ def status(repo: str | None = None) -> dict[str, Any]:
         # the budget is spent, with the cut-off remainder named in
         # `summary` so nothing disappears silently.
         return _no_repo_response(
-            repos,
+            all_repos,
             sync_intervals={
                 "dev": settings.dev_sync_interval_seconds,
                 "ref": settings.ref_sync_interval_seconds,
             },
             clone_refresh_debounce_seconds=settings.sync_interval_seconds,
             token_provider=token_provider,
+            chunk_counts_source=chunk_counts_source,
         )
     # Repo-specified path: byte-identical to the pre-#423 object -- that
     # repo's full record, no summary key, same top-level key order.
     return {
-        "repos": repos,
+        "repos": all_repos,
         "clone_refresh_debounce_seconds": settings.sync_interval_seconds,
         "sync_intervals": {
             "dev": settings.dev_sync_interval_seconds,
