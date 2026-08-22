@@ -3,9 +3,11 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import MermaidViewer from "./MermaidViewer";
 import SearchView from "./SearchView";
+import StatusView from "./StatusView";
 
 const templates = {
   search: { title: "Search Knowledge", desc: "Search across code, documents, issues, and PR comments." },
+  status: { title: "System Status", desc: "Overview of index freshness, repository sync health, and degraded states." },
   stats: { title: "Repository Stats", desc: "Codebase metrics and language distribution." },
   symbol_index: { title: "Symbol Index", desc: "Browse functions, classes, and other symbols." },
   api_reference: { title: "API Reference", desc: "Extracted docstrings and signatures." },
@@ -336,7 +338,7 @@ const ReportView = ({ view, repo, repos }) => {
   const tpl = templates[view] || { title: view, desc: "" };
 
   useEffect(() => {
-    if (view === "search") {
+    if (view === "search" || view === "status") {
       setLoading(false);
       setError(null);
       setData(null);
@@ -378,6 +380,9 @@ const ReportView = ({ view, repo, repos }) => {
   const renderContent = () => {
     if (view === "search") {
       return <SearchView repo={repo} repos={repos} />;
+    }
+    if (view === "status") {
+      return <StatusView />;
     }
     if (loading) {
       return (
