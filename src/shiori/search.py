@@ -5,6 +5,7 @@ Two modes: simple (1 table, single kNN) / complex (2 tables, kNN per combo → a
 
 from __future__ import annotations
 
+import logging
 from dataclasses import asdict, dataclass
 from typing import Any
 
@@ -13,6 +14,8 @@ import psycopg
 from .config import Settings
 from .db import vec_literal
 from .embedding import Embedder
+
+log = logging.getLogger(__name__)
 
 RRF_K = 60
 
@@ -277,6 +280,81 @@ def _decision_comment_chunk_ids(
     }
 
 
+def _log_search(
+    settings: Settings,
+    conn: psycopg.Connection,
+    query: str,
+    search_type: str,
+    filters: dict | None,
+    top_k: int,
+    results: list[dict],
+    caller: str | None = None,
+) -> None:
+    """Record search execution to search_log table if logging is enabled (issue #445).
+
+    Logging failures are caught, logged as warnings, and rolled back so that a
+    failed log write never interrupts search result delivery or breaks the
+    database connection context. Retention pruning is intentionally handled out
+    of the interactive request path via prune_search_log().
+    """
+    if not settings.search_logging_enabled:
+        return
+    caller_val = caller if caller is not None else settings.search_caller
+    try:
+        import json
+        filters_json = json.dumps(filters) if filters else None
+        results_json = json.dumps(results)
+
+        if hasattr(conn, "transaction") and callable(getattr(conn, "transaction")):
+            ctx = conn.transaction()
+        else:
+            ctx = None
+
+        if ctx is not None:
+            with ctx:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        INSERT INTO search_log (query, search_type, caller, top_k, filters, results)
+                        VALUES (%s, %s, %s, %s, %s, %s)
+                        """,
+                        (query, search_type, caller_val, top_k, filters_json, results_json),
+                    )
+        else:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO search_log (query, search_type, caller, top_k, filters, results)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    """,
+                    (query, search_type, caller_val, top_k, filters_json, results_json),
+                )
+    except Exception as exc:
+        log.warning("Failed to write search log: %s", exc, exc_info=True)
+
+
+def prune_search_log(conn: psycopg.Connection, retention_days: int) -> int:
+    """Prune search_log entries older than *retention_days* (issue #445).
+
+    Runs as a periodic maintenance task out of the interactive search path.
+    Uses search_log_created_at_idx index to avoid full table scans.
+    Returns number of pruned log rows.
+    """
+    if retention_days <= 0:
+        return 0
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            DELETE FROM search_log
+            WHERE created_at < NOW() - (%s * INTERVAL '1 day')
+            """,
+            (retention_days,),
+        )
+        deleted = cur.rowcount
+    conn.commit()
+    return deleted
+
+
 def keyword_search(
     settings: Settings,
     conn: psycopg.Connection,
@@ -286,6 +364,7 @@ def keyword_search(
     sort_by: str = "score",
     sort_order: str = "desc",
     match_all: bool = False,
+    caller: str | None = None,
 ) -> list[dict]:
     """Keyword search (Japanese tokenize). Strong for exact matches: function names, API names, error codes, config keys.
     Multi-token queries use OR matching by default (any token can match); tokens that match more/strongly rank higher.
@@ -317,11 +396,24 @@ def keyword_search(
     )
 
     hits = []
+    results_to_log = []
     for rid, score in ranked[:k]:
         h = _row_to_hit(rows_by_id[rid], settings.snippet_chars, score)
         d = h.to_dict()
         d["_ranking"] = method
         hits.append(d)
+        results_to_log.append({"id": rid, "score": round(score, 4)})
+
+    _log_search(
+        settings=settings,
+        conn=conn,
+        query=query,
+        search_type="keyword",
+        filters=filters,
+        top_k=k,
+        results=results_to_log,
+        caller=caller,
+    )
     return hits
 
 
@@ -334,6 +426,7 @@ def semantic_search(
     top_k: int | None = None,
     sort_by: str = "score",
     sort_order: str = "desc",
+    caller: str | None = None,
 ) -> list[dict]:
     """Hybrid search. Fuses vector and keyword ranks via RRF.
     Same filtering as keyword_search."""
@@ -375,9 +468,22 @@ def semantic_search(
 
     # Truncate to top-k after tie-break
     hits = []
+    results_to_log = []
     for rid, score in ranked[:k]:
         h = _row_to_hit(rows_by_id[rid], settings.snippet_chars, score)
         d = h.to_dict()
         d["_ranking"] = method
         hits.append(d)
+        results_to_log.append({"id": rid, "score": round(score, 4)})
+
+    _log_search(
+        settings=settings,
+        conn=conn,
+        query=query,
+        search_type="semantic",
+        filters=filters,
+        top_k=k,
+        results=results_to_log,
+        caller=caller,
+    )
     return hits

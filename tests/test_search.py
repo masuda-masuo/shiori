@@ -2,7 +2,22 @@
 
 from __future__ import annotations
 
-from shiori.search import _filter_sql, _rank_candidates, _to_or_query
+import contextlib
+import json
+from typing import cast
+
+import psycopg
+
+from shiori.config import Settings
+from shiori.embedding import Embedder
+from shiori.search import (
+    _filter_sql,
+    _rank_candidates,
+    _to_or_query,
+    keyword_search,
+    prune_search_log,
+    semantic_search,
+)
 
 # _RESULT_COLS indices (must match constants in search.py)
 _COL_SOURCE_TYPE = 1
@@ -305,3 +320,290 @@ class TestToOrQuery:
     def test_single_character_tokens(self):
         result = _to_or_query("a b c")
         assert result == "a OR b OR c"
+
+
+# ── Search Logging tests (issue #445) ──
+
+
+class _FakeSearchLogCursor:
+    def __init__(self, chunk_rows=None, vec_rows=None, kw_rows=None, raise_on_insert=False):
+        self.chunk_rows = chunk_rows or []
+        self.vec_rows = vec_rows
+        self.kw_rows = kw_rows
+        self.raise_on_insert = raise_on_insert
+        self.executed: list[tuple[str, list | None]] = []
+        self.rowcount = 0
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def execute(self, sql, params=None):
+        sql_str = str(sql)
+        if self.raise_on_insert and "INSERT INTO search_log" in sql_str:
+            raise psycopg.Error("Simulated DB log write error")
+        self.executed.append((sql_str, params))
+        if "DELETE FROM search_log" in sql_str:
+            self.rowcount = 5
+
+    def fetchall(self):
+        if not self.executed:
+            return list(self.chunk_rows)
+        last_sql = self.executed[-1][0]
+        if "unnest" in last_sql and "issue_items" in last_sql:
+            return []
+        if "embedding <=" in last_sql:
+            return list(self.vec_rows if self.vec_rows is not None else self.chunk_rows)
+        if "pgroonga_score" in last_sql:
+            return list(self.kw_rows if self.kw_rows is not None else self.chunk_rows)
+        return list(self.chunk_rows)
+
+
+class _FakeSearchLogConn:
+    def __init__(self, cursor):
+        self._cursor = cursor
+
+    def cursor(self):
+        return self._cursor
+
+    def commit(self):
+        pass
+
+
+class _FakeTxCtx:
+    def __init__(self, conn):
+        self.conn = conn
+        self.entered = False
+        self.exited = False
+        self.exception_handled = False
+
+    def __enter__(self):
+        self.entered = True
+        self.conn.tx_events.append("enter_tx")
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.exited = True
+        if exc_type is not None:
+            self.exception_handled = True
+            self.conn.tx_events.append(f"rollback_tx:{exc_type.__name__}")
+            return False
+        self.conn.tx_events.append("commit_tx")
+        return False
+
+
+class _FakeTxConn(_FakeSearchLogConn):
+    def __init__(self, cursor):
+        super().__init__(cursor)
+        self.tx_events: list[str] = []
+        self.last_tx: _FakeTxCtx | None = None
+
+    def transaction(self):
+        self.last_tx = _FakeTxCtx(self)
+        return self.last_tx
+
+
+class _FakeEmbedder:
+    def embed_query(self, query):
+        return [0.1, 0.2, 0.3]
+
+
+def _log_chunk_row(rid, content="test content", score=0.85):
+    return (
+        rid, "doc", "owner/repo", "docs/spec.md", None, None, None,
+        "ja", "heading", content, None, "author", None,
+        None, None, "https://example.com", score,
+    )
+
+
+class TestSearchLogging:
+    """Acceptance criteria tests for search execution logging (issue #445)."""
+
+    def test_semantic_search_writes_log_row(self):
+        """Criterion 1: Running semantic_search writes query, chunk ids with scores, and repo filter."""
+        cursor = _FakeSearchLogCursor(chunk_rows=[_log_chunk_row(42, "semantic content", 0.95)])
+        conn = cast(psycopg.Connection, _FakeSearchLogConn(cursor))
+        embedder = cast(Embedder, _FakeEmbedder())
+        settings = Settings()
+
+        hits = semantic_search(
+            settings, conn, embedder, "vector query", filters={"repo": "owner/repo"}, top_k=5
+        )
+        assert len(hits) == 1
+
+        insert_calls = [p for s, p in cursor.executed if "INSERT INTO search_log" in s]
+        assert len(insert_calls) == 1
+        query, search_type, caller, top_k, filters_json, results_json = insert_calls[0]
+        assert query == "vector query"
+        assert search_type == "semantic"
+        assert top_k == 5
+        assert json.loads(filters_json) == {"repo": "owner/repo"}
+        res = json.loads(results_json)
+        assert len(res) == 1
+        assert res[0]["id"] == 42
+
+    def test_keyword_search_writes_log_row(self):
+        """Criterion 2: Running keyword_search writes query, chunk ids with scores, and repo filter."""
+        cursor = _FakeSearchLogCursor(chunk_rows=[_log_chunk_row(101, "keyword content", 0.88)])
+        conn = cast(psycopg.Connection, _FakeSearchLogConn(cursor))
+        settings = Settings()
+
+        hits = keyword_search(
+            settings, conn, "exact phrase", filters={"repo": "owner/repo"}, top_k=3
+        )
+        assert len(hits) == 1
+
+        insert_calls = [p for s, p in cursor.executed if "INSERT INTO search_log" in s]
+        assert len(insert_calls) == 1
+        query, search_type, caller, top_k, filters_json, results_json = insert_calls[0]
+        assert query == "exact phrase"
+        assert search_type == "keyword"
+        assert top_k == 3
+        assert json.loads(filters_json) == {"repo": "owner/repo"}
+        res = json.loads(results_json)
+        assert res == [{"id": 101, "score": 0.88}]
+
+    def test_log_write_failure_isolated_and_observable(self, caplog):
+        """Criterion 3: Search returns full hits when log write fails, and failure is logged."""
+        cursor = _FakeSearchLogCursor(
+            chunk_rows=[_log_chunk_row(10, "content", 0.75)],
+            raise_on_insert=True,
+        )
+        conn = cast(psycopg.Connection, _FakeSearchLogConn(cursor))
+        settings = Settings()
+
+        with caplog.at_level("WARNING", logger="shiori.search"):
+            hits = keyword_search(settings, conn, "failed log query", top_k=2)
+
+        # Half 1: Full result set still returned
+        assert len(hits) == 1
+        assert hits[0]["snippet"] == "content"
+
+        # Half 2: Failure is observable in logs
+        assert "Failed to write search log" in caplog.text
+        assert "Simulated DB log write error" in caplog.text
+
+    def test_logging_disabled_no_row_written_and_identical_hits(self):
+        """Criterion 4: Disabled logging writes no row and return hits are byte-identical."""
+        chunk = _log_chunk_row(7, "same content", 0.9)
+        cursor_enabled = _FakeSearchLogCursor(chunk_rows=[chunk])
+        cursor_disabled = _FakeSearchLogCursor(chunk_rows=[chunk])
+
+        settings_enabled = Settings()
+        settings_disabled = Settings()
+        settings_disabled.search_logging_enabled = False
+
+        hits_enabled = keyword_search(settings_enabled, cast(psycopg.Connection, _FakeSearchLogConn(cursor_enabled)), "query")
+        hits_disabled = keyword_search(settings_disabled, cast(psycopg.Connection, _FakeSearchLogConn(cursor_disabled)), "query")
+
+        # Hits are byte-identical
+        assert hits_enabled == hits_disabled
+
+        # Enabled wrote a row, disabled wrote no row
+        assert any("INSERT INTO search_log" in s for s, _ in cursor_enabled.executed)
+        assert not any("INSERT INTO search_log" in s for s, _ in cursor_disabled.executed)
+
+    def test_caller_attribution_distinguishes_callers(self):
+        """Criterion 5: Two searches attributed to different callers produce distinct rows."""
+        cursor1 = _FakeSearchLogCursor(chunk_rows=[_log_chunk_row(1)])
+        cursor2 = _FakeSearchLogCursor(chunk_rows=[_log_chunk_row(2)])
+
+        settings = Settings()
+
+        keyword_search(settings, cast(psycopg.Connection, _FakeSearchLogConn(cursor1)), "query", caller="agent_alpha")
+        keyword_search(settings, cast(psycopg.Connection, _FakeSearchLogConn(cursor2)), "query", caller="human_beta")
+
+        insert1 = [p for s, p in cursor1.executed if "INSERT INTO search_log" in s][0]
+        insert2 = [p for s, p in cursor2.executed if "INSERT INTO search_log" in s][0]
+
+        caller1 = insert1[2]
+        caller2 = insert2[2]
+
+        assert caller1 == "agent_alpha"
+        assert caller2 == "human_beta"
+        assert caller1 != caller2
+
+    def test_search_query_does_not_execute_delete(self):
+        """Interactive search path performs only INSERT, not DELETE, avoiding lock contention."""
+        cursor = _FakeSearchLogCursor(chunk_rows=[_log_chunk_row(1)])
+        settings = Settings()
+        settings.search_log_retention_days = 14
+
+        keyword_search(settings, cast(psycopg.Connection, _FakeSearchLogConn(cursor)), "query")
+
+        delete_calls = [s for s, _ in cursor.executed if "DELETE FROM search_log" in s]
+        assert len(delete_calls) == 0
+
+    def test_retention_pruning_executed_when_configured(self):
+        """Spec 5 & Design Finding: Periodic maintenance prune_search_log executes retention DELETE."""
+        cursor = _FakeSearchLogCursor()
+        conn = cast(psycopg.Connection, _FakeSearchLogConn(cursor))
+
+        deleted = prune_search_log(conn, retention_days=14)
+
+        assert deleted == 5
+        delete_calls = [s for s, _ in cursor.executed if "DELETE FROM search_log" in s]
+        assert len(delete_calls) == 1
+        assert "created_at < NOW() -" in delete_calls[0]
+
+    def test_production_transaction_context_manager_branch_success(self):
+        """Cover conn.transaction() context manager success branch in _log_search."""
+        cursor = _FakeSearchLogCursor(chunk_rows=[_log_chunk_row(55, "tx test content", 0.92)])
+        conn = _FakeTxConn(cursor)
+        settings = Settings()
+
+        hits = keyword_search(settings, cast(psycopg.Connection, conn), "tx search query", top_k=2)
+
+        assert len(hits) == 1
+        assert conn.tx_events == ["enter_tx", "commit_tx"]
+        assert conn.last_tx is not None and conn.last_tx.entered and conn.last_tx.exited
+        insert_calls = [p for s, p in cursor.executed if "INSERT INTO search_log" in s]
+        assert len(insert_calls) == 1
+        assert insert_calls[0][0] == "tx search query"
+
+    def test_production_transaction_context_manager_branch_error_rollback(self, caplog):
+        """Cover conn.transaction() context manager failure/rollback branch in _log_search."""
+        cursor = _FakeSearchLogCursor(
+            chunk_rows=[_log_chunk_row(55, "tx test content", 0.92)],
+            raise_on_insert=True,
+        )
+        conn = _FakeTxConn(cursor)
+        settings = Settings()
+
+        with caplog.at_level("WARNING", logger="shiori.search"):
+            hits = keyword_search(settings, cast(psycopg.Connection, conn), "tx failed query", top_k=2)
+
+        assert len(hits) == 1
+        assert conn.tx_events == ["enter_tx", "rollback_tx:Error"]
+        assert conn.last_tx is not None and conn.last_tx.exception_handled
+        assert "Failed to write search log" in caplog.text
+
+    def test_mcp_tools_pass_caller_mcp(self, monkeypatch):
+        """MCP tool handlers pass caller='mcp' to semantic_search and keyword_search."""
+        from shiori.tools import search as tools_search
+
+        executed_callers = []
+
+        def mock_keyword_search(*args, **kwargs):
+            executed_callers.append(kwargs.get("caller"))
+            return []
+
+        def mock_semantic_search(*args, **kwargs):
+            executed_callers.append(kwargs.get("caller"))
+            return []
+
+        @contextlib.contextmanager
+        def mock_conn():
+            yield _FakeSearchLogConn(_FakeSearchLogCursor())
+
+        monkeypatch.setattr(tools_search.search, "keyword_search", mock_keyword_search)
+        monkeypatch.setattr(tools_search.search, "semantic_search", mock_semantic_search)
+        monkeypatch.setattr(tools_search, "_conn", mock_conn)
+        monkeypatch.setattr(tools_search, "_get_embedder", lambda: _FakeEmbedder())
+
+        tools_search.semantic_search(query="mcp vector")
+        tools_search.keyword_search(query="mcp kw")
+
+        assert executed_callers == ["mcp", "mcp"]

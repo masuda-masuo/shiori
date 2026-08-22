@@ -223,6 +223,18 @@ CREATE INDEX IF NOT EXISTS chunks_repo_idx ON chunks (repo);
 CREATE INDEX IF NOT EXISTS chunks_source_type_idx ON chunks (source_type);
 CREATE INDEX IF NOT EXISTS chunks_updated_at_idx ON chunks (updated_at);
 CREATE INDEX IF NOT EXISTS chunks_repo_issue_no_idx ON chunks (repo, issue_no);
+
+CREATE TABLE IF NOT EXISTS search_log (
+    id BIGSERIAL PRIMARY KEY,
+    query TEXT NOT NULL,
+    search_type TEXT NOT NULL,
+    caller TEXT,
+    top_k INTEGER NOT NULL,
+    filters JSONB,
+    results JSONB NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS search_log_created_at_idx ON search_log (created_at);
 """
 
 # Heavy index names (constants for DROP/CREATE via bulk path. Issue #72)
@@ -507,6 +519,37 @@ def _run_alter_statements(conn: psycopg.Connection) -> None:
             )
             ran_any = True
             log.info("migrate: executed repo_chunk_counts table create")
+    conn.commit()
+
+    # 10. Add search_log table and index for search execution logging (issue #445)
+    with conn.cursor() as cur:
+        cur.execute("SELECT to_regclass('search_log')")
+        row = cur.fetchone()
+        if row is not None and row[0] is None:
+            cur.execute(
+                """
+                CREATE TABLE search_log (
+                    id BIGSERIAL PRIMARY KEY,
+                    query TEXT NOT NULL,
+                    search_type TEXT NOT NULL,
+                    caller TEXT,
+                    top_k INTEGER NOT NULL,
+                    filters JSONB,
+                    results JSONB NOT NULL,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+                """
+            )
+            ran_any = True
+            log.info("migrate: executed search_log table create")
+        cur.execute("SELECT to_regclass('search_log_created_at_idx')")
+        idx_row = cur.fetchone()
+        if idx_row is not None and idx_row[0] is None:
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS search_log_created_at_idx ON search_log (created_at)"
+            )
+            ran_any = True
+            log.info("migrate: executed search_log_created_at_idx create")
     conn.commit()
 
     if not ran_any:

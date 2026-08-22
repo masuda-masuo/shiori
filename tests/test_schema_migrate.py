@@ -49,12 +49,14 @@ class _FakeCursor:
         columns: dict[str, dict[str, bool]] | None = None,
         constraint_defs: dict[str, str] | None = None,
         repo_index_state_exists: bool = True,
+        search_log_exists: bool = True,
         raise_on_execute_containing: str | None = None,
         error_to_raise: Exception | None = None,
     ) -> None:
         self.columns = columns or {}
         self.constraint_defs = constraint_defs or {}
         self.repo_index_state_exists = repo_index_state_exists
+        self.search_log_exists = search_log_exists
         self.raise_on_execute_containing = raise_on_execute_containing
         self.error_to_raise = error_to_raise
         self.executed: list[str] = []
@@ -84,6 +86,8 @@ class _FakeCursor:
     def fetchone(self):
         text = self._last_sql
         if "to_regclass" in text:
+            if "search_log" in text:
+                return ("search_log",) if self.search_log_exists else (None,)
             return ("repo_index_state",) if self.repo_index_state_exists else (None,)
         raise AssertionError(f"unexpected fetchone() after: {text!r}")
 
@@ -260,6 +264,20 @@ class TestCatalogGuardedDriftDetected:
         joined = " ".join(cursor.executed)
         assert "CREATE TABLE" in joined
         assert "repo_index_state" in joined
+
+    def test_missing_search_log_table_still_created(self):
+        cursor = _FakeCursor(
+            columns=_up_to_date_columns(),
+            constraint_defs=_up_to_date_constraint_defs(),
+            search_log_exists=False,
+        )
+        conn = _FakeConn(cursor)
+
+        schema._run_alter_statements(conn)
+
+        joined = " ".join(cursor.executed)
+        assert "CREATE TABLE" in joined
+        assert "search_log" in joined
 
 
 class TestLockTimeoutScoping:

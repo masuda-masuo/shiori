@@ -48,6 +48,7 @@ def semantic_search(
             top_k,
             sort_by,
             sort_order,
+            caller="mcp",
         )
 
 
@@ -85,4 +86,5 @@ def keyword_search(
             sort_by,
             sort_order,
             match_all=match_all,
+            caller="mcp",
         )
