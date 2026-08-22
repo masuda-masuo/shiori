@@ -49,6 +49,19 @@ def _dev_repos_from_env() -> set[str]:
     return set()
 
 
+def _docs_only_repos_from_env() -> set[str]:
+    """Return docs-only repos (issues skipped) from SHIORI_DOCS_ONLY_REPOS."""
+    raw = os.environ.get("SHIORI_DOCS_ONLY_REPOS", "")
+    if raw:
+        return {s.strip() for s in raw.split(",") if s.strip()}
+    return set()
+
+
+def is_docs_only(settings: Settings, repo: str) -> bool:
+    """Return True if issue fetching and indexing should be skipped for repo."""
+    return repo in settings.docs_only_repos
+
+
 def _allow_rebuild_from_env() -> bool:
     """Return SHIORI_ALLOW_REBUILD as a bool."""
     return os.environ.get("SHIORI_ALLOW_REBUILD", "").lower() in (
@@ -367,6 +380,8 @@ class Settings:
     # in SHIORI_DEV_REPOS) are clone-only (grep-able via shiori_grep).
     # SHIORI_INDEX_CODE is deprecated; removed in a future release.
     dev_repos: set[str] = field(default_factory=_dev_repos_from_env)
+    # Repos in SHIORI_DOCS_ONLY_REPOS have issues neither fetched nor indexed (issue #441).
+    docs_only_repos: set[str] = field(default_factory=_docs_only_repos_from_env)
     # Code file extensions (lowercase). Empty/unset = all code extensions.
     code_extensions: set[str] = field(default_factory=_code_extensions_from_env)
     # Exclude glob patterns (comma-separated). E.g. "**/test_*, **/migrations/*"
@@ -490,6 +505,10 @@ class Settings:
     def repo_dir(self, repo: str) -> str:
         owner, name = repo.split("/", 1)
         return os.path.join(self.data_dir, "repos", f"{owner}__{name}")
+
+    def is_docs_only(self, repo: str) -> bool:
+        """Return True if issue fetching and indexing should be skipped for repo."""
+        return is_docs_only(self, repo)
 
 def load_settings() -> Settings:
     return Settings()

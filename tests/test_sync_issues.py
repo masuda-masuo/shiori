@@ -554,3 +554,197 @@ class TestUpsertLabelsKey:
         _upsert_issue_item(conn, row)
         executed_row = conn.cursor.return_value.__enter__.return_value.execute.call_args[0][1]
         assert executed_row["labels"] is None
+
+
+class TestDocsOnlyReposIngest:
+    """Issue #441: SHIORI_DOCS_ONLY_REPOS skips issue fetching and indexing."""
+
+    @patch("shiori.ingest.build_token_provider")
+    @patch("shiori.ingest.fetch_issues")
+    @patch("shiori.ingest.fetch_docs", return_value="abc123456789")
+    @patch("shiori.ingest.repo_lock")
+    @patch("shiori.ingest._should_skip_repo", return_value=False)
+    @patch("shiori.ingest.schema.migrate_light")
+    @patch("shiori.ingest.db.connect")
+    def test_run_fetch_skips_issues_and_syncs_docs(
+        self,
+        mock_connect: MagicMock,
+        mock_migrate: MagicMock,
+        mock_skip: MagicMock,
+        mock_lock: MagicMock,
+        mock_fetch_docs: MagicMock,
+        mock_fetch_issues: MagicMock,
+        mock_provider: MagicMock,
+        caplog: pytest.LogCaptureFixture,
+    ):
+        from shiori.ingest import run_fetch
+
+        mock_lock.return_value.__enter__.return_value = True
+        conn = _mock_conn()
+        mock_connect.return_value = conn
+        settings = Settings(
+            repos=["owner/docs-only-repo"],
+            docs_only_repos={"owner/docs-only-repo"},
+            data_dir="/tmp/data",
+        )
+
+        with caplog.at_level("INFO"):
+            run_fetch(settings, repos=["owner/docs-only-repo"])
+
+        assert mock_fetch_docs.called
+        assert not mock_fetch_issues.called
+        assert "fetch issues: skipping owner/docs-only-repo (docs-only repo)" in caplog.text
+
+    @patch("shiori.ingest._is_bulk_path", return_value=False)
+    @patch("shiori.ingest.Embedder")
+    @patch("shiori.ingest.index_issues")
+    @patch("shiori.ingest.index_docs", return_value=1)
+    @patch("shiori.ingest.index_code", return_value=0)
+    @patch("shiori.ingest.repo_lock")
+    @patch("shiori.ingest.schema.migrate_light")
+    @patch("shiori.ingest.db.connect")
+    def test_run_index_skips_issues_and_syncs_docs(
+        self,
+        mock_connect: MagicMock,
+        mock_migrate: MagicMock,
+        mock_lock: MagicMock,
+        mock_index_code: MagicMock,
+        mock_index_docs: MagicMock,
+        mock_index_issues: MagicMock,
+        mock_embedder: MagicMock,
+        mock_is_bulk: MagicMock,
+        caplog: pytest.LogCaptureFixture,
+    ):
+        from shiori.ingest import run_index
+
+        mock_lock.return_value.__enter__.return_value = True
+        conn = _mock_conn()
+        mock_connect.return_value = conn
+        settings = Settings(
+            repos=["owner/docs-only-repo"],
+            docs_only_repos={"owner/docs-only-repo"},
+            data_dir="/tmp/data",
+        )
+
+        with caplog.at_level("INFO"):
+            run_index(settings, repos=["owner/docs-only-repo"])
+
+        assert mock_index_docs.called
+        assert not mock_index_issues.called
+        assert "index issues: skipping owner/docs-only-repo (docs-only repo)" in caplog.text
+
+    @patch("shiori.ingest._is_bulk_path", return_value=False)
+    @patch("shiori.ingest.Embedder")
+    @patch("shiori.ingest.index_issues")
+    @patch("shiori.ingest.index_code", return_value=2)
+    @patch("shiori.ingest.index_docs", return_value=1)
+    @patch("shiori.ingest.repo_lock")
+    @patch("shiori.ingest.schema.migrate_light")
+    @patch("shiori.ingest.db.connect")
+    def test_dev_repos_independence_both_dev_and_docs_only(
+        self,
+        mock_connect: MagicMock,
+        mock_migrate: MagicMock,
+        mock_lock: MagicMock,
+        mock_index_docs: MagicMock,
+        mock_index_code: MagicMock,
+        mock_index_issues: MagicMock,
+        mock_embedder: MagicMock,
+        mock_is_bulk: MagicMock,
+        caplog: pytest.LogCaptureFixture,
+    ):
+        from shiori.ingest import run_index
+
+        mock_lock.return_value.__enter__.return_value = True
+        conn = _mock_conn()
+        mock_connect.return_value = conn
+        settings = Settings(
+            repos=["owner/dev-and-docs"],
+            dev_repos={"owner/dev-and-docs"},
+            docs_only_repos={"owner/dev-and-docs"},
+            data_dir="/tmp/data",
+        )
+
+        with caplog.at_level("INFO"):
+            run_index(settings, repos=["owner/dev-and-docs"])
+
+        assert mock_index_docs.called
+        assert mock_index_code.called
+        assert not mock_index_issues.called
+        assert "index issues: skipping owner/dev-and-docs (docs-only repo)" in caplog.text
+
+    @patch("shiori.ingest._is_bulk_path", return_value=False)
+    @patch("shiori.ingest.Embedder")
+    @patch("shiori.ingest.index_issues")
+    @patch("shiori.ingest.index_code")
+    @patch("shiori.ingest.index_docs", return_value=1)
+    @patch("shiori.ingest.repo_lock")
+    @patch("shiori.ingest.schema.migrate_light")
+    @patch("shiori.ingest.db.connect")
+    def test_dev_repos_independence_docs_only_not_dev(
+        self,
+        mock_connect: MagicMock,
+        mock_migrate: MagicMock,
+        mock_lock: MagicMock,
+        mock_index_docs: MagicMock,
+        mock_index_code: MagicMock,
+        mock_index_issues: MagicMock,
+        mock_embedder: MagicMock,
+        mock_is_bulk: MagicMock,
+        caplog: pytest.LogCaptureFixture,
+    ):
+        from shiori.ingest import run_index
+
+        mock_lock.return_value.__enter__.return_value = True
+        conn = _mock_conn()
+        mock_connect.return_value = conn
+        settings = Settings(
+            repos=["owner/docs-not-dev"],
+            dev_repos=set(),
+            docs_only_repos={"owner/docs-not-dev"},
+            data_dir="/tmp/data",
+        )
+
+        with caplog.at_level("INFO"):
+            run_index(settings, repos=["owner/docs-not-dev"])
+
+        assert mock_index_docs.called
+        assert mock_index_code.called
+        assert not mock_index_issues.called
+        assert "index issues: skipping owner/docs-not-dev (docs-only repo)" in caplog.text
+
+    @patch("shiori.ingest.build_token_provider")
+    @patch("shiori.ingest.fetch_issues", return_value=5)
+    @patch("shiori.ingest.fetch_docs", return_value="abc123456789")
+    @patch("shiori.ingest.repo_lock")
+    @patch("shiori.ingest._should_skip_repo", return_value=False)
+    @patch("shiori.ingest.schema.migrate_light")
+    @patch("shiori.ingest.db.connect")
+    def test_repo_not_in_docs_only_repos_fetches_issues(
+        self,
+        mock_connect: MagicMock,
+        mock_migrate: MagicMock,
+        mock_skip: MagicMock,
+        mock_lock: MagicMock,
+        mock_fetch_docs: MagicMock,
+        mock_fetch_issues: MagicMock,
+        mock_provider: MagicMock,
+        caplog: pytest.LogCaptureFixture,
+    ):
+        from shiori.ingest import run_fetch
+
+        mock_lock.return_value.__enter__.return_value = True
+        conn = _mock_conn()
+        mock_connect.return_value = conn
+        settings = Settings(
+            repos=["owner/normal-repo"],
+            docs_only_repos={"owner/other-repo"},
+            data_dir="/tmp/data",
+        )
+
+        with caplog.at_level("INFO"):
+            run_fetch(settings, repos=["owner/normal-repo"])
+
+        assert mock_fetch_docs.called
+        assert mock_fetch_issues.called
+        assert "fetch issues: 5 items fetched" in caplog.text
