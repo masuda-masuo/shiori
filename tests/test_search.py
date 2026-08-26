@@ -423,7 +423,9 @@ class TestSearchLogging:
 
     def test_semantic_search_writes_log_row(self):
         """Criterion 1: Running semantic_search writes query, chunk ids with scores, and repo filter."""
-        cursor = _FakeSearchLogCursor(chunk_rows=[_log_chunk_row(42, "semantic content", 0.95)])
+        # Both vec_rows and kw_rows contain the same chunk (dual-retriever hit)
+        chunk = _log_chunk_row(42, "semantic content", 0.95)
+        cursor = _FakeSearchLogCursor(vec_rows=[chunk], kw_rows=[chunk])
         conn = cast(psycopg.Connection, _FakeSearchLogConn(cursor))
         embedder = cast(Embedder, _FakeEmbedder())
         settings = Settings()
@@ -443,6 +445,111 @@ class TestSearchLogging:
         res = json.loads(results_json)
         assert len(res) == 1
         assert res[0]["id"] == 42
+        # Dual-retriever hit: all four sub-fields non-null
+        assert res[0]["vec_score"] is not None
+        assert res[0]["vec_rank"] == 0
+        assert res[0]["kw_score"] is not None
+        assert res[0]["kw_rank"] == 0
+        # Fused score is still the RRF value
+        assert isinstance(res[0]["score"], float)
+
+    def test_semantic_search_vector_only_hit(self):
+        """Chunk found by vector retriever only: kw_score/kw_rank are null."""
+        vec_chunk = _log_chunk_row(10, "vector only", 0.90)
+        # kw_rows is empty — the chunk is absent from keyword candidates
+        cursor = _FakeSearchLogCursor(vec_rows=[vec_chunk], kw_rows=[])
+        conn = cast(psycopg.Connection, _FakeSearchLogConn(cursor))
+        embedder = cast(Embedder, _FakeEmbedder())
+        settings = Settings()
+
+        hits = semantic_search(settings, conn, embedder, "vector query", top_k=5)
+        assert len(hits) == 1
+
+        insert_calls = [p for s, p in cursor.executed if "INSERT INTO search_log" in s]
+        assert len(insert_calls) == 1
+        res = json.loads(insert_calls[0][5])
+        assert len(res) == 1
+        assert res[0]["id"] == 10
+        assert res[0]["vec_score"] is not None
+        assert res[0]["vec_rank"] == 0
+        assert res[0]["kw_score"] is None
+        assert res[0]["kw_rank"] is None
+
+    def test_semantic_search_keyword_only_hit(self):
+        """Chunk found by keyword retriever only: vec_score/vec_rank are null."""
+        kw_chunk = _log_chunk_row(20, "keyword only", 0.80)
+        # vec_rows is empty — the chunk is absent from vector candidates
+        cursor = _FakeSearchLogCursor(vec_rows=[], kw_rows=[kw_chunk])
+        conn = cast(psycopg.Connection, _FakeSearchLogConn(cursor))
+        embedder = cast(Embedder, _FakeEmbedder())
+        settings = Settings()
+
+        hits = semantic_search(settings, conn, embedder, "keyword query", top_k=5)
+        assert len(hits) == 1
+
+        insert_calls = [p for s, p in cursor.executed if "INSERT INTO search_log" in s]
+        assert len(insert_calls) == 1
+        res = json.loads(insert_calls[0][5])
+        assert len(res) == 1
+        assert res[0]["id"] == 20
+        assert res[0]["vec_score"] is None
+        assert res[0]["vec_rank"] is None
+        assert res[0]["kw_score"] is not None
+        assert res[0]["kw_rank"] == 0
+
+    def test_semantic_search_both_retrievers_hit(self):
+        """Chunk found by both retrievers: all four sub-fields non-null, ranks reflect retriever positions."""
+        # Two chunks found by both retrievers, in different orders per retriever
+        vec_rows = [_log_chunk_row(1, "vec first", 0.95), _log_chunk_row(2, "vec second", 0.85)]
+        kw_rows = [_log_chunk_row(2, "kw first", 0.90), _log_chunk_row(1, "kw second", 0.80)]
+        cursor = _FakeSearchLogCursor(vec_rows=vec_rows, kw_rows=kw_rows)
+        conn = cast(psycopg.Connection, _FakeSearchLogConn(cursor))
+        embedder = cast(Embedder, _FakeEmbedder())
+        settings = Settings()
+
+        hits = semantic_search(settings, conn, embedder, "query", top_k=10)
+        assert len(hits) == 2
+
+        insert_calls = [p for s, p in cursor.executed if "INSERT INTO search_log" in s]
+        assert len(insert_calls) == 1
+        res = json.loads(insert_calls[0][5])
+        assert len(res) == 2
+
+        res_by_id = {r["id"]: r for r in res}
+        # Chunk 1: vec_rank=0, kw_rank=1 (second in kw_rows)
+        assert res_by_id[1]["vec_rank"] == 0
+        assert res_by_id[1]["kw_rank"] == 1
+        # Chunk 2: vec_rank=1, kw_rank=0
+        assert res_by_id[2]["vec_rank"] == 1
+        assert res_by_id[2]["kw_rank"] == 0
+        # All non-null
+        for r in res:
+            assert r["vec_score"] is not None
+            assert r["kw_score"] is not None
+
+    def test_semantic_search_rank_reflects_candidate_order_not_final_order(self):
+        """Ranks recorded are retriever candidate-list positions, not post-tiebreak display order."""
+        # vec candidate order: chunk A at rank 0, chunk B at rank 1
+        # kw candidate order: chunk B at rank 0, chunk A at rank 1
+        # RRF fusion gives equal scores; tiebreak may reorder, but recorded ranks stay as above.
+        vec_rows = [_log_chunk_row(100, "A", 0.90), _log_chunk_row(200, "B", 0.85)]
+        kw_rows = [_log_chunk_row(200, "B", 0.90), _log_chunk_row(100, "A", 0.80)]
+        cursor = _FakeSearchLogCursor(vec_rows=vec_rows, kw_rows=kw_rows)
+        conn = cast(psycopg.Connection, _FakeSearchLogConn(cursor))
+        embedder = cast(Embedder, _FakeEmbedder())
+        settings = Settings()
+
+        semantic_search(settings, conn, embedder, "query", top_k=10)
+
+        insert_calls = [p for s, p in cursor.executed if "INSERT INTO search_log" in s]
+        res = json.loads(insert_calls[0][5])
+        res_by_id = {r["id"]: r for r in res}
+
+        # Regardless of final display order, ranks reflect retriever candidate positions
+        assert res_by_id[100]["vec_rank"] == 0
+        assert res_by_id[100]["kw_rank"] == 1
+        assert res_by_id[200]["vec_rank"] == 1
+        assert res_by_id[200]["kw_rank"] == 0
 
     def test_keyword_search_writes_log_row(self):
         """Criterion 2: Running keyword_search writes query, chunk ids with scores, and repo filter."""
@@ -463,7 +570,11 @@ class TestSearchLogging:
         assert top_k == 3
         assert json.loads(filters_json) == {"repo": "owner/repo"}
         res = json.loads(results_json)
-        assert res == [{"id": 101, "score": 0.88}]
+        assert res == [{
+            "id": 101, "score": 0.88,
+            "vec_score": None, "vec_rank": None,
+            "kw_score": 0.88, "kw_rank": 0,
+        }]
 
     def test_log_write_failure_isolated_and_observable(self, caplog):
         """Criterion 3: Search returns full hits when log write fails, and failure is logged."""

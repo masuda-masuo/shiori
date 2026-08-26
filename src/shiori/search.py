@@ -378,10 +378,12 @@ def keyword_search(
     # Decompose candidates into (row_id, score)
     rows_by_id: dict[int, tuple] = {}
     scored: list[tuple[int, float]] = []
-    for r in rows:
+    kw_info: dict[int, tuple[int, float]] = {}
+    for rank, r in enumerate(rows):
         rid = r[0]
         rows_by_id[rid] = r[:-1]
         scored.append((rid, float(r[-1])))
+        kw_info[rid] = (rank, round(float(r[-1]), 6))
 
     # Decision-record comments get a sort-key-only boost (issue #404).
     # The one qualifying query is skipped in sort modes where the boost
@@ -402,7 +404,15 @@ def keyword_search(
         d = h.to_dict()
         d["_ranking"] = method
         hits.append(d)
-        results_to_log.append({"id": rid, "score": round(score, 4)})
+        kr = kw_info[rid]
+        results_to_log.append({
+            "id": rid,
+            "score": round(score, 4),
+            "vec_score": None,
+            "vec_rank": None,
+            "kw_score": kr[1],
+            "kw_rank": kr[0],
+        })
 
     _log_search(
         settings=settings,
@@ -442,14 +452,18 @@ def semantic_search(
 
     scores: dict[int, float] = {}
     rows_by_id: dict[int, tuple] = {}
+    vec_info: dict[int, tuple[int, float]] = {}
+    kw_info: dict[int, tuple[int, float]] = {}
     for rank, row in enumerate(vec_rows):
         rid = row[0]
         rows_by_id[rid] = row[:-1]
         scores[rid] = scores.get(rid, 0.0) + 1.0 / (RRF_K + rank + 1)
+        vec_info[rid] = (rank, round(float(row[-1]), 6))
     for rank, row in enumerate(kw_rows):
         rid = row[0]
         rows_by_id.setdefault(rid, row[:-1])
         scores[rid] = scores.get(rid, 0.0) + 1.0 / (RRF_K + rank + 1)
+        kw_info[rid] = (rank, round(float(row[-1]), 6))
 
     # Sort candidates by RRF score
     ranked = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
@@ -474,7 +488,16 @@ def semantic_search(
         d = h.to_dict()
         d["_ranking"] = method
         hits.append(d)
-        results_to_log.append({"id": rid, "score": round(score, 4)})
+        vr = vec_info.get(rid)
+        kr = kw_info.get(rid)
+        results_to_log.append({
+            "id": rid,
+            "score": round(score, 4),
+            "vec_score": vr[1] if vr is not None else None,
+            "vec_rank": vr[0] if vr is not None else None,
+            "kw_score": kr[1] if kr is not None else None,
+            "kw_rank": kr[0] if kr is not None else None,
+        })
 
     _log_search(
         settings=settings,
