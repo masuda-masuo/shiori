@@ -12,7 +12,7 @@ Expose retrieval and inspection functionality as Model Context Protocol (MCP) to
 *   `shiori_keyword_search(query, filters?)`: Morphologically tokenized exact-match search. Used to locate precise identifier matches.
 *   `shiori_list_tree(path?, source_type?, extension?)`: Lists indexed files. Filterable by `source_type` (`doc` or `code`) and file extension (e.g. `.py`, `.md`) (Issue #43).
 *   `shiori_read_file(path, range?)`: Reads local files from the shallow repository clone (supports line range slicing).
-*   `shiori_read_issue(number, repo?, exclude_noise_bots?)`: Retrieves full issue or PR thread timelines sequentially. Setting `exclude_noise_bots=true` filters out comments from non-allowlisted bots (Issue #44).
+*   `shiori_read_issue(number, numbers?, repo?, exclude_noise_bots?, issue_number?, issue_no?)`: Retrieves full issue or PR thread timelines sequentially. `number` also accepts the aliases `issue_number` / `issue_no` (same meaning; batch `numbers` does not). `numbers` fetches a batch (up to 50). Setting `exclude_noise_bots=true` filters out comments from non-allowlisted bots (Issue #44).
 *   `shiori_pr_changes(number, repo?, include_diff?)`: Retrieves a list of modified files in a PR. Returns file path, status, and line counts. Setting `include_diff=true` also returns unified diff and stats. Computed from git clone directly (`git diff --name-status` + `--numstat`) — no longer depends on the `pr_changes` DB table. `blob_url` is omitted (not available from git alone) (Issue #259).
 *   `shiori_pr_diff(number, path?, repo?)`: Computes and returns the unified Git diff of a PR without modifying the local active working tree (Issue #96). **Breaking change (v2)**: no longer returns `head_sha` / `base_sha` (removed the `pr_changes` DB dependency). The diff is now computed purely from the clone (Issue #259).
 *   `shiori_pr_review_comments(number, repo?)`: Lists review comments with line numbers and file paths (Issue #96).
@@ -23,6 +23,8 @@ Expose retrieval and inspection functionality as Model Context Protocol (MCP) to
 *   `shiori_report(template, repo?, path?, kind?, public_only?, max_results?, prog_lang?, max_chars?)`: Generates a structured report from the on-disk clone (`_ensure_phase1` refreshes it first; the `api_reference` template additionally reads the search index for cross-linking). Templates: `stats`, `module_tree`, `symbol_index`, `api_reference` (Issue #279).
 
 > **v2.0 Deprecation**: The `shiori_ingest` MCP tool has been deprecated. Synchronization is managed via CLI (`python -m shiori ingest`) or background polling (`SHIORI_SYNC_INTERVAL_SECONDS`).
+
+Every executed search is recorded in the `search_log` table (Issue #445) so a relevance floor can later be calibrated from real traffic. Each logged hit stores the fused `score` plus the pre-fusion per-hit fields added in Issue #447: `vec_score`, `vec_rank`, `kw_score`, and `kw_rank` (null when that retriever did not return the hit). The floor itself is not implemented.
 
 ---
 
