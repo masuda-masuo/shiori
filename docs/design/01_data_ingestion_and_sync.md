@@ -11,6 +11,7 @@ Fetch documents and issue/PR threads from GitHub repositories, store them locall
 - **Documents (Markdown, code)**: Pulled via `git clone` or `git pull`. Shallow clones (`depth=1`) are checked out on disk to extract `.md` files and source code.
 - **Issues, PRs, and Comments**: Downloaded via GitHub REST API (`/issues`, `/issues/comments`, `/pulls/comments`).
 - **PR Review Submissions**: Fetched via the reviews API (`/pulls/{number}/reviews`) to capture approval and changes-requested summaries and state (APPROVED, CHANGES_REQUESTED, COMMENTED) which are not part of standard comment lists (Issue #103).
+- **Docs-only repos (`SHIORI_DOCS_ONLY_REPOS`)**: Issue trackers (issues, PRs, comments, reviews) are neither fetched nor indexed; documents are still synced. Independent of `SHIORI_DEV_REPOS` (see §10).
 - **Private Repositories**: Authenticated using personal access tokens (PATs) or GitHub Apps. Token is always minted host-side; the private key never enters the container.
 - **Rate Limits**: GitHub API rate limits and pagination boundaries are handled gracefully.
 
@@ -223,6 +224,10 @@ SHIORI_DEV_REPOS=masuda-masuo/shiori
 ```
 
 See `docs/guides/setup.md` for onboarding instructions for each role.
+
+### Docs-only repos (`SHIORI_DOCS_ONLY_REPOS`)
+
+`SHIORI_DOCS_ONLY_REPOS` is a separate axis from `SHIORI_DEV_REPOS` (Issue #441). It lists comma-separated repos (`owner/name`) whose issue trackers (issues, PRs, comments, reviews) are neither fetched nor indexed. Documents are still synced. A repo's code indexing status is decided solely by `SHIORI_DEV_REPOS`; listing a repo here does not change whether it is a development or reference repo. Setting this variable for an already-indexed repo leaves its existing issue rows in place without deleting them.
 
 ---
 
