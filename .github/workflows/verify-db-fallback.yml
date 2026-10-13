@@ -1,0 +1,108 @@
+# Issue #454: DB fallback 検証用ワークフロー
+# SHIORI_DB_IMAGE に存在しないタグを指定して docker compose up -d db を実行し、
+# pull 失敗時にローカルビルド (docker/db) へのフォールバックが発生するかを一度だけ検証する。
+# 常設 CI ゲートではなく workflow_dispatch 専用。
+
+name: verify-db-fallback
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: "Step A (fallback check)"
+        run: |
+          set +e
+          UP_OUTPUT=$(SHIORI_DB_IMAGE=ghcr.io/masuda-masuo/shiori/db:does-not-exist docker compose up -d db 2>&1)
+          UP_EXIT=$?
+          echo "$UP_OUTPUT"
+
+          # docker compose logs db を実行し、db イメージが docker/db からビルドされたかを grep で確認
+          docker compose logs db || true
+
+          BUILD_HAPPENED="no"
+          if docker compose logs db 2>&1 | grep -qiE "docker/db|build" || echo "$UP_OUTPUT" | grep -qiE "docker/db|build|Building"; then
+            BUILD_HAPPENED="yes"
+          fi
+
+          timeout 120 sh -c 'until docker compose exec -T db pg_isready; do sleep 3; done'
+          PG_EXIT=$?
+
+          echo "UP_EXIT=$UP_EXIT" >> "$GITHUB_ENV"
+          echo "BUILD_HAPPENED=$BUILD_HAPPENED" >> "$GITHUB_ENV"
+          echo "PG_EXIT=$PG_EXIT" >> "$GITHUB_ENV"
+
+      - name: "Step B (config check)"
+        run: |
+          CONFIG_OUTPUT=$(env -u SHIORI_DB_IMAGE docker compose config)
+          python3 -c "
+          import os, re, sys
+
+          config_text = sys.stdin.read()
+          lines = config_text.splitlines()
+          in_db = False
+          db_indent = None
+          db_lines = []
+
+          for line in lines:
+              m = re.match(r'^(\s*)db:\s*$', line)
+              if m and not in_db:
+                  in_db = True
+                  db_indent = len(m.group(1))
+                  continue
+              if in_db:
+                  stripped = line.strip()
+                  if stripped and not stripped.startswith('#'):
+                      indent = len(line) - len(line.lstrip())
+                      if indent <= db_indent:
+                          break
+                  db_lines.append(line)
+
+          db_block = '\n'.join(db_lines)
+          print('--- Extracted DB service block ---')
+          print(db_block)
+
+          has_image = bool(re.search(r'^\s*image:', db_block, re.M))
+          has_build = bool(re.search(r'^\s*build:', db_block, re.M))
+          has_pull_policy = bool(re.search(r'^\s*pull_policy:', db_block, re.M))
+
+          all_keys = has_image and has_build and has_pull_policy
+          config_keys_val = 'yes' if all_keys else 'no'
+
+          env_file = os.environ.get('GITHUB_ENV')
+          if env_file:
+              with open(env_file, 'a') as f:
+                  f.write(f'CONFIG_KEYS_PRESENT={config_keys_val}\n')
+                  f.write(f'HAS_IMAGE={\"yes\" if has_image else \"no\"}\n')
+                  f.write(f'HAS_BUILD={\"yes\" if has_build else \"no\"}\n')
+                  f.write(f'HAS_PULL_POLICY={\"yes\" if has_pull_policy else \"no\"}\n')
+          " <<< "$CONFIG_OUTPUT"
+
+      - name: Append to summary
+        if: always()
+        run: |
+          cat << EOF >> "$GITHUB_STEP_SUMMARY"
+          ## DB Fallback Verification Summary
+
+          | Check | Result |
+          | --- | --- |
+          | up exit code | ${UP_EXIT:-N/A} |
+          | whether a build happened | ${BUILD_HAPPENED:-N/A} |
+          | pg_isready exit code | ${PG_EXIT:-N/A} |
+          | three config keys present | ${CONFIG_KEYS_PRESENT:-N/A} |
+          | - image present | ${HAS_IMAGE:-N/A} |
+          | - build present | ${HAS_BUILD:-N/A} |
+          | - pull_policy present | ${HAS_PULL_POLICY:-N/A} |
+          EOF
+
+      - name: Final step
+        if: always()
+        run: docker compose down -v

@@ -36,6 +36,8 @@
 # 同期は serve のバックグラウンドポーリング（SHIORI_SYNC_INTERVAL_SECONDS）に一本化。
 services:
   db:
+    image: ${SHIORI_DB_IMAGE:-ghcr.io/masuda-masuo/shiori/db}
+    pull_policy: missing
     build: docker/db
     environment:
       POSTGRES_USER: shiori
@@ -54,9 +56,9 @@ services:
       - -c
       - tcp_keepalives_count=3
       - -c
-      - shared_buffers=1GB
+      - shared_buffers=${SHIORI_PG_SHARED_BUFFERS:-1GB}
       - -c
-      - effective_cache_size=8GB
+      - effective_cache_size=${SHIORI_PG_EFFECTIVE_CACHE_SIZE:-8GB}
     ports:
       # ホスト上の stdio serve / ingest（セットアップ.md 参照）から接続するため
       # localhost に限定して公開する
@@ -71,7 +73,7 @@ services:
     restart: unless-stopped
 
   app:
-    image: ghcr.io/masuda-masuo/shiori/app
+    image: ${SHIORI_APP_IMAGE:-ghcr.io/masuda-masuo/shiori/app}
     pull_policy: missing
     build:
       context: .

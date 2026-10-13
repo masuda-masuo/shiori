@@ -73,3 +73,35 @@ SentenceTransformer/CUDA rather than the CPU-only ONNX path -- see the
 "empty-string off-switch" paragraph of §4 in
 [03_embeddings_and_cross_lingual_search.md](03_embeddings_and_cross_lingual_search.md)
 for the semantics.
+
+---
+
+## 6. Prebuilt Container Images & Deployment Environment Variables (Issue #454)
+
+To allow lightweight or GPU-less hosts (such as small cloud VMs) to run Shiori without compiling dependencies or building images locally from source, prebuilt container images are published to GitHub Container Registry (GHCR).
+
+### Image Kinds & Tag Scheme
+
+Three kinds of container images are published:
+
+| Image Kind | Repository | Tags | Description |
+|---|---|---|---|
+| **CUDA App** | `ghcr.io/masuda-masuo/shiori/app` | `latest`, `<SHA>` | Default application image with CUDA-enabled PyTorch (~2GB). |
+| **CPU App** | `ghcr.io/masuda-masuo/shiori/app` | `cpu`, `cpu-<SHA>` | CPU-only application image built with `TORCH_INDEX_URL=https://download.pytorch.org/whl/cpu`. |
+| **DB** | `ghcr.io/masuda-masuo/shiori/db` | `latest`, `<SHA>` | PostgreSQL 16 image with `pgroonga` and `pgvector` pre-installed. |
+
+Under this scheme:
+* `app:latest` and `app:<SHA>` are CUDA app images.
+* `app:cpu` and `app:cpu-<SHA>` are CPU app images.
+* `db:latest` and `db:<SHA>` are DB images.
+
+### Compose Environment Overrides
+
+`docker-compose.yml` supports environment variable overrides for image references and PostgreSQL memory settings, while preserving source-build defaults:
+
+* `SHIORI_APP_IMAGE`: Overrides the app service image reference (defaults to `ghcr.io/masuda-masuo/shiori/app`). Set to `ghcr.io/masuda-masuo/shiori/app:cpu` on GPU-less hosts.
+* `SHIORI_DB_IMAGE`: Overrides the database service image reference (defaults to `ghcr.io/masuda-masuo/shiori/db`).
+* `SHIORI_PG_SHARED_BUFFERS`: Overrides PostgreSQL `shared_buffers` parameter in `docker-compose.yml` (defaults to `1GB`). Can be tuned down on memory-constrained hosts.
+* `SHIORI_PG_EFFECTIVE_CACHE_SIZE`: Overrides PostgreSQL `effective_cache_size` parameter in `docker-compose.yml` (defaults to `8GB`). Can be tuned down on memory-constrained hosts.
+
+既存の DB ボリュームを持つ環境でローカルビルドから公開イメージへ切り替えると、docker/db の FROM が latest-debian-16 のため pgroonga のバージョンが変わりうる（注意のみ、対応は不要）。

@@ -248,6 +248,29 @@ docker compose build app
 
 ---
 
+## Start from Published Images on a GPU-less Host
+
+On a small or GPU-less host (e.g. a lightweight cloud VM), you can run Shiori using prebuilt images published to GHCR without building images from source:
+
+1. In `.env`, specify the prebuilt CPU app image and DB image:
+   ```env
+   SHIORI_APP_IMAGE=ghcr.io/masuda-masuo/shiori/app:cpu
+   SHIORI_DB_IMAGE=ghcr.io/masuda-masuo/shiori/db:latest
+   ```
+
+2. (Optional) On memory-constrained hosts, tune down PostgreSQL memory allocations:
+   ```env
+   SHIORI_PG_SHARED_BUFFERS=256MB
+   SHIORI_PG_EFFECTIVE_CACHE_SIZE=1GB
+   ```
+
+3. Start services without `--build`:
+   ```bash
+   docker compose up -d
+   ```
+
+---
+
 ## MCP Client Connection
 
 Connect MCP clients using Streamable HTTP at `http://localhost:8765/mcp`.
