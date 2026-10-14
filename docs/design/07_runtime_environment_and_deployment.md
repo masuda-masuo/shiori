@@ -105,4 +105,4 @@ Under this scheme:
 * `SHIORI_PG_SHARED_BUFFERS`: Overrides PostgreSQL `shared_buffers` parameter in `docker-compose.yml` (defaults to `1GB`). Can be tuned down on memory-constrained hosts.
 * `SHIORI_PG_EFFECTIVE_CACHE_SIZE`: Overrides PostgreSQL `effective_cache_size` parameter in `docker-compose.yml` (defaults to `8GB`). Can be tuned down on memory-constrained hosts.
 
-既存の DB ボリュームを持つ環境でローカルビルドから公開イメージへ切り替えると、docker/db の FROM が latest-debian-16 のため pgroonga のバージョンが変わりうる（注意のみ、対応は不要）。
+Note: on hosts with an existing DB volume, switching from a local build to the published image may change the `pgroonga` version, because `docker/db` uses `FROM groonga/pgroonga:latest-debian-16`. No action is required.
