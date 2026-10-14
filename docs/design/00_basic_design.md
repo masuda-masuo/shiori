@@ -62,6 +62,7 @@ To ensure both privacy and ultra-fast context retrieval, Shiori is structured as
 *   **One-Shot Ingestion**: Sync operations run as disposable ingestion jobs (`python -m shiori ingest --repo owner/repo`). Differential sync relies on content hashes for docs, and `updated_at` cursors for issues/PRs. Bot comments are filtered by default.
 *   **Default Embedding Model**: Pinned to `intfloat/multilingual-e5-small` (384 dimensions) for fast CPU inference. Kept in a named volume (`HF_HOME=/models`).
 *   **Search Ranking is Relevance-First**: Relevance-first ranking is enforced. Direct date-based sorting is not provided for specs (docs/code) since specs do not have a chronological correctness gradient. Date sort is deferred to the GitHub MCP.
+*   **Prebuilt Container Images**: CPU app and DB images are published to ghcr.
 
 ---
 
