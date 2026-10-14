@@ -78,7 +78,7 @@ for the semantics.
 
 ## 6. Prebuilt Container Images & Deployment Environment Variables (Issue #454)
 
-To allow lightweight or GPU-less hosts (such as small cloud VMs) to run Shiori without compiling dependencies or building images locally from source, prebuilt container images are published to GitHub Container Registry (GHCR).
+To allow lightweight or GPU-less hosts (such as small cloud VMs) to run Shiori without compiling dependencies or building images locally from source, prebuilt container images are published to GitHub Container Registry (GHCR). Changes to `docker-compose.yml` also run this workflow (`.github/workflows/build-app.yml`).
 
 ### Image Kinds & Tag Scheme
 
