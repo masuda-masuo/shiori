@@ -9,9 +9,10 @@ RUN apt-get update \
 WORKDIR /app
 
 COPY pyproject.toml README.md ./
+ARG TORCH_INDEX_URL=
 RUN mkdir -p src/shiori && touch src/shiori/__init__.py \
-    # CUDA 版 PyTorch (~2GB)。CPU-only なら --index-url https://download.pytorch.org/whl/cpu を追加
-    && pip install torch \
+    # TORCH_INDEX_URL (build arg) selects the torch index, empty means the CUDA build.
+    && if [ -n "$TORCH_INDEX_URL" ]; then pip install --index-url "$TORCH_INDEX_URL" torch; else pip install torch; fi \
     # onnx extra: optimum/onnxruntime (issue #353). Model artifact itself is NOT built here -- it lives on the host, bind-mounted read-only at /models.
     && pip install --no-cache-dir .[embed,onnx]
 

@@ -248,6 +248,12 @@ docker compose build app
 
 ---
 
+## Start from Published Images on a GPU-less Host
+
+Prebuilt container images for GPU-less hosts are planned for a follow-up release (see [Detailed Design 07](../design/07_runtime_environment_and_deployment.md#6-prebuilt-container-images--deployment-environment-variables-issue-454)).
+
+---
+
 ## MCP Client Connection
 
 Connect MCP clients using Streamable HTTP at `http://localhost:8765/mcp`.
