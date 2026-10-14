@@ -78,28 +78,29 @@ for the semantics.
 
 ## 6. Prebuilt Container Images & Deployment Environment Variables (Issue #454)
 
-To allow lightweight or GPU-less hosts (such as small cloud VMs) to run Shiori without compiling dependencies or building images locally from source, prebuilt container images are published to GitHub Container Registry (GHCR).
+To allow lightweight or GPU-less hosts (such as small cloud VMs) to run Shiori without compiling dependencies or building images locally from source, prebuilt container images are planned. Currently, the CUDA app image is published, while CPU app and DB image publishing is planned for a follow-up PR.
 
 ### Image Kinds & Tag Scheme
 
-Three kinds of container images are published:
+Three kinds of container images are defined (CPU app and DB image publishing is planned for a follow-up PR):
 
 | Image Kind | Repository | Tags | Description |
 |---|---|---|---|
-| **CUDA App** | `ghcr.io/masuda-masuo/shiori/app` | `latest`, `<SHA>` | Default application image with CUDA-enabled PyTorch (~2GB). |
-| **CPU App** | `ghcr.io/masuda-masuo/shiori/app` | `cpu`, `cpu-<SHA>` | CPU-only application image built with `TORCH_INDEX_URL=https://download.pytorch.org/whl/cpu`. |
-| **DB** | `ghcr.io/masuda-masuo/shiori/db` | `latest`, `<SHA>` | PostgreSQL 16 image with `pgroonga` and `pgvector` pre-installed. |
+| **CUDA App** | `ghcr.io/masuda-masuo/shiori/app` | `latest`, `<SHA>` | Default application image with CUDA-enabled PyTorch. |
+| **CPU App** | `ghcr.io/masuda-masuo/shiori/app` | `cpu`, `cpu-<SHA>` | CPU-only application image built with `TORCH_INDEX_URL=https://download.pytorch.org/whl/cpu` (publishing planned for follow-up PR). |
+| **DB** | `ghcr.io/masuda-masuo/shiori/db` | `latest`, `<SHA>` | PostgreSQL 16 image with `pgroonga` and `pgvector` pre-installed (publishing planned for follow-up PR). |
 
 Under this scheme:
 * `app:latest` and `app:<SHA>` are CUDA app images.
-* `app:cpu` and `app:cpu-<SHA>` are CPU app images.
-* `db:latest` and `db:<SHA>` are DB images.
+* `app:cpu` and `app:cpu-<SHA>` are CPU app images (planned).
+* `db:latest` and `db:<SHA>` are DB images (planned).
 
 ### Compose Environment Overrides
 
-`docker-compose.yml` supports environment variable overrides for image references and PostgreSQL memory settings, while preserving source-build defaults:
+`docker-compose.yml` supports environment variable overrides for image references, build args, and PostgreSQL memory settings, while preserving source-build defaults:
 
-* `SHIORI_APP_IMAGE`: Overrides the app service image reference (defaults to `ghcr.io/masuda-masuo/shiori/app`). Set to `ghcr.io/masuda-masuo/shiori/app:cpu` on GPU-less hosts.
+* `SHIORI_APP_IMAGE`: Overrides the image reference for both `app` and `ingest` services (defaults to `ghcr.io/masuda-masuo/shiori/app`). Set to `ghcr.io/masuda-masuo/shiori/app:cpu` on GPU-less hosts.
+* `SHIORI_TORCH_INDEX_URL`: Passes the PyTorch wheel index URL (`TORCH_INDEX_URL` build arg) to the build blocks of both `app` and `ingest`. When `pull_policy: missing` triggers a local build upon a pull failure, this ensures the local fallback build also uses the same torch index (e.g. CPU torch instead of CUDA torch).
 * `SHIORI_DB_IMAGE`: Overrides the database service image reference (defaults to `ghcr.io/masuda-masuo/shiori/db`).
 * `SHIORI_PG_SHARED_BUFFERS`: Overrides PostgreSQL `shared_buffers` parameter in `docker-compose.yml` (defaults to `1GB`). Can be tuned down on memory-constrained hosts.
 * `SHIORI_PG_EFFECTIVE_CACHE_SIZE`: Overrides PostgreSQL `effective_cache_size` parameter in `docker-compose.yml` (defaults to `8GB`). Can be tuned down on memory-constrained hosts.

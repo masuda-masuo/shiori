@@ -78,6 +78,8 @@ services:
     build:
       context: .
       dockerfile: docker/app/Dockerfile
+      args:
+        TORCH_INDEX_URL: ${SHIORI_TORCH_INDEX_URL:-}
     # env_file: .env で .env.example に記載された設定をすべて届ける
     # （setup.md の手順: cp .env.example .env）。environment: のキーは
     # env_file より優先される。ONNX パスはここ経由でのみ届ける
@@ -130,11 +132,13 @@ services:
   # オンデマンドの同期ジョブ。`docker compose run --rm ingest` で実行する。
   # `docker compose up` では起動しない（profiles 指定）。cron からも同コマンド。
   ingest:
-    image: ghcr.io/masuda-masuo/shiori/app
+    image: ${SHIORI_APP_IMAGE:-ghcr.io/masuda-masuo/shiori/app}
     pull_policy: missing
     build:
       context: .
       dockerfile: docker/app/Dockerfile
+      args:
+        TORCH_INDEX_URL: ${SHIORI_TORCH_INDEX_URL:-}
     profiles: ["ingest"]
     command: ["sh", "-c", "python -m shiori ingest $(echo \"$SHIORI_REPOS\" | tr ',' ' ' | xargs -n1 echo --repo)"]
     # env_file: .env で .env.example に記載された設定をすべて届ける
