@@ -250,7 +250,26 @@ docker compose build app
 
 ## Start from Published Images on a GPU-less Host
 
-Prebuilt container images for GPU-less hosts are planned for a follow-up release (see [Detailed Design 07](../design/07_runtime_environment_and_deployment.md#6-prebuilt-container-images--deployment-environment-variables-issue-454)).
+On a small or GPU-less host (e.g. a lightweight cloud VM), you can run Shiori using prebuilt images published to GHCR without building images from source:
+
+1. In `.env`, specify the prebuilt CPU app image, DB image, and CPU torch index URL:
+   ```env
+   SHIORI_APP_IMAGE=ghcr.io/masuda-masuo/shiori/app:cpu
+   SHIORI_DB_IMAGE=ghcr.io/masuda-masuo/shiori/db:latest
+   SHIORI_TORCH_INDEX_URL=https://download.pytorch.org/whl/cpu
+   ```
+   Setting `SHIORI_TORCH_INDEX_URL` is required so that a pull failure does not build CUDA torch under the CPU tag during fallback builds.
+
+2. (Optional) On memory-constrained hosts, tune down PostgreSQL memory allocations:
+   ```env
+   SHIORI_PG_SHARED_BUFFERS=256MB
+   SHIORI_PG_EFFECTIVE_CACHE_SIZE=1GB
+   ```
+
+3. Start services without `--build`:
+   ```bash
+   docker compose up -d
+   ```
 
 ---
 

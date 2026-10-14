@@ -78,22 +78,22 @@ for the semantics.
 
 ## 6. Prebuilt Container Images & Deployment Environment Variables (Issue #454)
 
-To allow lightweight or GPU-less hosts (such as small cloud VMs) to run Shiori without compiling dependencies or building images locally from source, prebuilt container images are planned. Currently, the CUDA app image is published, while CPU app and DB image publishing is planned for a follow-up PR.
+To allow lightweight or GPU-less hosts (such as small cloud VMs) to run Shiori without compiling dependencies or building images locally from source, prebuilt container images are published to GitHub Container Registry (GHCR).
 
 ### Image Kinds & Tag Scheme
 
-Three kinds of container images are defined (CPU app and DB image publishing is planned for a follow-up PR):
+Three kinds of container images are published:
 
 | Image Kind | Repository | Tags | Description |
 |---|---|---|---|
 | **CUDA App** | `ghcr.io/masuda-masuo/shiori/app` | `latest`, `<SHA>` | Default application image with CUDA-enabled PyTorch. |
-| **CPU App** | `ghcr.io/masuda-masuo/shiori/app` | `cpu`, `cpu-<SHA>` | CPU-only application image built with `TORCH_INDEX_URL=https://download.pytorch.org/whl/cpu` (publishing planned for follow-up PR). |
-| **DB** | `ghcr.io/masuda-masuo/shiori/db` | `latest`, `<SHA>` | PostgreSQL 16 image with `pgroonga` and `pgvector` pre-installed (publishing planned for follow-up PR). |
+| **CPU App** | `ghcr.io/masuda-masuo/shiori/app` | `cpu`, `cpu-<SHA>` | CPU-only application image built with `TORCH_INDEX_URL=https://download.pytorch.org/whl/cpu`. |
+| **DB** | `ghcr.io/masuda-masuo/shiori/db` | `latest`, `<SHA>` | PostgreSQL 16 image with `pgroonga` and `pgvector` pre-installed. |
 
 Under this scheme:
 * `app:latest` and `app:<SHA>` are CUDA app images.
-* `app:cpu` and `app:cpu-<SHA>` are CPU app images (planned).
-* `db:latest` and `db:<SHA>` are DB images (planned).
+* `app:cpu` and `app:cpu-<SHA>` are CPU app images.
+* `db:latest` and `db:<SHA>` are DB images.
 
 ### Compose Environment Overrides
 

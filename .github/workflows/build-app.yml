@@ -1,9 +1,9 @@
-# shiori/app イメージを CI ビルドし ghcr.io に push する。
-# 事前ビルドされたイメージを sandbox（code-sandbox-mcp 経由等）で直接使うことで、
-# 毎回の pip install の重い依存（torch 等）解決を不要にする。
+# shiori のコンテナイメージ（CUDA版 app、CPU版 app、DB）を CI ビルドし検証後 ghcr.io に push する。
+# 事前ビルドされたイメージを sandbox（code-sandbox-mcp 経由等）や GPU のない軽量ホストで直接使うことで、
+# 毎回のビルドや pip install の重い依存（torch 等）解決を不要にする。
 #
-# PR では push せずビルドのみ。main への push で push する。
-# docker-compose.yml の context: . に合わせ、context はルートディレクトリ。
+# PR では push せずビルドと検証のみ。main ブランチでのみ検証成功後に push する。
+# 3 つのジョブ（app-cuda, app-cpu, db）は並列に実行され、gha キャッシュスコープを分離する。
 name: build-app
 
 on:
@@ -11,6 +11,7 @@ on:
     branches: [main]
     paths:
       - "docker/app/Dockerfile"
+      - "docker/db/**"
       - "pyproject.toml"
       - "src/**"
       - "README.md"
@@ -18,13 +19,15 @@ on:
   pull_request:
     paths:
       - "docker/app/Dockerfile"
+      - "docker/db/**"
       - "pyproject.toml"
       - "src/**"
       - "README.md"
       - ".github/workflows/build-app.yml"
+  workflow_dispatch:
 
 jobs:
-  build:
+  app-cuda:
     runs-on: ubuntu-latest
     # 40: the app image now installs .[embed,onnx] (torch + optimum +
     # onnxruntime, issue #353); a cold gha-cache build exceeds 20 minutes.
@@ -38,20 +41,303 @@ jobs:
 
       - uses: docker/setup-buildx-action@v3
 
-      - uses: docker/login-action@v3
-        if: github.event_name == 'push'
+      - name: ghcr.io にログイン
+        uses: docker/login-action@v3
+        if: github.ref == 'refs/heads/main'
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: docker/build-push-action@v5
+      - name: app-cuda イメージのビルド (load)
+        uses: docker/build-push-action@v5
         with:
           context: .
           file: docker/app/Dockerfile
-          push: ${{ github.event_name == 'push' }}
+          load: true
           tags: |
             ghcr.io/masuda-masuo/shiori/app:latest
             ghcr.io/masuda-masuo/shiori/app:${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=app-cuda
+          cache-to: type=gha,mode=max,scope=app-cuda
+
+      - name: app-cuda イメージの検証
+        id: cuda_verify
+        run: |
+          IMAGE="ghcr.io/masuda-masuo/shiori/app:${{ github.sha }}"
+          docker run --rm "$IMAGE" python -c "import torch; assert torch.version.cuda is not None, 'CUDA torch expected'"
+
+      - name: app-cuda イメージの push
+        if: github.ref == 'refs/heads/main'
+        id: push
+        run: |
+          docker push ghcr.io/masuda-masuo/shiori/app:latest > push-latest.log 2>&1
+          cat push-latest.log
+          docker push "ghcr.io/masuda-masuo/shiori/app:${{ github.sha }}" > push-sha.log 2>&1
+          cat push-sha.log
+          DIGEST=$(grep -i 'digest:' push-latest.log | grep -oE 'sha256:[a-f0-9]{64}' | head -n 1)
+          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
+
+      - name: Job Summary の出力
+        if: always()
+        run: |
+          IMAGE="ghcr.io/masuda-masuo/shiori/app:${{ github.sha }}"
+          SIZE=$(docker image inspect --format '{{.Size}}' "$IMAGE" 2>/dev/null || echo "N/A")
+          DIGEST="${{ steps.push.outputs.digest }}"
+          if [ -z "$DIGEST" ]; then
+            DIGEST="N/A (not pushed)"
+          fi
+
+          cat <<EOF >> "$GITHUB_STEP_SUMMARY"
+          ### app-cuda Image Summary
+
+          | Property / Check | Result |
+          |---|---|
+          | Image | \`ghcr.io/masuda-masuo/shiori/app\` |
+          | Tags | \`latest\`, \`${{ github.sha }}\` |
+          | Uncompressed Size | \`$SIZE\` bytes |
+          | Digest | \`$DIGEST\` |
+          | Verify CUDA PyTorch | ${{ steps.cuda_verify.outcome == 'skipped' && 'not run' || steps.cuda_verify.outcome }} |
+          EOF
+
+  app-cpu:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: ghcr.io にログイン
+        uses: docker/login-action@v3
+        if: github.ref == 'refs/heads/main'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: app-cpu イメージのビルド (load)
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: docker/app/Dockerfile
+          load: true
+          build-args: |
+            TORCH_INDEX_URL=https://download.pytorch.org/whl/cpu
+          tags: |
+            ghcr.io/masuda-masuo/shiori/app:cpu
+            ghcr.io/masuda-masuo/shiori/app:cpu-${{ github.sha }}
+          cache-from: type=gha,scope=app-cpu
+          cache-to: type=gha,mode=max,scope=app-cpu
+
+      - name: "CPU app 単体検証: torch.version.cuda is None"
+        id: cpu_cuda_none
+        run: |
+          IMAGE="ghcr.io/masuda-masuo/shiori/app:cpu-${{ github.sha }}"
+          docker run --rm "$IMAGE" python -c "import torch; assert torch.version.cuda is None"
+
+      - name: "CPU app 単体検証: nvidia-* パッケージ不在"
+        id: cpu_no_nvidia
+        run: |
+          IMAGE="ghcr.io/masuda-masuo/shiori/app:cpu-${{ github.sha }}"
+          NVIDIA_PKGS=$(docker run --rm "$IMAGE" pip list | grep -i '^nvidia-' || true)
+          if [ -n "$NVIDIA_PKGS" ]; then
+            echo "Error: nvidia packages found in CPU image:"
+            echo "$NVIDIA_PKGS"
+            exit 1
+          fi
+
+      - name: "CPU app 単体検証: オフライン埋め込み"
+        id: cpu_offline_embed
+        run: |
+          IMAGE="ghcr.io/masuda-masuo/shiori/app:cpu-${{ github.sha }}"
+          docker run --rm --network none -e HF_HUB_OFFLINE=1 "$IMAGE" \
+            python -c "from shiori.embedding import Embedder; emb = Embedder(); res = emb.embed_query('test'); assert len(res) == 384"
+
+      - name: CPU app + DB の docker compose 起動検証
+        id: cpu_mcp_search
+        run: |
+          # DB イメージをローカルでビルドし、compose が ghcr.io から pull せずに loaded image を使うようにする
+          docker build -t "ghcr.io/masuda-masuo/shiori/db:${{ github.sha }}" docker/db
+
+          mkdir -p data models/onnx
+
+          export SHIORI_APP_IMAGE="ghcr.io/masuda-masuo/shiori/app:cpu-${{ github.sha }}"
+          export SHIORI_DB_IMAGE="ghcr.io/masuda-masuo/shiori/db:${{ github.sha }}"
+          export SHIORI_TORCH_INDEX_URL="https://download.pytorch.org/whl/cpu"
+
+          docker compose up -d
+
+          # MCP HTTP エンドポイントの応答確認と初期化
+          SESSION_ID=""
+          for i in {1..30}; do
+            INIT_OUT=$(curl -s -i -X POST http://localhost:8765/mcp \
+              -H "Content-Type: application/json" \
+              -H "Accept: application/json, text/event-stream" \
+              -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"ci-verify","version":"1.0"}}}' || true)
+            SESSION_ID=$(echo "$INIT_OUT" | grep -i '^mcp-session-id:' | awk '{print $2}' | tr -d '\r\n')
+            if [ -n "$SESSION_ID" ]; then
+              break
+            fi
+            sleep 2
+          done
+
+          if [ -z "$SESSION_ID" ]; then
+            echo "Failed to initialize MCP session with http://localhost:8765/mcp"
+            docker compose logs
+            docker compose down -v
+            exit 1
+          fi
+
+          # tools/list で shiori_search が含まれることを検証
+          TOOLS_OUT=$(curl -s -X POST http://localhost:8765/mcp \
+            -H "Content-Type: application/json" \
+            -H "Accept: application/json, text/event-stream" \
+            -H "mcp-session-id: $SESSION_ID" \
+            -d '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}')
+
+          docker compose down -v
+
+          if ! echo "$TOOLS_OUT" | grep -q 'shiori_search'; then
+            echo "Error: shiori_search tool missing from MCP response: $TOOLS_OUT"
+            exit 1
+          fi
+
+      - name: app-cpu イメージの push
+        if: github.ref == 'refs/heads/main'
+        id: push
+        run: |
+          docker push ghcr.io/masuda-masuo/shiori/app:cpu > push-cpu.log 2>&1
+          cat push-cpu.log
+          docker push "ghcr.io/masuda-masuo/shiori/app:cpu-${{ github.sha }}" > push-sha.log 2>&1
+          cat push-sha.log
+          DIGEST=$(grep -i 'digest:' push-cpu.log | grep -oE 'sha256:[a-f0-9]{64}' | head -n 1)
+          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
+
+      - name: Job Summary の出力
+        if: always()
+        run: |
+          IMAGE="ghcr.io/masuda-masuo/shiori/app:cpu-${{ github.sha }}"
+          SIZE=$(docker image inspect --format '{{.Size}}' "$IMAGE" 2>/dev/null || echo "N/A")
+          DIGEST="${{ steps.push.outputs.digest }}"
+          if [ -z "$DIGEST" ]; then
+            DIGEST="N/A (not pushed)"
+          fi
+
+          cat <<EOF >> "$GITHUB_STEP_SUMMARY"
+          ### app-cpu Image Summary
+
+          | Property / Check | Result |
+          |---|---|
+          | Image | \`ghcr.io/masuda-masuo/shiori/app\` |
+          | Tags | \`cpu\`, \`cpu-${{ github.sha }}\` |
+          | Uncompressed Size | \`$SIZE\` bytes |
+          | Digest | \`$DIGEST\` |
+          | Check: \`torch.version.cuda is None\` | ${{ steps.cpu_cuda_none.outcome == 'skipped' && 'not run' || steps.cpu_cuda_none.outcome }} |
+          | Check: No \`nvidia-*\` packages | ${{ steps.cpu_no_nvidia.outcome == 'skipped' && 'not run' || steps.cpu_no_nvidia.outcome }} |
+          | Check: Offline embedding (\`--network none\`) | ${{ steps.cpu_offline_embed.outcome == 'skipped' && 'not run' || steps.cpu_offline_embed.outcome }} |
+          | Check: Compose MCP endpoint (\`shiori_search\`) | ${{ steps.cpu_mcp_search.outcome == 'skipped' && 'not run' || steps.cpu_mcp_search.outcome }} |
+          EOF
+
+  db:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: ghcr.io にログイン
+        uses: docker/login-action@v3
+        if: github.ref == 'refs/heads/main'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: db イメージのビルド (load)
+        uses: docker/build-push-action@v5
+        with:
+          context: docker/db
+          file: docker/db/Dockerfile
+          load: true
+          tags: |
+            ghcr.io/masuda-masuo/shiori/db:latest
+            ghcr.io/masuda-masuo/shiori/db:${{ github.sha }}
+          cache-from: type=gha,scope=db
+          cache-to: type=gha,mode=max,scope=db
+
+      - name: "DB イメージの検証: pg_isready"
+        id: db_pg_isready
+        run: |
+          IMAGE="ghcr.io/masuda-masuo/shiori/db:${{ github.sha }}"
+          docker run -d --name test-db \
+            -e POSTGRES_USER=shiori \
+            -e POSTGRES_PASSWORD=shiori \
+            -e POSTGRES_DB=shiori \
+            "$IMAGE"
+
+          # pg_isready の待機
+          for i in {1..30}; do
+            if docker exec test-db pg_isready -U shiori -d shiori; then
+              break
+            fi
+            sleep 1
+          done
+          docker exec test-db pg_isready -U shiori -d shiori
+
+      - name: "DB イメージの検証: CREATE EXTENSION pgroonga"
+        id: db_pgroonga
+        run: |
+          docker exec -i test-db psql -U shiori -d shiori -c "CREATE EXTENSION pgroonga;"
+
+      - name: "DB イメージの検証: CREATE EXTENSION vector"
+        id: db_vector
+        run: |
+          docker exec -i test-db psql -U shiori -d shiori -c "CREATE EXTENSION vector;"
+
+      - name: DB テストコンテナの削除
+        if: always()
+        run: |
+          docker rm -f test-db 2>/dev/null || true
+
+      - name: db イメージの push
+        if: github.ref == 'refs/heads/main'
+        id: push
+        run: |
+          docker push ghcr.io/masuda-masuo/shiori/db:latest > push-latest.log 2>&1
+          cat push-latest.log
+          docker push "ghcr.io/masuda-masuo/shiori/db:${{ github.sha }}" > push-sha.log 2>&1
+          cat push-sha.log
+          DIGEST=$(grep -i 'digest:' push-latest.log | grep -oE 'sha256:[a-f0-9]{64}' | head -n 1)
+          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
+
+      - name: Job Summary の出力
+        if: always()
+        run: |
+          IMAGE="ghcr.io/masuda-masuo/shiori/db:${{ github.sha }}"
+          SIZE=$(docker image inspect --format '{{.Size}}' "$IMAGE" 2>/dev/null || echo "N/A")
+          DIGEST="${{ steps.push.outputs.digest }}"
+          if [ -z "$DIGEST" ]; then
+            DIGEST="N/A (not pushed)"
+          fi
+
+          cat <<EOF >> "$GITHUB_STEP_SUMMARY"
+          ### db Image Summary
+
+          | Property / Check | Result |
+          |---|---|
+          | Image | \`ghcr.io/masuda-masuo/shiori/db\` |
+          | Tags | \`latest\`, \`${{ github.sha }}\` |
+          | Uncompressed Size | \`$SIZE\` bytes |
+          | Digest | \`$DIGEST\` |
+          | Check: \`pg_isready\` | ${{ steps.db_pg_isready.outcome == 'skipped' && 'not run' || steps.db_pg_isready.outcome }} |
+          | Check: \`CREATE EXTENSION pgroonga;\` | ${{ steps.db_pgroonga.outcome == 'skipped' && 'not run' || steps.db_pgroonga.outcome }} |
+          | Check: \`CREATE EXTENSION vector;\` | ${{ steps.db_vector.outcome == 'skipped' && 'not run' || steps.db_vector.outcome }} |
+          EOF
