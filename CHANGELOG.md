@@ -8,6 +8,12 @@ pull requests.
 
 ### Core / MCP Tools
 
+- **BREAKING CHANGE**: Require unambiguous omitted repository resolution across tools (#459):
+  - When `repo` is omitted on targeted tools, resolution order is now strictly:
+    1. If exactly one repository is configured, resolve to it immediately without inspecting working directory.
+    2. If the current working directory (`cwd`) matches a configured repository remote, resolve to it.
+    3. Otherwise, raise an error naming the ambiguity, configured repository count, and remedy (`repo="owner/name"` or unique short name; or `repo="*"` for `shiori_grep`).
+  - Silent fallback to the first configured repository (`settings.repos[0]`) has been removed; callers relying on omitted `repo` with multiple configured repositories outside a matching working directory now fail with a clear error.
 - Expose tool-path Phase 1 refresh failures cleanly across tools (#457, #458, #460):
   - `_ensure_phase1` returns structured `Phase1Outcome(status, head, error)` with `refreshed`, `debounced`, or `failed` status.
   - Clone-reading tools (`shiori_read_file`, `shiori_report`) continue serving the on-disk clone on Phase 1 refresh failures and expose `stale: true` and `refresh_error` metadata (omitted on success/debounce).

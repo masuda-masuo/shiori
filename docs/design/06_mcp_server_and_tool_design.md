@@ -106,6 +106,10 @@ healthy or not, and that response shape is unchanged (no `summary` key).
 *   `shiori_read_pr_file` is created to fetch file contents at PR head without modifying the main branch (Issue #81).
 *   `shiori_grep` supports cross-repository searches via `repo="*"` (Issue #151).
 *   `shiori_grep` defaults `regex` to `True` to match developer habits. Fixed-string matching is supported by passing `regex=False` (Issue #152).
+*   **BREAKING**: Unambiguous omitted `repo` resolution (Issue #459). When `repo` is omitted on targeted tools (`shiori_read_file`, `shiori_read_issue`, `shiori_read_pr_file`, `shiori_grep`, `shiori_list_tree`, `shiori_report`, `shiori_pr_changes`, `shiori_pr_diff`, `shiori_pr_review_comments`, `shiori_issue_links`):
+    1. If exactly one repository is configured, use it immediately without cwd inference.
+    2. Else if cwd inference returns a configured repository, use it (stdio compatibility).
+    3. Otherwise raise an error stating ambiguity, configured repository count, and remedy (`repo="owner/name"` or unique short name; for `shiori_grep`, `repo="*"`). Silent fallback to the first configured repository is removed and callers relying on it now fail. Search filter resolution (`_resolve_repo_filter(None)`) remains unchanged (searches all configured repositories).
 
 ---
 

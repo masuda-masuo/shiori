@@ -142,3 +142,39 @@ def test_list_tree_roundtrip_failed_refresh_wire_shape() -> None:
     assert data["entries"] == []
     assert data["stale"] is True
     assert data["refresh_error"] == "mock fetch failure"
+
+
+def test_omitted_repo_tool_error(monkeypatch) -> None:
+    """Omitted repo with multiple configured repos reaches client as isError tool
+    result with helpful message, and session remains usable (no crash).
+    """
+    monkeypatch.setattr(
+        "shiori.tools.common.settings.repos",
+        ["owner/repo-a", "owner/repo-b"],
+    )
+    monkeypatch.setattr(
+        "shiori.mcp_server.settings.repos",
+        ["owner/repo-a", "owner/repo-b"],
+    )
+
+    async def run():
+        with patch("shiori.tools.common._infer_repo_from_cwd", return_value=None):
+            async with Client(mcp) as client:
+                res = await client.call_tool("shiori_grep", {"pattern": "test"})
+                assert res.is_error is True
+                assert len(res.content) == 1
+                assert res.content[0].type == "text"
+                msg = res.content[0].text
+                assert "required" in msg.lower()
+                assert "2" in msg
+                assert "cwd" in msg.lower()
+                assert 'repo="*"' in msg or "repo='*'" in msg or "*" in msg
+                assert "owner/name" in msg
+                assert "short name" in msg.lower()
+
+                # Session remains usable after tool error (no crash)
+                tools = await client.list_tools()
+                assert len(tools.tools) == len(EXPECTED_TOOL_NAMES)
+
+    asyncio.run(run())
+

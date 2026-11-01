@@ -19,8 +19,8 @@ mcp = MCPServer(
         'Use shiori_search first; shiori_keyword_search for identifiers; fetch only needed '
         'file ranges/threads. Check index freshness with shiori_status.\n'
         'repo accepts owner/name or a unique short name. Omitted: search covers all indexed '
-        'repos; read/grep/list_tree/report infer cwd, then first configured repo. grep '
-        'repo="*" covers all repos.\n'
+        'repos; other tools use single configured repo, else cwd inference, else explicit repo '
+        'required. grep repo="*" covers all repos.\n'
         'Roles: dev code is indexed; ref code is clone-only (use grep). Both index '
         'docs/issues/PRs.\n'
         "Each tool's Data sources line specifies freshness: index needs ingest; clone "
