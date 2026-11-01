@@ -18,9 +18,14 @@ def list_tree(
     source_type: str | None = None,
     extension: str | None = None,
     repo: str | None = None,
-) -> list[dict[str, Any]]:
+) -> list[dict[str, Any]] | dict[str, Any]:
     """List indexed doc/code file paths. Filter by path/source_type/extension.
     Understand repo structure and locate files.
+
+    Returns a bare list[dict[str, Any]] on successful/debounced refresh or doc-only reads.
+    When clone refresh fails (for code or all sources), returns a mapping:
+    {"entries": list[dict[str, Any]], "stale": True, "refresh_error": str}.
+
     Data sources: doc_files index for docs; clone on disk (_ensure_phase1) for code."""
     # Validation
     if source_type is not None and source_type not in _VALID_SOURCE_TYPES:
@@ -57,18 +62,28 @@ def list_tree(
                     seen.add(p)
                     entries.append({"path": p, "source": "doc"})
 
+    outcome = None
     # 2. Code files (clone filesystem)
     if source_type is None or source_type == "code":
-        _ensure_phase1(target)  # Phase 1: ensure clone is fresh (#236)
+        outcome = _ensure_phase1(target)  # Phase 1: ensure clone is fresh (#236)
         base = os.path.realpath(settings.repo_dir(target))
-        prefix = path.rstrip("/") if path else ""
-        code_paths = _walk_code_files(base, prefix, extension=extension)
-        # No pre-sort needed on code side; final sort handles it
-        for p in code_paths:
-            if p not in seen:
-                seen.add(p)
-                entries.append({"path": p, "source": "code"})
+        if os.path.isdir(base):
+            prefix = path.rstrip("/") if path else ""
+            code_paths = _walk_code_files(base, prefix, extension=extension)
+            # No pre-sort needed on code side; final sort handles it
+            for p in code_paths:
+                if p not in seen:
+                    seen.add(p)
+                    entries.append({"path": p, "source": "code"})
 
     # Sort by path (when doc and code are interleaved)
     entries.sort(key=lambda e: e["path"])
+
+    if outcome is not None and getattr(outcome, "status", None) == "failed":
+        return {
+            "entries": entries,
+            "stale": True,
+            "refresh_error": getattr(outcome, "error", None) or "Phase 1 refresh failed",
+        }
+
     return entries

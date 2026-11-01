@@ -6,6 +6,15 @@ pull requests.
 
 ## [Unreleased]
 
+### Core / MCP Tools
+
+- Expose tool-path Phase 1 refresh failures cleanly across tools (#457, #458, #460):
+  - `_ensure_phase1` returns structured `Phase1Outcome(status, head, error)` with `refreshed`, `debounced`, or `failed` status.
+  - Clone-reading tools (`shiori_read_file`, `shiori_report`) continue serving the on-disk clone on Phase 1 refresh failures and expose `stale: true` and `refresh_error` metadata (omitted on success/debounce).
+  - `shiori_grep` tracks refresh outcomes per repository: stale clones are searched normally and reported in `stale_repos` with top-level `stale: true` and `refresh_error`; missing clones are reported in `skipped_repos` as `{"repo": ..., "reason": ...}` with `partial: true`.
+  - `shiori_list_tree` returns bare `list[dict]` on successful/debounced refresh and doc-only reads, and returns `{"entries": [...], "stale": true, "refresh_error": ...}` on clone refresh failure.
+  - `shiori_status` surfaces an independent `tool_refresh_consecutive_failures` counter and `tool_refresh_last_error` stored in process memory. Cleared on successful tool-path refresh and independent of background sync failures.
+
 ## [0.8.0] - 2026-08-02
 
 First tagged release. The state of the system at this point:

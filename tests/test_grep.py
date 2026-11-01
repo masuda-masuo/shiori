@@ -194,7 +194,8 @@ class TestGrepSearch:
             mock_settings.repo_dir.side_effect = lambda r: f"/data/repos/{r.replace('/', '__')}"
             result = grep_search(pattern="test")
 
-            assert result["skipped_repos"] == ["o/r"]
+            assert result["skipped_repos"] == [{"repo": "o/r", "reason": "clone directory not found"}]
+            assert result["partial"] is True
             assert result["total_matches"] == 0
             assert result["matches"] == []
 
@@ -389,7 +390,8 @@ class TestGrepSearch:
 
             result = grep_search(pattern="test")
 
-            assert result["skipped_repos"] == ["o/r1"]
+            assert result["skipped_repos"] == [{"repo": "o/r1", "reason": "clone directory not found"}]
+            assert result["partial"] is True
             assert result["total_matches"] == 1
             assert result["matches"][0]["repo"] == "o/r2"
 

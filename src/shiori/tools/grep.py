@@ -20,7 +20,9 @@ def grep_search(
 ) -> dict[str, Any]:
     """Grep clone files with ripgrep. Returns line-level matches.
 
-    Data sources: clone on disk (_ensure_phase1 refreshes each repo before grepping).
+    Data sources: clone on disk (_ensure_phase1 refreshes each repo before grepping;
+    on refresh failure, serves stale on-disk clone and reports stale=True, refresh_error,
+    and stale_repos).
 
     Each match includes a "repo" field identifying the source repository.
 
@@ -34,20 +36,29 @@ def grep_search(
     """
     targets = _resolve_repos(repo)
 
+    outcomes: dict[str, Any] = {}
     # Phase 1: refresh clones inline before searching (#236)
     for target in targets:
-        _ensure_phase1(target)
+        outcomes[target] = _ensure_phase1(target)
 
     all_matches: list[dict[str, Any]] = []
     total = 0
-    skipped_repos: list[str] = []
+    skipped_repos: list[dict[str, str]] = []
+    stale_repos: list[dict[str, str]] = []
 
     for target in targets:
+        outcome = outcomes.get(target)
         base = os.path.realpath(settings.repo_dir(target))
 
         if not os.path.isdir(base):
-            skipped_repos.append(target)
+            skipped_repos.append({"repo": target, "reason": "clone directory not found"})
             continue
+
+        if outcome is not None and getattr(outcome, "status", None) == "failed":
+            stale_repos.append({
+                "repo": target,
+                "error": getattr(outcome, "error", None) or "Phase 1 refresh failed",
+            })
 
         if path:
             search_path = os.path.join(base, path)
@@ -107,7 +118,7 @@ def grep_search(
 
     truncated = total > max_results
 
-    return {
+    result: dict[str, Any] = {
         "pattern": pattern,
         "path": path or "",
         "total_matches": total,
@@ -115,3 +126,18 @@ def grep_search(
         "matches": all_matches,
         "skipped_repos": skipped_repos,
     }
+
+    if skipped_repos:
+        result["partial"] = True
+
+    if stale_repos:
+        result["stale"] = True
+        result["stale_repos"] = stale_repos
+        if len(stale_repos) == 1:
+            result["refresh_error"] = stale_repos[0]["error"]
+        else:
+            result["refresh_error"] = "; ".join(
+                f"{item['repo']}: {item['error']}" for item in stale_repos
+            )[:500]
+
+    return result

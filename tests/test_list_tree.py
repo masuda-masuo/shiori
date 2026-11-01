@@ -16,6 +16,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from shiori.mcp_server import (
+    Phase1Outcome,
     list_tree,
 )
 from shiori.walk_utils import (
@@ -346,6 +347,7 @@ class TestListTreeEndToEnd:
 
         if mock_walk_return is not None:
             with (
+                patch("shiori.tools.list_tree._ensure_phase1", return_value=Phase1Outcome(status="refreshed")),
                 patch("shiori.tools.list_tree.settings") as mock_settings,
                 patch("shiori.tools.common.settings", mock_settings),
                 patch("shiori.tools.list_tree._conn", side_effect=_fake_conn),
@@ -359,6 +361,7 @@ class TestListTreeEndToEnd:
                 return list_tree(source_type=source_type, extension=extension)
         else:
             with (
+                patch("shiori.tools.list_tree._ensure_phase1", return_value=Phase1Outcome(status="refreshed")),
                 patch("shiori.tools.list_tree.settings") as mock_settings,
                 patch("shiori.tools.common.settings", mock_settings),
                 patch("shiori.tools.list_tree._conn", side_effect=_fake_conn),
