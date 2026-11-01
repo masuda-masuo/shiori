@@ -168,7 +168,7 @@ def test_omitted_repo_tool_error(monkeypatch) -> None:
                 assert "required" in msg.lower()
                 assert "2" in msg
                 assert "cwd" in msg.lower()
-                assert 'repo="*"' in msg or "repo='*'" in msg or "*" in msg
+                assert 'repo="*"' in msg
                 assert "owner/name" in msg
                 assert "short name" in msg.lower()
 
