@@ -21,6 +21,12 @@ from shiori.mcp_server import (
 @pytest.fixture(autouse=True)
 def _reset_pipeline_state():
     sync_pipeline._phase1_last_fetch.clear()
+    sync_pipeline._reset_tool_refresh_state()
+    try:
+        yield
+    finally:
+        sync_pipeline._phase1_last_fetch.clear()
+        sync_pipeline._reset_tool_refresh_state()
 
 
 # ── _ensure_phase1: single-flight + debounce ──
@@ -38,7 +44,9 @@ class TestEnsurePhase1:
         ):
             mock_build.return_value = MagicMock()
             result = _ensure_phase1("o/r")
-        assert result == "abc123"
+        assert result.status == "refreshed"
+        assert result.head == "abc123"
+        assert result.error is None
 
     def test_debounce_skips_within_interval(self):
         """Second call within debounce window skips without calling refresh_clone."""
@@ -53,10 +61,12 @@ class TestEnsurePhase1:
             mock_settings.sync_interval_seconds = 10
             sync_pipeline._phase1_last_fetch.pop("o/r", None)
             result1 = _ensure_phase1("o/r")
-            assert result1 == "abc123"
+            assert result1.status == "refreshed"
+            assert result1.head == "abc123"
             assert mock_refresh.call_count == 1
             result2 = _ensure_phase1("o/r")
-            assert result2 is None
+            assert result2.status == "debounced"
+            assert result2.head == "abc123"
             assert mock_refresh.call_count == 1
 
     def test_single_flight_serializes_same_repo(self):
@@ -123,7 +133,40 @@ class TestEnsurePhase1:
             mock_settings.sync_interval_seconds = 0
             sync_pipeline._phase1_last_fetch.pop("o/r", None)
             result = _ensure_phase1("o/r")
-        assert result is None
+        assert result.status == "failed"
+        assert result.head is None
+        assert result.error == "git fetch failed"
+
+    def test_failed_refresh_retains_previous_known_head(self):
+        """When refresh previously succeeded and then fails, known head is retained."""
+        with (
+            patch("shiori.pipeline.build_token_provider") as mock_build,
+            patch("shiori.refresh.refresh_clone", return_value="abc123"),
+            patch("shiori.pipeline._conn"),
+            patch("shiori.pipeline.db.upsert_clone_head"),
+            patch("shiori.pipeline.settings") as mock_settings,
+        ):
+            mock_build.return_value = MagicMock()
+            mock_settings.sync_interval_seconds = 0
+            res1 = _ensure_phase1("o/r")
+            assert res1.status == "refreshed"
+            assert res1.head == "abc123"
+
+        # Advance past debounce
+        sync_pipeline._phase1_last_fetch.pop("o/r", None)
+
+        with (
+            patch("shiori.pipeline.build_token_provider") as mock_build,
+            patch("shiori.refresh.refresh_clone", side_effect=RuntimeError("transient network error")),
+            patch("shiori.pipeline._conn"),
+            patch("shiori.pipeline.settings") as mock_settings,
+        ):
+            mock_build.return_value = MagicMock()
+            mock_settings.sync_interval_seconds = 0
+            res2 = _ensure_phase1("o/r")
+            assert res2.status == "failed"
+            assert res2.head == "abc123"
+            assert res2.error == "transient network error"
 
 
 # ── status(): index_stale never_indexed detection ──

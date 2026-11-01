@@ -10,6 +10,7 @@ from typing import Any, Literal
 from . import schema
 from .dashboard import register_dashboard
 from .pipeline import (
+    Phase1Outcome,  # noqa: F401 — re-export for tests
     _conn,
     _do_sync,
     _ensure_phase1,  # noqa: F401 — re-export for tests

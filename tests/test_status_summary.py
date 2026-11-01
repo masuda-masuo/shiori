@@ -292,6 +292,7 @@ class TestMixedFleet:
         assert counts["with_pending"] == 1
         assert repos["o/pending"]["pending_count"] == 7
         assert counts["with_warnings"] == 4
+        assert counts["tool_refresh_failing"] == 0
 
     def test_pending_total_sums_across_all_repos(self):
         assert self._run_mixed()["summary"]["pending_total"] == 7
@@ -903,7 +904,8 @@ class TestSummarize:
     def test_counts_are_independent_per_condition(self):
         summary = _summarize({
             "o/a": {"warnings": ["w"], "index_stale": True, "never_indexed": True,
-                    "consecutive_failures": 2, "pending_count": 5, "role": "dev"},
+                    "consecutive_failures": 2, "tool_refresh_consecutive_failures": 3,
+                    "pending_count": 5, "role": "dev"},
             "o/b": {"warnings": [], "role": "ref"},
         })
         assert summary["unhealthy_repos"] == 1
@@ -913,9 +915,16 @@ class TestSummarize:
             "index_stale": 1,
             "never_indexed": 1,
             "failing": 1,
+            "tool_refresh_failing": 1,
             "with_pending": 1,
         }
         assert summary["pending_total"] == 5
+
+    def test_zero_tool_refresh_failures_counted_as_zero(self):
+        summary = _summarize({
+            "o/a": {"warnings": [], "role": "dev"},
+        })
+        assert summary["unhealthy_counts"]["tool_refresh_failing"] == 0
 
 
 

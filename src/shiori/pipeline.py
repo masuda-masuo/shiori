@@ -11,9 +11,11 @@ concurrent execution with serve auto-sync or MCP ingest.
 from __future__ import annotations
 
 import logging
+import re
 import threading
 import time
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Literal
 
 import psycopg
 
@@ -90,8 +92,63 @@ _phase1_last_fetch: dict[str, float] = {}
 _PHASE1_MIN_DEBOUNCE = 1.0
 
 
-def _ensure_phase1(repo: str) -> str | None:
-    """Ensure clone is fresh for *repo*. Returns HEAD SHA or None on failure.
+@dataclass(frozen=True)
+class Phase1Outcome:
+    """Structured outcome of a Phase 1 clone refresh attempt."""
+
+    status: Literal["refreshed", "debounced", "failed"]
+    head: str | None = None
+    error: str | None = None
+
+
+@dataclass
+class ToolRefreshState:
+    """Process-local consecutive failure tracking for tool-path Phase 1 refreshes."""
+
+    consecutive_failures: int = 0
+    last_error: str | None = None
+    known_head: str | None = None
+
+
+_tool_refresh_lock = threading.Lock()
+_tool_refresh_state: dict[str, ToolRefreshState] = {}
+
+
+def _format_short_error(exc: BaseException) -> str:
+    """Format a short, cause-bearing error message without tracebacks or secrets."""
+    msg = str(exc).strip()
+    if not msg:
+        msg = exc.__class__.__name__
+    msg = re.sub(r"(gh[pousr]_[A-Za-z0-9_]{10,}|github_pat_[A-Za-z0-9_]{10,})", "[REDACTED]", msg)
+    return msg[:500]
+
+
+def get_tool_refresh_state(repo: str) -> tuple[int, str | None]:
+    """Return (consecutive_failures, last_error) for repo in a thread-safe snapshot."""
+    with _tool_refresh_lock:
+        state = _tool_refresh_state.get(repo)
+        if state is None:
+            return 0, None
+        return state.consecutive_failures, state.last_error
+
+
+def get_all_tool_refresh_states() -> dict[str, tuple[int, str | None]]:
+    """Return all {repo: (consecutive_failures, last_error)} in a thread-safe snapshot."""
+    with _tool_refresh_lock:
+        return {
+            repo: (state.consecutive_failures, state.last_error)
+            for repo, state in _tool_refresh_state.items()
+        }
+
+
+def _reset_tool_refresh_state() -> None:
+    """Reset process-local tool refresh failure state (for tests)."""
+    with _tool_refresh_lock:
+        _tool_refresh_state.clear()
+
+
+def _ensure_phase1(repo: str) -> Phase1Outcome:
+    """Ensure clone is fresh for *repo*. Returns Phase1Outcome.
 
     Inline (blocking) call for Phase 1. Per-repo single-flight with debounce:
     at most one git fetch per repo at any time; subsequent callers within the
@@ -112,8 +169,12 @@ def _ensure_phase1(repo: str) -> str | None:
         except (TypeError, ValueError):
             interval = 0
         debounce = max(interval, _PHASE1_MIN_DEBOUNCE)
+        with _tool_refresh_lock:
+            state = _tool_refresh_state.get(repo)
+            known_head = state.known_head if state else None
+
         if last > 0 and (now - last) < debounce:
-            return None  # debounced: skip
+            return Phase1Outcome(status="debounced", head=known_head, error=None)
 
         try:
             provider = build_token_provider(settings)
@@ -125,10 +186,26 @@ def _ensure_phase1(repo: str) -> str | None:
                     db.upsert_clone_head(conn, repo, head)
             except Exception:
                 log.exception("upsert_clone_head failed for %s", repo)
-            return head
-        except Exception:
+            with _tool_refresh_lock:
+                _tool_refresh_state[repo] = ToolRefreshState(
+                    consecutive_failures=0,
+                    last_error=None,
+                    known_head=head,
+                )
+            return Phase1Outcome(status="refreshed", head=head, error=None)
+        except Exception as exc:
             log.exception("Phase 1 clone refresh failed for %s", repo)
-            return None
+            short_err = _format_short_error(exc)
+            with _tool_refresh_lock:
+                state = _tool_refresh_state.get(repo)
+                prev_count = state.consecutive_failures if state else 0
+                prev_head = state.known_head if state else None
+                _tool_refresh_state[repo] = ToolRefreshState(
+                    consecutive_failures=prev_count + 1,
+                    last_error=short_err,
+                    known_head=prev_head,
+                )
+            return Phase1Outcome(status="failed", head=prev_head, error=short_err)
 
 
 def _do_sync(

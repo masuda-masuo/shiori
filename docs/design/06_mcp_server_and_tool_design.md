@@ -10,17 +10,17 @@ Expose retrieval and inspection functionality as Model Context Protocol (MCP) to
 
 *   `shiori_search(query, filters?)`: Performs unified hybrid semantic + keyword search (RRF, k=60). Returns a list of matched chunk pointers and content snippets.
 *   `shiori_keyword_search(query, filters?)`: Morphologically tokenized exact-match search. Used to locate precise identifier matches.
-*   `shiori_list_tree(path?, source_type?, extension?)`: Lists indexed files. Filterable by `source_type` (`doc` or `code`) and file extension (e.g. `.py`, `.md`) (Issue #43).
-*   `shiori_read_file(path, range?)`: Reads local files from the shallow repository clone (supports line range slicing).
+*   `shiori_list_tree(path?, source_type?, extension?, repo?)`: Lists indexed files. Filterable by `source_type` (`doc` or `code`), file extension (e.g. `.py`, `.md`), and `repo` (Issue #43). Returns mapping `{"entries": [...]}`. On Phase 1 clone refresh failure, includes `stale: true` and `refresh_error` metadata (omitted on success, debounce, or doc-only) (Issue #458).
+*   `shiori_read_file(path, start_line?, end_line?, repo?)`: Reads local files from the shallow repository clone (supports line range slicing). On Phase 1 clone refresh failure, continues serving the on-disk clone and marks response with `stale: true` and `refresh_error` (omitted on success/debounce) (Issue #457).
 *   `shiori_read_issue(number, numbers?, repo?, exclude_noise_bots?, issue_number?, issue_no?)`: Retrieves full issue or PR thread timelines sequentially. `number` also accepts the aliases `issue_number` / `issue_no` (same meaning; batch `numbers` does not). `numbers` fetches a batch (up to 50). Setting `exclude_noise_bots=true` filters out comments from non-allowlisted bots (Issue #44).
 *   `shiori_pr_changes(number, repo?, include_diff?)`: Retrieves a list of modified files in a PR. Returns file path, status, and line counts. Setting `include_diff=true` also returns unified diff and stats. Computed from git clone directly (`git diff --name-status` + `--numstat`) — no longer depends on the `pr_changes` DB table. `blob_url` is omitted (not available from git alone) (Issue #259).
 *   `shiori_pr_diff(number, path?, repo?)`: Computes and returns the unified Git diff of a PR without modifying the local active working tree (Issue #96). **Breaking change (v2)**: no longer returns `head_sha` / `base_sha` (removed the `pr_changes` DB dependency). The diff is now computed purely from the clone (Issue #259).
 *   `shiori_pr_review_comments(number, repo?)`: Lists review comments with line numbers and file paths (Issue #96).
 *   `shiori_issue_links(number, repo?)`: Analyzes issue descriptions and comments to identify cross-references (such as closes, duplicate, refs, or mentions), returning target title and state (Issue #97).
 *   `shiori_read_pr_file(number, path, range?, repo?)`: Fetches the file content at the head commit of a PR by pulling a temporary ref (Issue #81).
-*   `shiori_grep(pattern, repo?, path?, regex?, ignore_case?, max_results?)`: Performs line-level ripgrep search inside cloned repositories. Designed as a Stage-2 search. Setting `repo="*"` executes cross-repository searches (Issue #146, #151).
-*   `shiori_status(repo?)`: Queries system health, sync state cursors, and database row allocations per repository (Issue #22, #31). Reports `auto_sync_running` thread health, token provider strategies, and warning logs (Issue #187, #196). **Omitting `repo` returns an aggregate summary, not every record** (Issue #423): `summary` carries the fleet-wide counts and `repos` carries full per-repo records only for repos that are *not* healthy (most severe first, up to a size budget; the rest are named in `summary`). Passing `repo` returns that one repo's full record unchanged. See [Status Aggregate Default](#31-status-aggregate-default-issue-423).
-*   `shiori_report(template, repo?, path?, kind?, public_only?, max_results?, prog_lang?, max_chars?)`: Generates a structured report from the on-disk clone (`_ensure_phase1` refreshes it first; the `api_reference` template additionally reads the search index for cross-linking). Templates: `stats`, `module_tree`, `symbol_index`, `api_reference` (Issue #279).
+*   `shiori_grep(pattern, repo?, path?, regex?, ignore_case?, max_results?)`: Performs line-level ripgrep search inside cloned repositories. Designed as a Stage-2 search. Setting `repo="*"` executes cross-repository searches (Issue #146, #151). On Phase 1 clone refresh failure, searches intact stale clone and reports `stale: true`, `refresh_error`, and `stale_repos` (`[{"repo": ..., "error": ...}]`). Missing clones are reported in `skipped_repos` (`[{"repo": ..., "reason": ...}]`) and set `partial: true` (Issue #457, #458).
+*   `shiori_status(repo?)`: Queries system health, sync state cursors, and database row allocations per repository (Issue #22, #31). Reports `auto_sync_running` thread health, token provider strategies, and warning logs (Issue #187, #196). In addition to DB metadata, surfaces independent `tool_refresh_consecutive_failures` and `tool_refresh_last_error` from process-local memory, independent of background sync failures (Issue #460). **Omitting `repo` returns an aggregate summary, not every record** (Issue #423): `summary` carries the fleet-wide counts and `repos` carries full per-repo records only for repos that are *not* healthy (most severe first, up to a size budget; the rest are named in `summary`). Passing `repo` returns that one repo's full record unchanged. See [Status Aggregate Default](#31-status-aggregate-default-issue-423).
+*   `shiori_report(template, repo?, path?, kind?, public_only?, max_results?, prog_lang?, max_chars?)`: Generates a structured report from the on-disk clone (`_ensure_phase1` refreshes it first; the `api_reference` template additionally reads the search index for cross-linking). Templates: `stats`, `module_tree`, `symbol_index`, `api_reference` (Issue #279). On Phase 1 refresh failure, generates report from on-disk clone and marks response with `stale: true` and `refresh_error` (Issue #457).
 
 > **v2.0 Deprecation**: The `shiori_ingest` MCP tool has been deprecated. Synchronization is managed via CLI (`python -m shiori ingest`) or background polling (`SHIORI_SYNC_INTERVAL_SECONDS`).
 
@@ -36,6 +36,7 @@ The `warnings` list in `shiori_status` automatically identifies the following sy
 |---|---|
 | `age_seconds` exceeds stale threshold | The index has not synced recently. The threshold is `max(sync_interval_seconds * 30, 300s)` when auto-sync is enabled, and 24 hours otherwise. |
 | `consecutive_failures > 0` | Sync attempts are failing. Logs the `last_error` exception. |
+| `tool_refresh_consecutive_failures > 0` | Tool-path Phase 1 clone refreshes are failing. Logs `tool_refresh_last_error`. Process-local lifetime, cleared on next successful tool refresh (Issue #460). |
 | Token Provider initialization error | Token configurations are broken (reports `token_provider: "error"`, Issue #193). |
 | `chunks["issue"] + chunks["pr_review"] < items_in_db // 2` | Matched chunks are abnormally low compared to database items. Indicates indexing drops. |
 | Missing categories in sync state | Incremental ingestion is incomplete. |
@@ -47,7 +48,9 @@ calls omit it), and it was the one that did not fit: a full record per repo came
 53,836 characters on the 62-repo deployment. The no-repo call therefore returns an
 aggregate instead:
 
-*   `summary` -- total / healthy / unhealthy repo counts, a per-condition breakdown,
+*   `summary` -- total / healthy / unhealthy repo counts, a per-condition breakdown
+    (`unhealthy_counts`: `with_warnings`, `index_stale`, `never_indexed`, `failing`,
+    `tool_refresh_failing`, `with_pending`),
     the `pending_count` total across all repos, and the single oldest repo by
     `age_seconds` (name, role, age).
 *   `repos` -- full records for **unhealthy repos only**, each carrying exactly the
@@ -58,19 +61,20 @@ aggregate instead:
 A repo is **unhealthy** when any of these holds; otherwise it is healthy and is
 counted in `summary` rather than listed:
 
-| Condition | Meaning |
-|---|---|
-| `warnings` non-empty | Any trigger from the table above fired. |
-| `index_stale` | The on-disk clone is ahead of the indexed content. |
-| `never_indexed` | A clone exists but was never indexed. |
-| `consecutive_failures > 0` | Sync attempts are failing. |
-| `pending_count` truthy | An index run left issue items unprocessed. |
+| Condition | Meaning | Summary Counter |
+|---|---|---|
+| `warnings` non-empty | Any trigger from the table above fired. | `unhealthy_counts.with_warnings` |
+| `index_stale` | The on-disk clone is ahead of the indexed content. | `unhealthy_counts.index_stale` |
+| `never_indexed` | A clone exists but was never indexed. | `unhealthy_counts.never_indexed` |
+| `consecutive_failures > 0` | Sync attempts are failing. | `unhealthy_counts.failing` |
+| `tool_refresh_consecutive_failures > 0` | Tool-path Phase 1 clone refreshes are failing (Issue #460). Number of repos with failures > 0. | `unhealthy_counts.tool_refresh_failing` |
+| `pending_count` truthy | An index run left issue items unprocessed. | `unhealthy_counts.with_pending` |
 
 The no-repo response is **size-bounded even when the fleet degrades** --
 the case that matters most.  Unhealthy records are emitted in severity
-order (failing syncs first, then never-indexed, then stale, then pending,
-then plain warnings; longest-since-sync first within a class) until the
-serialized `repos` payload would exceed the 8,000-char budget
+order (failing syncs first, then failing tool refreshes, then never-indexed,
+then stale, then pending, then plain warnings; longest-since-sync first within a class)
+until the serialized `repos` payload would exceed the 8,000-char budget
 (`_NO_REPO_REPOS_CHAR_BUDGET`); every unhealthy repo cut off by the
 budget is named in `summary.omitted_repo_names`, with the count in
 `summary.omitted_repos` -- explicit, never silently truncated.  Without
@@ -134,7 +138,7 @@ Frozen design decisions (ratified in Issue #340/#347; do not re-litigate without
 *   Neither ②a nor ②b calls `_ensure_phase1`. ②b's git fetch is its own contract,
     documented in each tool's own docstring; it starts from the clone but does not
     perform the Phase 1 refresh.
-*   Category ③ (plus `shiori_report`) keep `_ensure_phase1`.
+*   Category ③ (plus `shiori_report`) keep `_ensure_phase1`. When Phase 1 clone refresh fails, tools continue serving the intact on-disk clone and surface failure metadata (`stale: true`, `refresh_error`, `stale_repos`, `partial: true`) rather than failing the call (Issues #457, #458, #460).
 
 ---
 

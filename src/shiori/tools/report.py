@@ -29,7 +29,8 @@ def report(
 ) -> dict[str, Any]:
     """Generate a structured report (stats, module_tree, symbol_index, api_reference).
 
-    Data sources: clone on disk (_ensure_phase1 refreshes it first); api_reference
+    Data sources: clone on disk (_ensure_phase1 refreshes it first; on refresh failure,
+    serves stale clone and reports stale=True with refresh_error); api_reference
     template additionally reads the search index for cross-linking.
 
     template: one of the registered report templates (see error message for the list).
@@ -41,7 +42,7 @@ def report(
         )
 
     target = _resolve_repo(repo)
-    _ensure_phase1(target)
+    outcome = _ensure_phase1(target)
     base = os.path.realpath(settings.repo_dir(target))
 
     if not os.path.isdir(base):
@@ -57,10 +58,11 @@ def report(
     else:
         target_path = base
 
+    out_dict: dict[str, Any]
     if template == "stats":
         data = _stats_data(target_path)
         markdown = _stats_to_markdown(data)
-        return {
+        out_dict = {
             "repo": target,
             "template": template,
             "markdown": markdown,
@@ -72,7 +74,7 @@ def report(
             base=base,
             max_nodes=max_results,
         )
-        return {
+        out_dict = {
             "repo": target,
             "template": template,
             "markdown": result["markdown"],
@@ -88,7 +90,7 @@ def report(
         )
         markdown = result["markdown"]
         truncated = result["truncated"]
-        return {
+        out_dict = {
             "repo": target,
             "template": template,
             "markdown": markdown,
@@ -104,11 +106,16 @@ def report(
             max_chars=max_chars,
             conn_factory=_conn,
         )
-        return {
+        out_dict = {
             "repo": target,
             "template": template,
             "markdown": result["markdown"],
             "truncated": result["truncated"],
         }
+    else:
+        raise AssertionError("Unreachable template code path")
 
-    raise AssertionError("Unreachable template code path")
+    if getattr(outcome, "status", None) == "failed":
+        out_dict["stale"] = True
+        out_dict["refresh_error"] = outcome.error
+    return out_dict

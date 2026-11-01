@@ -11,11 +11,13 @@ from __future__ import annotations
 
 import os
 import tempfile
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from shiori.mcp_server import (
+    Phase1Outcome,
     list_tree,
 )
 from shiori.walk_utils import (
@@ -315,7 +317,6 @@ class TestListTreeEndToEnd:
         cur = MagicMock()
         cur.fetchall.return_value = rows
         return cur
-
     def _call_list_tree(
         self,
         tmp: str,
@@ -324,7 +325,8 @@ class TestListTreeEndToEnd:
         doc_rows: list[tuple[str]] | None = None,
         code_files: list[str] | None = None,
         mock_walk_return: set[str] | None = None,
-    ) -> list[dict]:
+        phase1_outcome: Phase1Outcome | None = None,
+    ) -> dict[str, Any]:
         """list_tree をモック環境で呼び出す。
 
         mock_walk_return が指定された場合は _walk_code_files をその戻り値でモックする。
@@ -344,8 +346,11 @@ class TestListTreeEndToEnd:
         def _fake_conn():
             return mock_conn
 
+        outcome = phase1_outcome or Phase1Outcome(status="refreshed")
+
         if mock_walk_return is not None:
             with (
+                patch("shiori.tools.list_tree._ensure_phase1", return_value=outcome),
                 patch("shiori.tools.list_tree.settings") as mock_settings,
                 patch("shiori.tools.common.settings", mock_settings),
                 patch("shiori.tools.list_tree._conn", side_effect=_fake_conn),
@@ -359,6 +364,7 @@ class TestListTreeEndToEnd:
                 return list_tree(source_type=source_type, extension=extension)
         else:
             with (
+                patch("shiori.tools.list_tree._ensure_phase1", return_value=outcome),
                 patch("shiori.tools.list_tree.settings") as mock_settings,
                 patch("shiori.tools.common.settings", mock_settings),
                 patch("shiori.tools.list_tree._conn", side_effect=_fake_conn),
@@ -376,8 +382,11 @@ class TestListTreeEndToEnd:
                 doc_rows=[("README.md",), ("docs/guide.md",)],
                 code_files=["main.py", "utils.py"],
             )
-            assert _entries_to_paths(result) == ["README.md", "docs/guide.md"]
-            for entry in result:
+            assert isinstance(result, dict)
+            assert "stale" not in result
+            assert "refresh_error" not in result
+            assert _entries_to_paths(result["entries"]) == ["README.md", "docs/guide.md"]
+            for entry in result["entries"]:
                 assert entry["source"] == "doc"
 
     def test_source_type_code_only(self):
@@ -389,8 +398,11 @@ class TestListTreeEndToEnd:
                 doc_rows=[("README.md",)],
                 code_files=["main.py", "utils.py"],
             )
-            assert _entries_to_paths(result) == ["main.py", "utils.py"]
-            for entry in result:
+            assert isinstance(result, dict)
+            assert "stale" not in result
+            assert "refresh_error" not in result
+            assert _entries_to_paths(result["entries"]) == ["main.py", "utils.py"]
+            for entry in result["entries"]:
                 assert entry["source"] == "code"
 
     def test_source_type_none_returns_both(self):
@@ -402,9 +414,12 @@ class TestListTreeEndToEnd:
                 doc_rows=[("README.md",)],
                 code_files=["main.py"],
             )
-            assert _entries_to_paths(result) == ["README.md", "main.py"]
-            assert result[0] == {"path": "README.md", "source": "doc"}
-            assert result[1] == {"path": "main.py", "source": "code"}
+            assert isinstance(result, dict)
+            assert "stale" not in result
+            assert "refresh_error" not in result
+            assert _entries_to_paths(result["entries"]) == ["README.md", "main.py"]
+            assert result["entries"][0] == {"path": "README.md", "source": "doc"}
+            assert result["entries"][1] == {"path": "main.py", "source": "code"}
 
     def test_doc_with_extension_md(self):
         """source_type='doc' + extension='.md' で .md だけ"""
@@ -415,8 +430,11 @@ class TestListTreeEndToEnd:
                 extension=".md",
                 doc_rows=[("README.md",), ("CHANGELOG.rst",)],
             )
-            assert _entries_to_paths(result) == ["README.md"]
-            assert result[0]["source"] == "doc"
+            assert isinstance(result, dict)
+            assert "stale" not in result
+            assert "refresh_error" not in result
+            assert _entries_to_paths(result["entries"]) == ["README.md"]
+            assert result["entries"][0]["source"] == "doc"
 
     def test_doc_with_extension_py_returns_empty(self):
         """source_type='doc' + extension='.py' は空（doc に .py はない）"""
@@ -427,7 +445,9 @@ class TestListTreeEndToEnd:
                 extension=".py",
                 doc_rows=[("README.md",), ("docs/guide.md",)],
             )
-            assert result == []
+            assert result == {"entries": []}
+            assert "stale" not in result
+            assert "refresh_error" not in result
 
     def test_code_with_extension_py(self):
         """source_type='code' + extension='.py' で .py だけ"""
@@ -438,8 +458,11 @@ class TestListTreeEndToEnd:
                 extension=".py",
                 code_files=["main.py", "utils.py", "utils.ts"],
             )
-            assert _entries_to_paths(result) == ["main.py", "utils.py"]
-            for entry in result:
+            assert isinstance(result, dict)
+            assert "stale" not in result
+            assert "refresh_error" not in result
+            assert _entries_to_paths(result["entries"]) == ["main.py", "utils.py"]
+            for entry in result["entries"]:
                 assert entry["source"] == "code"
 
     def test_code_with_extension_ts(self):
@@ -451,8 +474,11 @@ class TestListTreeEndToEnd:
                 extension=".ts",
                 code_files=["main.py", "utils.ts", "types.ts"],
             )
-            assert _entries_to_paths(result) == ["types.ts", "utils.ts"]
-            for entry in result:
+            assert isinstance(result, dict)
+            assert "stale" not in result
+            assert "refresh_error" not in result
+            assert _entries_to_paths(result["entries"]) == ["types.ts", "utils.ts"]
+            for entry in result["entries"]:
                 assert entry["source"] == "code"
 
     def test_code_extension_no_match(self):
@@ -464,7 +490,9 @@ class TestListTreeEndToEnd:
                 extension=".go",
                 code_files=["main.py", "utils.py"],
             )
-            assert result == []
+            assert result == {"entries": []}
+            assert "stale" not in result
+            assert "refresh_error" not in result
 
     def test_both_with_extension_py(self):
         """source_type=None + extension='.py' は両方から .py だけ"""
@@ -476,8 +504,11 @@ class TestListTreeEndToEnd:
                 doc_rows=[("README.md",)],
                 code_files=["main.py", "utils.ts"],
             )
-            assert _entries_to_paths(result) == ["main.py"]
-            assert result[0]["source"] == "code"
+            assert isinstance(result, dict)
+            assert "stale" not in result
+            assert "refresh_error" not in result
+            assert _entries_to_paths(result["entries"]) == ["main.py"]
+            assert result["entries"][0]["source"] == "code"
 
     def test_sorted_result(self):
         """結果が path でソートされている"""
@@ -488,12 +519,15 @@ class TestListTreeEndToEnd:
                 doc_rows=[("a.md",), ("z.md",)],
                 code_files=["c.py", "b.py"],
             )
-            assert _entries_to_paths(result) == ["a.md", "b.py", "c.py", "z.md"]
+            assert isinstance(result, dict)
+            assert "stale" not in result
+            assert "refresh_error" not in result
+            assert _entries_to_paths(result["entries"]) == ["a.md", "b.py", "c.py", "z.md"]
             # source フィールドも確認
-            assert result[0]["source"] == "doc"
-            assert result[1]["source"] == "code"
-            assert result[2]["source"] == "code"
-            assert result[3]["source"] == "doc"
+            assert result["entries"][0]["source"] == "doc"
+            assert result["entries"][1]["source"] == "code"
+            assert result["entries"][2]["source"] == "code"
+            assert result["entries"][3]["source"] == "doc"
 
     def test_duplicate_path_across_stores(self):
         """doc と code で同名パスが衝突した場合、doc が優先される。
@@ -508,5 +542,65 @@ class TestListTreeEndToEnd:
                 doc_rows=[("src/foo.py",)],
                 mock_walk_return={"src/foo.py"},
             )
-            assert len(result) == 1
-            assert result[0] == {"path": "src/foo.py", "source": "doc"}
+            assert isinstance(result, dict)
+            assert "stale" not in result
+            assert "refresh_error" not in result
+            assert len(result["entries"]) == 1
+            assert result["entries"][0] == {"path": "src/foo.py", "source": "doc"}
+
+    def test_debounced_refresh(self):
+        """Phase 1 debounced refresh returns mapping with entries and no failure metadata."""
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self._call_list_tree(
+                tmp,
+                source_type="code",
+                code_files=["main.py"],
+                phase1_outcome=Phase1Outcome(status="debounced", head="abc1234"),
+            )
+            assert result == {
+                "entries": [{"path": "main.py", "source": "code"}]
+            }
+            assert "stale" not in result
+            assert "refresh_error" not in result
+
+    def test_failed_refresh_intact_clone(self):
+        """Failed refresh with intact clone attaches stale: True and refresh_error."""
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self._call_list_tree(
+                tmp,
+                source_type="code",
+                code_files=["main.py"],
+                phase1_outcome=Phase1Outcome(status="failed", head="abc1234", error="fetch failed"),
+            )
+            assert result == {
+                "entries": [{"path": "main.py", "source": "code"}],
+                "stale": True,
+                "refresh_error": "fetch failed",
+            }
+
+    def test_failed_refresh_missing_clone(self):
+        """Failed refresh with missing clone attaches stale: True, refresh_error, empty entries."""
+        with tempfile.TemporaryDirectory() as tmp:
+            missing_dir = os.path.join(tmp, "nonexistent")
+            mock_conn = MagicMock()
+            mock_conn.__enter__ = MagicMock(return_value=mock_conn)
+            mock_conn.__exit__ = MagicMock(return_value=False)
+            mock_cur = MagicMock()
+            mock_cur.fetchall.return_value = []
+            mock_conn.cursor.return_value.__enter__ = MagicMock(return_value=mock_cur)
+            mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+
+            with (
+                patch("shiori.tools.list_tree._ensure_phase1", return_value=Phase1Outcome(status="failed", head=None, error="clone missing")),
+                patch("shiori.tools.list_tree.settings") as mock_settings,
+                patch("shiori.tools.common.settings", mock_settings),
+                patch("shiori.tools.list_tree._conn", return_value=mock_conn),
+            ):
+                mock_settings.repos = ["test/repo"]
+                mock_settings.repo_dir.return_value = missing_dir
+                result = list_tree(source_type="code")
+            assert result == {
+                "entries": [],
+                "stale": True,
+                "refresh_error": "clone missing",
+            }

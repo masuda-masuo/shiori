@@ -8,7 +8,12 @@ from mcp_types import CallToolResult, JSONRPCResponse, TextContent
 
 from .. import db
 from ..github_auth import build_token_provider
-from ..pipeline import _conn, settings
+from ..pipeline import (
+    _conn,
+    get_all_tool_refresh_states,
+    get_tool_refresh_state,
+    settings,
+)
 from .common import _validate_repo_name
 from .registry import mcp
 
@@ -227,6 +232,14 @@ def _build_warnings(
             f"last_error: {info.get('last_error')}"
         )
 
+    tool_failures = info.get("tool_refresh_consecutive_failures") or 0
+    if tool_failures > 0:
+        tool_err = info.get("tool_refresh_last_error")
+        msg = f"{tool_failures} consecutive tool-path refresh failures"
+        if tool_err:
+            msg += f". last_error: {tool_err}"
+        warnings.append(msg)
+
     # Issue #377: a repo whose last processing event found work still
     # pending was cut short by the index-run time budget (or has never
     # fully indexed) -- there is NO finished_at for it.  Surfacing the
@@ -276,6 +289,7 @@ def _is_healthy(info: dict) -> bool:
         or info.get("index_stale")
         or info.get("never_indexed")
         or (info.get("consecutive_failures") or 0) > 0
+        or (info.get("tool_refresh_consecutive_failures") or 0) > 0
         or info.get("pending_count")
     )
 
@@ -307,6 +321,11 @@ def _summarize(all_repos: dict[str, Any]) -> dict[str, Any]:
             "failing": sum(
                 1 for i in values if (i.get("consecutive_failures") or 0) > 0
             ),
+            "tool_refresh_failing": sum(
+                1
+                for i in values
+                if (i.get("tool_refresh_consecutive_failures") or 0) > 0
+            ),
             "with_pending": sum(1 for i in values if i.get("pending_count")),
         },
         "pending_total": sum((i.get("pending_count") or 0) for i in values),
@@ -330,13 +349,14 @@ def _summarize(all_repos: dict[str, Any]) -> dict[str, Any]:
 def _severity_key(name: str, info: dict) -> tuple[Any, ...]:
     """Order unhealthy repos for budgeted emission, most actionable first.
 
-    Failing syncs outrank a never-indexed clone, which outranks a stale
-    index, which outranks an unfinished pending drain, which outranks
-    plain warnings; within a class the repo that synced longest ago comes
-    first, with the name as the final tiebreaker for determinism.
+    Failing syncs outrank failing tool refreshes, which outrank a never-indexed
+    clone, which outranks a stale index, which outranks an unfinished pending drain,
+    which outranks plain warnings; within a class the repo that synced longest ago
+    comes first, with the name as the final tiebreaker for determinism.
     """
     return (
         0 if (info.get("consecutive_failures") or 0) > 0 else 1,
+        0 if (info.get("tool_refresh_consecutive_failures") or 0) > 0 else 1,
         0 if info.get("never_indexed") else 1,
         0 if info.get("index_stale") else 1,
         0 if info.get("pending_count") else 1,
@@ -545,8 +565,9 @@ def status(repo: str | None = None) -> dict[str, Any]:
     severe record is emitted even when its wrapped form alone exceeds
     the nominal budget.
 
-    Data sources: DB metadata only (sync_run, index_state; chunk counts are read from
-    repo_chunk_counts, refreshed at the end of each index run); no clone read, no GitHub API call.
+    Data sources: DB metadata (sync_run, index_state; chunk counts are read from
+    repo_chunk_counts, refreshed at the end of each index run) and process-local tool
+    refresh failure state; no clone read, no GitHub API call.
     """
     try:
         provider = build_token_provider(settings)
@@ -578,6 +599,8 @@ def status(repo: str | None = None) -> dict[str, Any]:
             index_state = db.get_all_repo_index_state(conn)
             all_cached_chunk_counts = db.get_all_chunk_counts(conn)
             all_issue_item_counts = db.get_all_issue_item_counts(conn)
+
+        tool_refresh_states = get_all_tool_refresh_states() if not repo else None
 
         for target_repo in targets:
             info = runs.get(target_repo) or {
@@ -638,6 +661,16 @@ def status(repo: str | None = None) -> dict[str, Any]:
             # field and the consecutive_failures warning copy below, so the
             # duplication cost is bounded (criterion 1).
             info["last_error"] = _truncate_last_error_for_status(info.get("last_error"))
+
+            if repo:
+                tool_failures, tool_last_error = get_tool_refresh_state(target_repo)
+            else:
+                tool_failures, tool_last_error = (
+                    tool_refresh_states.get(target_repo, (0, None)) if tool_refresh_states else (0, None)
+                )
+            info["tool_refresh_consecutive_failures"] = tool_failures
+            info["tool_refresh_last_error"] = _truncate_last_error_for_status(tool_last_error)
+
             warnings = _build_warnings(info, chunk_counts, items_in_db, cursors, threshold)
             info.pop("token_provider_error", None)
             info["warnings"] = warnings

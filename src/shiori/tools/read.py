@@ -30,9 +30,10 @@ def read_file(
     repo: str | None = None,
 ) -> dict[str, Any]:
     """Read full file (or range) from clone (not index).
-    Data sources: clone on disk (_ensure_phase1 refreshes it before reading)."""
+    Data sources: clone on disk (_ensure_phase1 refreshes it before reading;
+    on refresh failure, serves stale on-disk clone and reports stale=True with refresh_error)."""
     target = _resolve_repo(repo)
-    _ensure_phase1(target)
+    outcome = _ensure_phase1(target)
     base = os.path.realpath(settings.repo_dir(target))
     full = os.path.realpath(os.path.join(base, path))
     if not full.startswith(base + os.sep):
@@ -63,6 +64,9 @@ def read_file(
     }
     if hints:
         result["hints"] = hints
+    if getattr(outcome, "status", None) == "failed":
+        result["stale"] = True
+        result["refresh_error"] = outcome.error
     return result
 
 
