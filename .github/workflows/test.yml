@@ -1,8 +1,7 @@
 # pytest: ユニットテスト（issue #50 再レビュー指摘）
 # GitHub-hosted runner 上でテストを実行する。
-# tree-sitter 用の C コンパイラ・ネイティブライブラリは GitHub-hosted runner に
-# 無いため、tree-sitter 前提テストは skipif で自動スキップされる。
-# これによりフォールバック経路の回帰を検出できる。
+# grep および report (symbol_index / module_tree) が要求するネイティブツール
+# (ripgrep, universal-ctags) は apt で明示的にプロビジョニングする。
 name: test
 
 on:
@@ -48,6 +47,10 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+      - name: ネイティブ依存ツールのインストール (ripgrep, universal-ctags)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ripgrep universal-ctags
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
