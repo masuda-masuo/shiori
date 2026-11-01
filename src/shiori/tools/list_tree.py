@@ -18,13 +18,13 @@ def list_tree(
     source_type: str | None = None,
     extension: str | None = None,
     repo: str | None = None,
-) -> list[dict[str, Any]] | dict[str, Any]:
+) -> dict[str, Any]:
     """List indexed doc/code file paths. Filter by path/source_type/extension.
     Understand repo structure and locate files.
 
-    Returns a bare list[dict[str, Any]] on successful/debounced refresh or doc-only reads.
-    When clone refresh fails (for code or all sources), returns a mapping:
-    {"entries": list[dict[str, Any]], "stale": True, "refresh_error": str}.
+    Always returns a mapping {"entries": list[dict[str, Any]]}.
+    When clone refresh fails (for code or all sources), also includes:
+    "stale": True, "refresh_error": str (omitted on success, debounce, or doc-only).
 
     Data sources: doc_files index for docs; clone on disk (_ensure_phase1) for code."""
     # Validation
@@ -79,11 +79,9 @@ def list_tree(
     # Sort by path (when doc and code are interleaved)
     entries.sort(key=lambda e: e["path"])
 
+    result: dict[str, Any] = {"entries": entries}
     if outcome is not None and getattr(outcome, "status", None) == "failed":
-        return {
-            "entries": entries,
-            "stale": True,
-            "refresh_error": getattr(outcome, "error", None) or "Phase 1 refresh failed",
-        }
+        result["stale"] = True
+        result["refresh_error"] = getattr(outcome, "error", None) or "Phase 1 refresh failed"
 
-    return entries
+    return result

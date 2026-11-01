@@ -10,7 +10,7 @@ Expose retrieval and inspection functionality as Model Context Protocol (MCP) to
 
 *   `shiori_search(query, filters?)`: Performs unified hybrid semantic + keyword search (RRF, k=60). Returns a list of matched chunk pointers and content snippets.
 *   `shiori_keyword_search(query, filters?)`: Morphologically tokenized exact-match search. Used to locate precise identifier matches.
-*   `shiori_list_tree(path?, source_type?, extension?, repo?)`: Lists indexed files. Filterable by `source_type` (`doc` or `code`), file extension (e.g. `.py`, `.md`), and `repo` (Issue #43). **Return type union** (Issue #458): returns bare `list[dict]` on successful/debounced refresh and doc-only reads; on clone refresh failure, returns mapping `{"entries": [...], "stale": true, "refresh_error": ...}`.
+*   `shiori_list_tree(path?, source_type?, extension?, repo?)`: Lists indexed files. Filterable by `source_type` (`doc` or `code`), file extension (e.g. `.py`, `.md`), and `repo` (Issue #43). Returns mapping `{"entries": [...]}`. On Phase 1 clone refresh failure, includes `stale: true` and `refresh_error` metadata (omitted on success, debounce, or doc-only) (Issue #458).
 *   `shiori_read_file(path, start_line?, end_line?, repo?)`: Reads local files from the shallow repository clone (supports line range slicing). On Phase 1 clone refresh failure, continues serving the on-disk clone and marks response with `stale: true` and `refresh_error` (omitted on success/debounce) (Issue #457).
 *   `shiori_read_issue(number, numbers?, repo?, exclude_noise_bots?, issue_number?, issue_no?)`: Retrieves full issue or PR thread timelines sequentially. `number` also accepts the aliases `issue_number` / `issue_no` (same meaning; batch `numbers` does not). `numbers` fetches a batch (up to 50). Setting `exclude_noise_bots=true` filters out comments from non-allowlisted bots (Issue #44).
 *   `shiori_pr_changes(number, repo?, include_diff?)`: Retrieves a list of modified files in a PR. Returns file path, status, and line counts. Setting `include_diff=true` also returns unified diff and stats. Computed from git clone directly (`git diff --name-status` + `--numstat`) — no longer depends on the `pr_changes` DB table. `blob_url` is omitted (not available from git alone) (Issue #259).
@@ -48,7 +48,9 @@ calls omit it), and it was the one that did not fit: a full record per repo came
 53,836 characters on the 62-repo deployment. The no-repo call therefore returns an
 aggregate instead:
 
-*   `summary` -- total / healthy / unhealthy repo counts, a per-condition breakdown,
+*   `summary` -- total / healthy / unhealthy repo counts, a per-condition breakdown
+    (`unhealthy_counts`: `with_warnings`, `index_stale`, `never_indexed`, `failing`,
+    `tool_refresh_failing`, `with_pending`),
     the `pending_count` total across all repos, and the single oldest repo by
     `age_seconds` (name, role, age).
 *   `repos` -- full records for **unhealthy repos only**, each carrying exactly the
@@ -59,14 +61,14 @@ aggregate instead:
 A repo is **unhealthy** when any of these holds; otherwise it is healthy and is
 counted in `summary` rather than listed:
 
-| Condition | Meaning |
-|---|---|
-| `warnings` non-empty | Any trigger from the table above fired. |
-| `index_stale` | The on-disk clone is ahead of the indexed content. |
-| `never_indexed` | A clone exists but was never indexed. |
-| `consecutive_failures > 0` | Sync attempts are failing. |
-| `tool_refresh_consecutive_failures > 0` | Tool-path Phase 1 clone refreshes are failing (Issue #460). |
-| `pending_count` truthy | An index run left issue items unprocessed. |
+| Condition | Meaning | Summary Counter |
+|---|---|---|
+| `warnings` non-empty | Any trigger from the table above fired. | `unhealthy_counts.with_warnings` |
+| `index_stale` | The on-disk clone is ahead of the indexed content. | `unhealthy_counts.index_stale` |
+| `never_indexed` | A clone exists but was never indexed. | `unhealthy_counts.never_indexed` |
+| `consecutive_failures > 0` | Sync attempts are failing. | `unhealthy_counts.failing` |
+| `tool_refresh_consecutive_failures > 0` | Tool-path Phase 1 clone refreshes are failing (Issue #460). Number of repos with failures > 0. | `unhealthy_counts.tool_refresh_failing` |
+| `pending_count` truthy | An index run left issue items unprocessed. | `unhealthy_counts.with_pending` |
 
 The no-repo response is **size-bounded even when the fleet degrades** --
 the case that matters most.  Unhealthy records are emitted in severity

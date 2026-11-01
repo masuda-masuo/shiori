@@ -321,6 +321,11 @@ def _summarize(all_repos: dict[str, Any]) -> dict[str, Any]:
             "failing": sum(
                 1 for i in values if (i.get("consecutive_failures") or 0) > 0
             ),
+            "tool_refresh_failing": sum(
+                1
+                for i in values
+                if (i.get("tool_refresh_consecutive_failures") or 0) > 0
+            ),
             "with_pending": sum(1 for i in values if i.get("pending_count")),
         },
         "pending_total": sum((i.get("pending_count") or 0) for i in values),

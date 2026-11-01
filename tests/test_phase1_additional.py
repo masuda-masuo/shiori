@@ -1,8 +1,8 @@
 """Additional acceptance coverage for Phase 1 refresh failures (shiori #457, #458, #460).
 
 Covers:
-- list_tree: failed refresh with intact/missing clone returns mapping with stale and
-  refresh_error; success/debounce/doc-only returns bare list; doc + failed clone
+- list_tree: stable mapping envelope {entries: [...]}; failed refresh adds stale and
+  refresh_error; success/debounce/doc-only/empty omit failure fields; doc + failed clone
   preserves doc entries with failure metadata.
 - grep: mixed multi-repo (clean + stale + missing) produces matches from clean and
   stale repos, sets stale=True and partial=True, populates stale_repos and skipped_repos.
@@ -114,7 +114,7 @@ class TestListTreePhase1:
         assert res["refresh_error"] == "connection timed out"
         assert res["entries"] == []
 
-    def test_doc_only_does_not_call_phase1_and_returns_bare_list(self, tmp_path):
+    def test_doc_only_does_not_call_phase1_and_returns_mapping_without_failure_fields(self, tmp_path):
         repo = "owner/list-tree-doc-only"
         clone = _make_clone(tmp_path, repo)
         settings = _settings_for(clone, repo=repo)
@@ -136,8 +136,10 @@ class TestListTreePhase1:
             res = list_tree(repo=repo, source_type="doc")
 
         mock_phase1.assert_not_called()
-        assert isinstance(res, list)
-        assert res == [{"path": "docs/manual.md", "source": "doc"}]
+        assert isinstance(res, dict)
+        assert res == {"entries": [{"path": "docs/manual.md", "source": "doc"}]}
+        assert "stale" not in res
+        assert "refresh_error" not in res
 
     def test_doc_and_failed_clone_returns_mapping_with_doc_entries(self, tmp_path):
         repo = "owner/list-tree-mixed"
@@ -170,7 +172,7 @@ class TestListTreePhase1:
         assert doc_entries[0]["path"] == "docs/index.md"
         assert len(code_entries) >= 1
 
-    def test_successful_refresh_returns_bare_list(self, tmp_path):
+    def test_successful_refresh_returns_mapping_without_failure_fields(self, tmp_path):
         repo = "owner/list-tree-ok"
         clone = _make_clone(tmp_path, repo)
         settings = _settings_for(clone, repo=repo)
@@ -184,9 +186,52 @@ class TestListTreePhase1:
         ):
             res = list_tree(repo=repo, source_type="code")
 
-        assert isinstance(res, list)
-        paths = [e["path"] for e in res]
+        assert isinstance(res, dict)
+        assert "stale" not in res
+        assert "refresh_error" not in res
+        assert isinstance(res["entries"], list)
+        paths = [e["path"] for e in res["entries"]]
         assert "code.py" in paths
+
+    def test_debounced_refresh_returns_mapping_without_failure_fields(self, tmp_path):
+        repo = "owner/list-tree-debounced"
+        clone = _make_clone(tmp_path, repo)
+        settings = _settings_for(clone, repo=repo)
+
+        outcome = Phase1Outcome(status="debounced", head="def456", error=None)
+        with (
+            patch("shiori.tools.list_tree._ensure_phase1", return_value=outcome),
+            patch("shiori.tools.list_tree.settings", settings),
+            patch("shiori.tools.common.settings", settings),
+            patch("shiori.tools.list_tree._conn", _fake_conn),
+        ):
+            res = list_tree(repo=repo, source_type="code")
+
+        assert isinstance(res, dict)
+        assert "stale" not in res
+        assert "refresh_error" not in res
+        assert isinstance(res["entries"], list)
+        paths = [e["path"] for e in res["entries"]]
+        assert "code.py" in paths
+
+    def test_empty_entries_on_successful_refresh(self, tmp_path):
+        repo = "owner/list-tree-empty"
+        empty_clone = tmp_path / "repos" / repo.replace("/", "__")
+        (empty_clone / ".git").mkdir(parents=True)
+        settings = _settings_for(empty_clone, repo=repo)
+
+        outcome = Phase1Outcome(status="refreshed", head="def456", error=None)
+        with (
+            patch("shiori.tools.list_tree._ensure_phase1", return_value=outcome),
+            patch("shiori.tools.list_tree.settings", settings),
+            patch("shiori.tools.common.settings", settings),
+            patch("shiori.tools.list_tree._conn", _fake_conn),
+        ):
+            res = list_tree(repo=repo, source_type="code")
+
+        assert res == {"entries": []}
+        assert "stale" not in res
+        assert "refresh_error" not in res
 
 
 # ---------------------------------------------------------------------------

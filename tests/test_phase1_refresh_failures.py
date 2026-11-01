@@ -46,6 +46,7 @@ from unittest.mock import MagicMock, patch
 
 from shiori.mcp_server import (
     grep_search,
+    list_tree,
     read_file,
     report,
     status,
@@ -151,6 +152,7 @@ def _clone_env(
         patch("shiori.tools.read.settings", settings),
         patch("shiori.tools.grep.settings", settings),
         patch("shiori.tools.report.settings", settings),
+        patch("shiori.tools.list_tree.settings", settings),
         patch("shiori.tools.common.settings", settings),
         patch("shiori.pipeline.settings", settings),
         patch("shiori.pipeline._conn", _fake_conn),
@@ -215,11 +217,25 @@ def _index_state() -> dict:
 
 
 @contextlib.contextmanager
-def _status_env(repo: str, *, sync_run: dict | None = None, index_state: dict | None = None):
+def _status_env(
+    repo: str,
+    *,
+    sync_run: dict | None = None,
+    index_state: dict | None = None,
+    repos: list[str] | None = None,
+    sync_runs: dict | None = None,
+):
     """Call the real ``status()`` with its DB reads faked."""
+    target_repos = list(repos) if repos is not None else [repo]
     settings = _settings_for(Path("/nonexistent"), repo=repo, interval=10)
-    sync_run = _sync_run() if sync_run is None else sync_run
-    index_state = _index_state() if index_state is None else index_state
+    settings.repos = target_repos
+    default_sync_run = _sync_run() if sync_run is None else sync_run
+    runs_map = {r: dict(default_sync_run) for r in target_repos}
+    if sync_runs is not None:
+        for r, sr in sync_runs.items():
+            runs_map[r] = dict(sr)
+    base_index_state = _index_state() if index_state is None else index_state
+    index_state_map = {r: dict(base_index_state) for r in target_repos}
     provider = MagicMock()
     provider.name = "fake"
     with (
@@ -227,18 +243,18 @@ def _status_env(repo: str, *, sync_run: dict | None = None, index_state: dict | 
         patch("shiori.tools.status.settings", settings),
         patch("shiori.tools.common.settings", settings),
         patch("shiori.tools.status.build_token_provider", return_value=provider),
-        patch("shiori.tools.status.db.get_sync_run", return_value=sync_run),
-        patch("shiori.tools.status.db.get_repo_index_state", return_value=index_state),
+        patch("shiori.tools.status.db.get_sync_run", side_effect=lambda _c, r: runs_map.get(r, default_sync_run)),
+        patch("shiori.tools.status.db.get_repo_index_state", side_effect=lambda _c, r: index_state_map.get(r, base_index_state)),
         patch("shiori.tools.status.db.get_chunk_counts", return_value={}),
         patch("shiori.tools.status.db.get_issue_item_count", return_value=0),
         patch("shiori.tools.status.db.get_cursors", return_value=dict(_CURSORS)),
-        patch("shiori.tools.status.db.get_sync_runs", return_value={repo: sync_run}),
+        patch("shiori.tools.status.db.get_sync_runs", return_value=runs_map),
         patch(
             "shiori.tools.status.db.get_all_repo_index_state",
-            return_value={repo: index_state},
+            return_value=index_state_map,
         ),
-        patch("shiori.tools.status.db.get_all_chunk_counts", return_value={repo: {}}),
-        patch("shiori.tools.status.db.get_all_issue_item_counts", return_value={repo: 0}),
+        patch("shiori.tools.status.db.get_all_chunk_counts", return_value={r: {} for r in target_repos}),
+        patch("shiori.tools.status.db.get_all_issue_item_counts", return_value={r: 0 for r in target_repos}),
         patch("shiori.tools.status.db.refresh_chunk_counts"),
     ):
         yield
@@ -608,9 +624,62 @@ class TestStatusToolRefreshCounter:
         assert any("4 consecutive sync failures" in warning for warning in record["warnings"])
         assert record["tool_refresh_consecutive_failures"] == 2
 
+    def test_aggregate_tool_refresh_failing_count_and_recovery(self, tmp_path):
+        """Spec 2: unhealthy_counts.tool_refresh_failing counts repos with failures > 0.
+
+        N repos with tool failures => tool_refresh_failing == N, failing unchanged.
+        One actual successful tool refresh clears that repo => N - 1.
+        Sync failures provide a nonzero independent baseline.
+        """
+        repo_t1 = "owner/phase1-tool-fail-1"
+        repo_t2 = "owner/phase1-tool-fail-2"
+        repo_sync = "owner/phase1-sync-fail"
+
+        clone1 = _make_clone(tmp_path, repo_t1)
+        clone2 = _make_clone(tmp_path, repo_t2)
+        _fail_tool_refreshes(clone1, repo_t1, 2)
+        _fail_tool_refreshes(clone2, repo_t2, 1)
+
+        failing_sync = _sync_run(consecutive_failures=3, last_error="sync failed")
+        repos = [repo_t1, repo_t2, repo_sync]
+        sync_runs = {repo_sync: failing_sync}
+
+        with _status_env(repo_sync, sync_runs=sync_runs, repos=repos):
+            agg = status()
+
+        summary = agg["summary"]
+        counts = summary["unhealthy_counts"]
+        # N=2 repos have tool refresh failures
+        assert counts["tool_refresh_failing"] == 2
+        # Sync failing count is strictly sync consecutive_failures > 0, unaffected by tool failures
+        assert counts["failing"] == 1
+
+        # Recover one repo via real tool refresh
+        ok_provider = MagicMock()
+        ok_provider.get_token.return_value = "token"
+        with _advancing_time(start=2_000_000):
+            with _clone_env(
+                clone1,
+                repo=repo_t1,
+                provider=ok_provider,
+                refresh_return="recovered1",
+                interval=0,
+            ):
+                res = read_file(path=KNOWN_FILE, repo=repo_t1)
+        assert KNOWN_TOKEN in res["content"]
+
+        with _status_env(repo_sync, sync_runs=sync_runs, repos=repos):
+            agg_after = status()
+
+        counts_after = agg_after["summary"]["unhealthy_counts"]
+        # One repo cleared, now N - 1 = 1
+        assert counts_after["tool_refresh_failing"] == 1
+        # Sync failing count remains 1
+        assert counts_after["failing"] == 1
+
 
 # ---------------------------------------------------------------------------
-# Criterion 6: report exposes stale metadata; list_tree return shape is a gap
+# Criterion 6: report and list_tree expose stale metadata on failed refresh
 # ---------------------------------------------------------------------------
 
 
@@ -631,10 +700,35 @@ class TestReportStaleMetadata:
         _assert_short_refresh_error(result["refresh_error"], context="report")
 
 
-# NOTE (unverified acceptance gap, reported to the parent):
-# ``shiori_list_tree`` returns a bare ``list[dict]`` today, so there is no
-# public, non-breaking place to put top-level ``stale`` / ``refresh_error``
-# metadata.  Criterion 6 says "list_tree/report ... if practical", so only the
-# report half is pinned here.  Resolving list_tree requires an API-shape
-# decision (change the return type to a mapping, or wrap entries) that the
-# brief does not make; that is left to the implementer/parent.
+class TestListTreeStaleMetadata:
+    def test_list_tree_exposes_stale_metadata_on_failed_refresh(self, tmp_path):
+        repo = "owner/phase1-list-tree-stale"
+        clone = _make_clone(tmp_path, repo)
+        (clone / "code.py").write_text("def hello(): pass\n", encoding="utf-8")
+
+        with _clone_env(clone, repo=repo, provider=RaisingTokenProvider()):
+            result = list_tree(repo=repo, source_type="code")
+
+        assert isinstance(result, dict)
+        assert result["stale"] is True
+        _assert_short_refresh_error(result["refresh_error"], context="list_tree")
+        assert isinstance(result["entries"], list)
+        paths = [e["path"] for e in result["entries"]]
+        assert "code.py" in paths
+
+    def test_list_tree_omits_stale_metadata_on_successful_refresh(self, tmp_path):
+        repo = "owner/phase1-list-tree-ok"
+        clone = _make_clone(tmp_path, repo)
+        (clone / "code.py").write_text("def hello(): pass\n", encoding="utf-8")
+        ok_provider = MagicMock()
+        ok_provider.get_token.return_value = "token"
+
+        with _clone_env(clone, repo=repo, provider=ok_provider, refresh_return="abc", interval=0):
+            result = list_tree(repo=repo, source_type="code")
+
+        assert isinstance(result, dict)
+        assert "stale" not in result
+        assert "refresh_error" not in result
+        assert isinstance(result["entries"], list)
+        paths = [e["path"] for e in result["entries"]]
+        assert "code.py" in paths
