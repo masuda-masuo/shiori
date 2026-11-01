@@ -7,6 +7,7 @@ import threading
 from typing import Any, Iterator
 
 import httpx
+from mcp.server.mcpserver.exceptions import ToolError
 
 from ..api_utils import _GitHubAuth
 from ..github_auth import build_token_provider
@@ -100,21 +101,30 @@ def _validate_repo_name(repo: str) -> str:
     )
 
 
-def _resolve_repo(repo: str | None) -> str:
+class AmbiguousRepoError(ToolError, ValueError):
+    """Raised when an omitted repo cannot be unambiguously resolved."""
+
+
+def _resolve_repo(repo: str | None, *, grep_hint: bool = False) -> str:
     if repo:
         return _validate_repo_name(repo)
     if not settings.repos:
         raise ValueError("SHIORI_REPOS not set")
+    if len(settings.repos) == 1:
+        return settings.repos[0]
     inferred = _infer_repo_from_cwd()
     if inferred:
         return inferred
-    log.info(
-        "repo not specified and could not be inferred from cwd; "
-        "falling back to %s (configured: %s)",
-        settings.repos[0],
-        ", ".join(settings.repos),
+    hint = (
+        ', or repo="*" to search all configured repos'
+        if grep_hint
+        else ""
     )
-    return settings.repos[0]
+    raise AmbiguousRepoError(
+        f"repo is required: {len(settings.repos)} repos are configured and the "
+        f"server's working directory (cwd) is not one of them. "
+        f'Pass repo="owner/name" (or a unique short name){hint}.'
+    )
 
 
 def _resolve_repo_filter(repo: str | None) -> str | None:
@@ -135,13 +145,13 @@ def _resolve_repos(repo: str | None) -> list[str]:
 
     repo="*" returns all configured repos (cross-repo search).
     repo="owner/name" returns that single repo.
-    repo=None returns the default single repo via _resolve_repo (backward compat).
+    repo=None resolves via _resolve_repo: use sole configured repo, else configured cwd match, otherwise require explicit repo; repo="*" explicitly searches all configured repos.
     """
     if repo == "*":
         if not settings.repos:
             raise ValueError("SHIORI_REPOS not set")
         return list(settings.repos)
-    return [_resolve_repo(repo)]
+    return [_resolve_repo(repo, grep_hint=True)]
 
 
 def _make_filters(

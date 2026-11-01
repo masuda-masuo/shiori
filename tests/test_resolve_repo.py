@@ -23,21 +23,36 @@ class TestResolveRepo:
         assert _resolve_repo("owner/repo") == "owner/repo"
 
     def test_single_repo_default(self, monkeypatch):
-        """Single configured repo is returned when repo=None."""
+        """Single configured repo is returned when repo=None without cwd inference."""
+        monkeypatch.setattr("shiori.tools.common.settings.repos", ["o/r"])
         monkeypatch.setattr("shiori.mcp_server.settings.repos", ["o/r"])
-        assert _resolve_repo(None) == "o/r"
+        with patch("shiori.tools.common._infer_repo_from_cwd") as mock_infer:
+            assert _resolve_repo(None) == "o/r"
+            mock_infer.assert_not_called()
 
-    def test_multiple_repo_first_fallback(self, monkeypatch):
-        """First repo is returned when cwd inference fails."""
+    def test_multiple_repo_requires_explicit_repo(self, monkeypatch):
+        """ValueError raised when repo is omitted with multiple configured repos and cwd inference fails."""
+        monkeypatch.setattr("shiori.tools.common.settings.repos", ["o/r1", "o/r2"])
         monkeypatch.setattr("shiori.mcp_server.settings.repos", ["o/r1", "o/r2"])
-        with patch("shiori.mcp_server._infer_repo_from_cwd", return_value=None):
-            assert _resolve_repo(None) == "o/r1"
+        with patch("shiori.tools.common._infer_repo_from_cwd", return_value=None):
+            with pytest.raises(ValueError) as exc:
+                _resolve_repo(None)
+            msg = str(exc.value)
+            assert "required" in msg.lower()
+            assert "2" in msg
+            assert "cwd" in msg.lower()
+            assert "owner/name" in msg
+            assert "short name" in msg.lower()
 
     def test_infer_from_cwd_matches(self, monkeypatch):
         """Repo inferred from cwd is returned when it matches."""
         monkeypatch.setattr("shiori.tools.common.settings.repos", ["o/r1", "o/r2"])
-        with patch("shiori.tools.common._infer_repo_from_cwd", return_value="o/r2"):
+        monkeypatch.setattr("shiori.mcp_server.settings.repos", ["o/r1", "o/r2"])
+        with patch(
+            "shiori.tools.common._infer_repo_from_cwd", return_value="o/r2"
+        ) as mock_infer:
             assert _resolve_repo(None) == "o/r2"
+            mock_infer.assert_called_once()
 
     def test_no_repos_raises(self, monkeypatch):
         """ValueError raised when SHIORI_REPOS is empty."""
@@ -138,6 +153,22 @@ class TestResolveRepos:
         result = _resolve_repos("*")
         result.append("x/y")
         assert "x/y" not in _resolve_repos("*")
+
+    def test_grep_omitted_repo_requires_explicit_repo(self, monkeypatch):
+        """When repo is omitted in grep/multi-repo resolver with multiple repos,
+        ValueError explains explicit repo or wildcard repo='*' is required."""
+        monkeypatch.setattr("shiori.tools.common.settings.repos", ["o/r1", "o/r2"])
+        monkeypatch.setattr("shiori.mcp_server.settings.repos", ["o/r1", "o/r2"])
+        with patch("shiori.tools.common._infer_repo_from_cwd", return_value=None):
+            with pytest.raises(ValueError) as exc:
+                _resolve_repos(None)
+            msg = str(exc.value)
+            assert "required" in msg.lower()
+            assert "2" in msg
+            assert "cwd" in msg.lower()
+            assert 'repo="*"' in msg
+            assert "owner/name" in msg
+            assert "short name" in msg.lower()
 
 
 class TestValidateRepoName:
