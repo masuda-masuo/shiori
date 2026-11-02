@@ -241,34 +241,67 @@ two minutes after each service run. The timer has no calendar schedule and no
 - Keeps the existing `--force-recreate` recovery command. A separate manual restart comparison also recovered, but preserving the container ID did not justify changing the proven recreation path.
 - Real WSL acceptance against the installed timer without a local override is pending human verification; #461 remains open.
 
-**WSL timer reactivation footgun:** On the tested WSL system, `wsl --terminate Ubuntu`
-left the VM/kernel uptime running. After reopening the distro, the old
-`OnBootSec` timer was active but had no next trigger and did not start its
-`OnUnitActiveSec` repeat chain. This is the observed WSL path, not a statement
-that systemd always ignores overdue `OnBootSec` timers. The new activation-relative
-first trigger starts a fresh check when the timer is activated. A temporary
-local diagnostic drop-in may exist at
+**WSL timer reactivation observations:** C1 deliberately disabled the
+mint-mount timer for the comparison. In C3, after `wsl --terminate Ubuntu`,
+the runtime generation changed from dev 136 to 63 while the timer was disabled;
+the same container ID remained and its socket connect failed (111). C3 was not
+a timer malfunction. In C4, a manual app restart restored the connection and
+printed `CONNECT_OK` with that same container ID. C5 was a separate run at
+generation 116 after the timer had been re-enabled: only in C5 was the original
+`OnBootSec` timer observed active with no `NEXT` trigger and no initial run.
+After a temporary `OnActiveSec=10s` drop-in was added, the 03:22 timer run
+automatically force-recreated the app and the socket check printed
+`CONNECT_OK`. This describes the observed WSL path and does not claim that
+systemd always ignores overdue `OnBootSec` timers. A local diagnostic drop-in
+may exist at
 `~/.config/systemd/user/shiori-mint-mount.timer.d/activation.conf`.
 
 #### Final WSL acceptance (after merge and deploy)
 
-1. Remove only the temporary activation override, reload systemd, and restart
-   the timer. Do not remove the drop-in directory or any runtime directory.
+Run this procedure in the main deployment checkout after the PR is merged.
+The commands below are instructions for the human operator; this documentation
+change does not perform host operations.
+
+1. Pull the merged change and install the copied user units:
+
+   ```bash
+   git pull --ff-only
+   ./scripts/install-systemd.sh
+   systemctl --user cat shiori-mint-mount.timer
+   ```
+
+   The installer copies unit files into `~/.config/systemd/user`, reloads the
+   user manager, and enables/starts Shiori services and timers. It may trigger
+   the app baseline, so take the pre-termination generation measurement only
+   after installation and the checks below. In the first `cat` output, inspect
+   the installed **base unit file** and confirm its `[Timer]` section contains
+   `OnActiveSec=10s` and no `OnBootSec`. Seeing `OnActiveSec=10s` only in a
+   temporary drop-in is insufficient.
+
+2. Remove only the known local diagnostic drop-in, reload, and inspect the
+   effective unit again:
 
    ```bash
    rm -- ~/.config/systemd/user/shiori-mint-mount.timer.d/activation.conf
    systemctl --user daemon-reload
-   systemctl --user restart shiori-mint-mount.timer
+   systemctl --user cat shiori-mint-mount.timer
    ```
 
-2. Confirm `shiori-mint-mount.timer` has a `NEXT` time:
+   Confirm the second output no longer lists the `activation.conf` drop-in
+   file or section, while the base unit still has `OnActiveSec=10s` and no
+   `OnBootSec`. Do not remove the drop-in directory or any runtime directory.
+
+3. Restart the installed timer and confirm `shiori-mint-mount.timer` has a
+   `NEXT` time:
 
    ```bash
+   systemctl --user restart shiori-mint-mount.timer
    systemctl --user list-timers 'shiori-*' --no-pager
    ```
 
-3. Record the current generation and container, keep Docker Desktop running,
-   then run `wsl --terminate Ubuntu` from Windows:
+4. Record the current runtime generation and app container ID after
+   installation, keep Docker Desktop running, then run
+   `wsl --terminate Ubuntu` from Windows:
 
    ```bash
    stat /run/user/1000/mcp-token
@@ -276,11 +309,11 @@ local diagnostic drop-in may exist at
    ```
 
    Reopen the WSL shell and wait three minutes. Do not manually repair the
-   mount or restart the app during this automatic observation. Do not remove
-   or replace runtime directories.
+   mount or restart the app during this observation. Do not remove or replace
+   runtime directories.
 
-4. Confirm the mount generation changed, inspect the reconciler journal, and
-   verify a connect-only request prints `CONNECT_OK`:
+5. Confirm the generation changed, inspect the reconciler journal, and run a
+   connect-only request from the app container:
 
    ```bash
    stat /run/user/1000/mcp-token
@@ -295,9 +328,11 @@ local diagnostic drop-in may exist at
    "
    ```
 
-   Connecting triggers minting; do not call `recv()` or print socket data.
-   Acceptance remains **UNVERIFIED** until this procedure succeeds against the
-   installed timer without the override.
+   Compare the source generation with the recorded pre-termination values and
+   confirm the reconciler ran and the container was recreated. Connecting
+   triggers minting; do not call `recv()` or print socket data. Acceptance
+   remains **UNVERIFIED** until this procedure succeeds against the installed
+   timer without the override.
 
 Useful monitoring commands:
 ```bash
