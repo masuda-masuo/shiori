@@ -121,30 +121,255 @@ floats.
 *   **Zero Wall-Clock Timers**: Eliminates `refresh-token.sh` and cron dependencies.
 *   **Reduced Blast Radius**: Exposure is limited to a short-lived 1-hour token scoped to a single installation, rather than a permanent private key.
 
-### Implementation Considerations (mount footguns, verified 2026-07)
+---
 
-*   **Mount the parent directory, never the socket file.** A file-level bind
-    mount (e.g. `./runtime/mint.sock:/run/shiori/mint.sock:rw`) pins the
-    inode. If the host-side unit ever recreates the socket (service restart,
-    host reboot), the container keeps pointing at the old, now-dead inode and
-    gets `ECONNREFUSED` **permanently** -- it does not recover until the
-    container itself is recreated. Mount the directory instead
-    (`${SHIORI_MINT_SOCKET_DIR:-${XDG_RUNTIME_DIR}/mcp-token}:/run/shiori:rw`)
-    so the container always resolves the *current* socket by path lookup.
-*   **A file mount over a not-yet-created path corrupts the host.** If docker
-    is asked to bind-mount a file path that does not exist yet, it silently
-    creates a **root-owned directory** at that path instead of the plain file
-    the config implied. Once that has happened, systemd can no longer
-    `bind()` its own socket there (permission denied) and the minter unit
-    fails to start until an operator manually removes the root-owned
-    directory. This is the second, independent reason to mount a directory
-    that systemd itself creates, rather than a file path shiori guesses at
-    ahead of time.
-*   **Socket Write Access**: `connect(2)` on a Unix socket requires write
-    permission on the socket inode, so the mount must be `rw`.
-*   **Concurrent Minting**: `Accept=yes` (on the host-side unit) forks a
-    connection handler per connection, so concurrent callers do not block
-    each other.
+## Mount Footguns & Lifecycle Mechanics (shiori #461)
+
+Operating the mint socket via container bind mounts across systemd session
+lifecycles and host reboots involves critical filesystem and container
+runtime footguns:
+
+### 1. Socket Inode Replacement vs. Directory Inode Replacement
+
+*   **Socket inode replacement succeeds with directory mounts:**
+    When the host-side `mcp-token` unit is restarted, systemd unlinks the old
+    Unix socket file and binds a new one with a new `st_ino`. Because Shiori
+    mounts the parent directory (`${SHIORI_MINT_SOCKET_DIR:-${XDG_RUNTIME_DIR}/mcp-token}:/run/shiori:rw`),
+    path lookups for `/run/shiori/mint.sock` inside the container resolve the
+    current socket inode dynamically.
+*   **Source directory / runtime tmpfs replacement breaks bind mounts:**
+    In Linux and WSL2, `${XDG_RUNTIME_DIR}` (`/run/user/<uid>`) is backed by a
+    `tmpfs` instance. Depending on session lifecycle and distribution configuration,
+    when the user session or WSL restarts, systemd may unmount and recreate
+    `/run/user/<uid>` on a fresh `tmpfs` with a new device (`st_dev`) and
+    directory inode (`st_ino`).
+    In that case, existing containers retain the bind mount to the **old unlinked
+    tmpfs directory**. Any new socket created on the new host tmpfs is completely
+    invisible inside the container, causing permanent `ENOENT` or
+    `ECONNREFUSED` on connect attempts until the container is recreated.
+
+### 2. Parent Directory Mounts and Propagation Limits
+
+*   **Mounting a parent directory only observes child changes while the parent remains valid:**
+    Mounting `/run/user/<uid>` into the container does not survive destruction
+    and recreation of the `/run/user/<uid>` mount point itself.
+*   **Nested mount propagation is unsupported on Docker Desktop:**
+    Docker Desktop bind mount propagation (`rshared`) across the Windows / WSL2
+    VM boundary is officially unsupported (see [Docker bind propagation documentation](https://docs.docker.com/engine/storage/bind-mounts/#configure-bind-propagation)).
+    Measurements on real hosts running Docker Desktop 29.5.2 verified that
+    `/run/user/1000` is mounted as `private,slave`. That bind propagation is
+    unsupported across VM boundaries according to official Docker documentation
+    is evidence; actual replacement and propagation behavior remains UNVERIFIED on host.
+
+### 3. systemd Unit Relationships Are Not Directory Watchers
+
+*   systemd unit directives (`After=`, `BindsTo=`, `PartOf=`) govern **unit
+    state transitions** (active, inactive, failed), NOT filesystem modifications
+    (see [systemd.unit documentation](https://www.freedesktop.org/software/systemd/man/latest/systemd.unit.html)).
+*   The systemd user manager itself does not necessarily restart when the
+    runtime directory is recreated, so unit-level restart triggers do not fire
+    on tmpfs recreation.
+
+### 4. Third-Candidate Architectural Boundary (mcp-launcher)
+
+*   Relocating the mint socket outside `/run/user/<uid>` (e.g. to a persistent
+    directory like `~/.local/state/shiori`; `/var/run` is normally a symlink to
+    `/run` and tmpfs-backed, not a persistent fallback) belongs strictly to
+    **mcp-launcher**, which owns the host socket unit and minter service.
+*   Shiori must not attempt to relocate or manage the minter's socket path.
+    A launcher-side relocation is strictly a fallback candidate if Shiori's
+    reconciliation mechanism fails, which would require an external issue
+    and investigation.
+
+### 5. Root-Owned Missing-Source Poisoning Footgun
+
+*   **Docker bind mount creation as root:**
+    When Docker evaluates a bind mount whose host source path does not exist,
+    the Docker daemon (running with root privileges) creates the missing host
+    directory owned by `root:root` (UID 0) with mode `0755`.
+*   **Refusal without automatic destructive mutation:**
+    If this occurs, the host user's non-root `mcp-token` unit cannot bind its
+    socket inside the root-owned directory, and the reconciler strictly refuses
+    to proceed (`source_stat.st_uid != os.geteuid()`), logging a warning and waiting.
+    The reconciler intentionally never runs `chmod` or recursive deletions
+    (`rm -rf`) against runtime directories automatically.
+*   **Operator Remediation:**
+    An operator must safely inspect the host path (`ls -ld <source>`), confirm
+    that it is an empty accidental directory created by Docker, remove only that
+    specific known empty directory (`rmdir <source>`), and restart the socket unit
+    (`systemctl --user restart mcp-token.socket`). Never perform recursive
+    `rm -rf` on `${XDG_RUNTIME_DIR}` or runtime directories.
+
+---
+
+## Mint Socket Mount Reconciliation (shiori #461)
+
+To automatically recover from WSL runtime tmpfs recreation without manual
+intervention or blind periodic restarts, Shiori implements a host-side
+reconciler:
+
+### Architecture & Design
+
+1.  **Periodic Reconciler (`scripts/reconcile_mint_mount.py`):**
+    A small host stdlib Python script invoked periodically (~120s) by systemd
+    user timer `shiori-mint-mount.timer` (`shiori-mint-mount.service`, `Type=oneshot`).
+    - Serialized by `Type=oneshot` and a non-blocking `flock` on `${XDG_STATE_HOME:-$HOME/.local/state}/shiori/mint-mount.json.lock`.
+    - No sleep loops or daemon processes.
+    - **Metadata-only checking**: The timer periodically checks filesystem mount
+      generations and container state. It does **not** mint tokens, connect to the
+      socket, or refresh credentials, and is strictly distinct from any token refresh timer.
+2.  **State Tracking (`mint-mount.json`):**
+    Stored at `${XDG_STATE_HOME:-$HOME/.local/state}/shiori/mint-mount.json`
+    (mode `0600`, parent directory `0700`, atomically replaced):
+    - `success`: `{ source_path, dev, ino, container_id, timestamp }`
+    - `last_attempt`: `{ source_path, dev, ino, container_id, timestamp }`
+3.  **One-Pass Decision Logic:**
+    - Checks `systemctl --user is-active --quiet shiori.service`: if inactive, no-op.
+    - Inspects `docker compose ps -q app`: must return exactly one running container.
+    - Inspects container: confirms `State.Running` and validates bind mount `/run/shiori`.
+    - Resolves `docker compose config --format json`: verifies `GITHUB_TOKEN_SOCKET`
+      starts with `/run/shiori/` without path traversal (`..`).
+    - Validates host mount source: must exist, be a directory, and be owned by
+      the effective user UID (`os.geteuid()`).
+    - Validates host socket: must exist, be a Unix socket (`S_ISSOCK`), owned
+      by effective UID, and contained inside the mount source.
+    - **Generation comparison:**
+      - If generation `(source_path, dev, ino)` and `container_id` match `success`:
+        **NOOP** (even if the socket inode alone changed).
+      - If missing/corrupt state: recreates once to establish a known clean bind baseline
+        (brief downtime ~1-2s).
+      - If generation or container ID changed: recreates app container alone via
+        `docker compose up -d --force-recreate --no-deps app`.
+4.  **Failure Handling & Cooldown:**
+    - If recreation fails, prior `success` state is preserved.
+    - `last_attempt` generation (`source_path`, `dev`, `ino`) and timestamp are persisted.
+    - **Cooldown keyed on filesystem generation**: Cooldown compares filesystem
+      generation `(path, dev, ino)` independent of container ID. Even if the container
+      ID changed during a failed recreate or timeout, retry for that generation is
+      throttled to at most once per 120 seconds.
+    - Clock rollbacks do not suppress retries indefinitely.
+    - Eventual retry is allowed once cooldown expires; retries are not permanently suppressed.
+5.  **Postcheck Verification:**
+    - Re-inspects the fresh running app container.
+    - Confirms the host source generation and socket readiness remained unchanged mid-command.
+    - Only then commits the new `success` state atomically.
+6.  **Docker Desktop VM Path Handling & Host Acceptance Blocker:**
+    - Arbitrary prefix trust has been removed: exact path matching and host-side
+      `samefile` verification are supported.
+    - Unverified opaque VM mappings (e.g. `/run/desktop/...` paths that cannot be
+      resolved on the host) fail closed with an explicit log message. Suffix
+      equivalence is not invented or guessed.
+    - If actual Docker Desktop mount sources are opaque and cannot be verified on
+      host, this is a documented host acceptance blocker pending human verification.
+      Shiori does not claim automatic recovery for unverified opaque VM paths and
+      does not modify the launcher.
+7.  **Secrets & Operation Boundaries:**
+    - **Never mints, connects, or receives on the socket** (`connect(2)` itself mints!).
+    - Shell=False and bounded subprocess timeouts for all commands.
+    - No captured environment, compose config dumps, or stderr dumps that could leak tokens or secrets.
+    - Subprocess errors, timeouts, and state decode failures log only terse error classes without secret payloads.
+
+---
+
+## WSL Human Acceptance Procedure & Safety Boundaries (Status: PENDING)
+
+> [!IMPORTANT]
+> Automated tests in `tests/test_reconcile_mint_mount.py` verify CLI contract
+> boundaries, state persistence, cooldown suppression, and error handling
+> using fake command wrappers. **They do NOT prove real live `connect()` after
+> actual host runtime directory recreation.**
+> Real WSL host acceptance must be performed and confirmed by a human operator
+> before merging; status is currently PENDING.
+
+### Acceptance Verification Plan (Human Operator)
+
+Execute all runtime reproduction steps manually on the host. Do NOT run
+reproduction scripts inside automated sandboxes.
+
+#### Step 1: Pre-Restart Baseline Capture
+
+In the running WSL environment with Shiori and mcp-launcher active:
+
+```bash
+# 1. Capture host runtime mount & directory stat
+findmnt /run/user/1000
+stat /run/user/1000/mcp-token
+
+# 2. Capture app container ID and mounts
+docker compose ps app
+docker inspect $(docker compose ps -q app) --format 'ID: {{.Id}} StartedAt: {{.State.StartedAt}} Mounts: {{json .Mounts}}'
+
+# 3. Capture initial reconciler state
+systemctl --user status shiori-mint-mount.timer
+cat ${XDG_STATE_HOME:-$HOME/.local/state}/shiori/mint-mount.json
+```
+
+#### Step 2: Controlled WSL Restart
+
+*   Keep Docker Desktop running in Windows.
+*   Do **NOT** casually `rm -rf /run/user/1000` or kill the user manager.
+*   From a separate Windows PowerShell terminal, terminate the WSL distro:
+    ```powershell
+    wsl --terminate <DistroName>
+    ```
+    *(Avoid `wsl --shutdown` if Docker Desktop VM shares the WSL backend and would be killed prematurely).*
+
+#### Step 3: Post-Restart Verification
+
+Open a new WSL shell and verify:
+
+```bash
+# 1. Verify app container survived in Docker Desktop
+docker compose ps app
+
+# 2. Verify mcp-token socket is created on the new runtime tmpfs
+systemctl --user status mcp-token.socket
+stat /run/user/1000/mcp-token
+# Verify st_dev or st_ino changed compared to Step 1
+
+# 3. Observe reconciler timer and service execution
+systemctl --user list-timers 'shiori-*'
+journalctl --user -u shiori-mint-mount -f
+# Wait <= 5 minutes for the timer tick to fire and recreate the app container
+```
+
+#### Step 4: Verification of Live Socket Connect
+
+After the reconciler logs successful recreation:
+
+```bash
+# 1. Verify container ID was updated
+docker compose ps app
+cat ${XDG_STATE_HOME:-$HOME/.local/state}/shiori/mint-mount.json
+
+# 2. Verify connect(2) from inside the container without minting or printing tokens:
+docker compose exec app python3 -c "
+import socket
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.settimeout(2.0)
+s.connect('/run/shiori/mint.sock')
+s.close()
+print('CONNECT_OK')
+"
+```
+
+> [!WARNING]
+> Under no circumstances execute `recv()` or print the output of the socket!
+> Connecting and closing verifies reachability; reading consumes and prints
+> tokens, which leaks credentials into logs.
+
+#### Step 5: Untested Branches & Safety Rollback
+
+*   **User manager stays live while runtime directory is replaced:**
+    This specific OS edge case remains **UNVERIFIED** unless separately
+    reproduced on host. Do not claim it as tested.
+*   **Emergency Rollback / Manual Recovery:**
+    If the reconciler encounters issues:
+    ```bash
+    systemctl --user disable --now shiori-mint-mount.timer
+    docker compose up -d --force-recreate --no-deps app
+    ```
+    No database operations or data mutations occur.
 
 ---
 
@@ -154,7 +379,7 @@ floats.
 | --- | --- | --- |
 | **Phase 0** | Align GCP VMs to use `use_github_app=true` (retains Strategy A). | Complete |
 | **Phase 1** | Remove legacy `McpTokenProvider` and clean scripts, consolidating configurations into Strategy A and B. | Current PR |
-| **Phase 2** | Implement `TokenSocketProvider` (consumer side, this repo) and the host-side socket-activated minter, validating under WSL. Retract Strategy C -- Token-File Share (`refresh-token.sh`, `shiori-refresh.{service,timer}`). | **Complete** -- consumer side: Shiori PR #242; host side: mcp-launcher#42 |
+| **Phase 2** | Implement `TokenSocketProvider` (consumer side, this repo) and the host-side socket-activated minter. Retract Strategy C -- Token-File Share (`refresh-token.sh`, `shiori-refresh.{service,timer}`). Note: WSL runtime tmpfs reconciliation (#461) acceptance remains pending. | **Complete** -- consumer side: Shiori PR #242; host side: mcp-launcher#42 (WSL #461 acceptance pending) |
 | **Phase 3** | Deploy to GCP VMs and retract Strategy A (removing PEM files from VM disks). | Post Phase 2 |
 
 ---

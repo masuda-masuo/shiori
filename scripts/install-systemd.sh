@@ -22,25 +22,34 @@ for unit in shiori-ingest-dev shiori-ingest-ref; do
   cp "$SCRIPT_DIR/systemd/$unit.timer" "$USER_UNIT_DIR/$unit.timer"
 done
 
+# Mint mount reconciliation unit (issue #461): periodic check for WSL/runtime tmpfs socket mount recreation.
+sed "s|@SHIORI_DIR@|$SHIORI_DIR|g" "$SCRIPT_DIR/systemd/shiori-mint-mount.service" > "$USER_UNIT_DIR/shiori-mint-mount.service"
+cp "$SCRIPT_DIR/systemd/shiori-mint-mount.timer" "$USER_UNIT_DIR/shiori-mint-mount.timer"
+
 systemctl --user daemon-reload
 
 systemctl --user enable --now shiori.service
 systemctl --user enable --now shiori-ingest-dev.timer shiori-ingest-ref.timer
+systemctl --user enable --now shiori-mint-mount.timer
 
 echo ""
 echo "==> Done.  Useful commands:"
 echo "    systemctl --user status shiori"
 echo "    systemctl --user stop shiori"
 echo "    journalctl --user -u shiori -f"
-echo "    systemctl --user list-timers 'shiori-ingest-*'"
+echo "    systemctl --user list-timers 'shiori-*'"
 echo "    journalctl --user -u shiori-ingest-dev -f"
+echo "    journalctl --user -u shiori-mint-mount -f"
 echo ""
-echo "NOTE: this only installs shiori.service.  Shiori does not own a mint-"
-echo "      socket unit -- if you need GITHUB_TOKEN_SOCKET for private repos,"
-echo "      install the on-demand mint socket separately via mcp-launcher's"
-echo "      own scripts/install-mint-socket.sh (issue #204 / mcp-launcher#42)."
-echo "      See detailed design/15 for the full rationale and the socket"
-echo "      contract."
+echo "PREREQUISITE: /usr/bin/python3 must be available on the host for"
+echo "              shiori-mint-mount.service."
+echo ""
+echo "NOTE: this only installs shiori.service and companion timers.  Shiori does"
+echo "      not own a mint-socket unit -- if you need GITHUB_TOKEN_SOCKET for"
+echo "      private repos, install the on-demand mint socket separately via"
+echo "      mcp-launcher's own scripts/install-mint-socket.sh (issue #204 /"
+echo "      mcp-launcher#42). See detailed design/15 for the full rationale"
+echo "      and the socket contract."
 echo ""
 
 # Ensure user services survive logout (optional, requires root or polkit).

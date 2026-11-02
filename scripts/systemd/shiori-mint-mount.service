@@ -1,0 +1,10 @@
+[Unit]
+Description=shiori mint socket mount reconciler (shiori #461)
+Documentation=https://github.com/masuda-masuo/shiori
+# The timer/service only checks when shiori.service is active; do not bind
+# or auto-start the main service if it was stopped.
+
+[Service]
+Type=oneshot
+WorkingDirectory=@SHIORI_DIR@
+ExecStart=/usr/bin/python3 scripts/reconcile_mint_mount.py
