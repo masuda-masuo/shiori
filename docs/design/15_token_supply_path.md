@@ -211,8 +211,15 @@ reconciler:
 ### Architecture & Design
 
 1.  **Periodic Reconciler (`scripts/reconcile_mint_mount.py`):**
-    A small host stdlib Python script invoked periodically (~120s) by systemd
-    user timer `shiori-mint-mount.timer` (`shiori-mint-mount.service`, `Type=oneshot`).
+    A small host stdlib Python script invoked by the systemd user timer
+    `shiori-mint-mount.timer` (`shiori-mint-mount.service`, `Type=oneshot`).
+    - `OnActiveSec=10s` schedules the first check 10 seconds after the timer is
+      activated; `AccuracySec=10s` permits that trigger to be coalesced within
+      its accuracy window. `OnUnitActiveSec=2m` schedules later checks two
+      minutes after the service last ran. This is metadata-only reconciliation,
+      not a mint or credential refresh timer.
+    - The timer has no `OnCalendar` schedule, so it does not use
+      `Persistent=true` calendar catch-up.
     - Serialized by `Type=oneshot` and a non-blocking `flock` on `${XDG_STATE_HOME:-$HOME/.local/state}/shiori/mint-mount.json.lock`.
     - No sleep loops or daemon processes.
     - **Metadata-only checking**: The timer periodically checks filesystem mount
@@ -275,245 +282,155 @@ reconciler:
 > boundaries, state persistence, cooldown suppression, and error handling
 > using fake command wrappers. **They do NOT prove real live `connect()` after
 > actual host runtime directory recreation.**
-> Real WSL host acceptance must be performed and confirmed by a human operator
-> before merging; status is currently PENDING.
+> Final installed-unit validation must be performed by a human operator after
+> this timerfix PR is merged and deployed, with the temporary drop-in removed.
+> Status is currently PENDING; production deployment is not required before merge.
 
-### Acceptance Verification Plan (Human Operator)
+### Observed WSL Timer Reactivation Failure and Final Acceptance
 
-Execute all runtime reproduction steps manually on the host. Do NOT run
-reproduction scripts inside automated sandboxes.
+The WSL tests on systemd 255.4 and Docker Desktop 29.5.2 showed this sequence:
+C1 deliberately disabled the mint-mount timer for the comparison. In C3, after
+`wsl --terminate Ubuntu`, the runtime generation changed from dev 136 to 63
+while that timer was disabled. The same container ID remained, and its socket
+connect failed (111); this was not a timer malfunction. In C4, a manual app
+restart restored the connection, printing `CONNECT_OK` with the same container
+ID. C5 was a separate run with generation 116: the timer had been re-enabled,
+but the original `OnBootSec` timer was active with no `NEXT` trigger and no
+initial run. Only C5 showed that original-timer behavior. After adding the
+temporary `OnActiveSec=10s` drop-in, the 03:22 timer run automatically
+force-recreated the app; the socket check printed `CONNECT_OK`, and the timer
+showed its next trigger.
 
-#### Path Selection: Automatic Recovery vs. Optional Restart Comparison
+This is an observation about that WSL reactivation path, not a claim that
+systemd always ignores an overdue `OnBootSec`: the
+[systemd.timer documentation](https://www.freedesktop.org/software/systemd/man/latest/systemd.timer.html)
+says an overdue boot-relative trigger may run immediately. The activation-relative
+`OnActiveSec=10s` trigger gives the reactivated user timer a fresh initial
+check. The selected recovery remains
+`docker compose up -d --force-recreate --no-deps app`; the C5 run demonstrated
+automatic recovery with that command, and no switch to in-place restart was
+chosen.
 
-Before triggering the first runtime-generation replacement, decide which path to execute:
-*   **Standard Path (Automatic Recovery Acceptance)**: Follow **Step 1** through **Step 4** in linear sequence. The reconciler timer remains enabled and automatically force-recreates the app container upon detecting the new runtime generation.
-*   **Optional Path (Independent Restart Comparison)**: Follow the **Optional Independent Comparison Procedure** below **BEFORE** terminating the distro.
+The local temporary override used during diagnosis is
+`${HOME}/.config/systemd/user/shiori-mint-mount.timer.d/activation.conf`.
+Remove only that file for final validation. Do not remove runtime directories.
+The separate case where a live user manager sees only its runtime directory
+replaced remains **UNVERIFIED**; this timer change does not claim to address it.
 
-> [!WARNING]
-> **Order Dependency**: The optional comparison procedure MUST be chosen and prepared **BEFORE** the first runtime-generation replacement.
-> In the standard path, Step 3 waits for automatic recreation to fire. Stopping the timer after Step 3 has already recreated the container is too late.
+#### Final operator acceptance checklist (pending)
 
----
+After this timerfix PR is merged and deployed to the main deployment
+checkout, the human operator will run the following commands there. This is a
+procedure only; no deployment or host commands are run by this documentation
+change.
 
-### Standard Path: Automatic Recovery Verification (Default)
+1. Pull the merged change and install the copied user units:
 
-#### Step 1: Pre-Restart Baseline Capture
+   ```bash
+   git pull --ff-only
+   ./scripts/install-systemd.sh
+   systemctl --user cat shiori-mint-mount.timer
+   ```
 
-In the running WSL environment with Shiori and mcp-launcher active:
+   The installer copies the repository timer into
+   `~/.config/systemd/user`, reloads systemd, and enables/starts the Shiori
+   services and timer. It may run the reconciler and establish an app baseline
+   immediately, so take the pre-termination generation measurement only after
+   installation and the remaining checks below. In the first `cat` output,
+   inspect the installed **base unit file** and confirm its `[Timer]` section
+   contains `OnActiveSec=10s` and has no `OnBootSec`. A matching directive
+   in a temporary drop-in does not verify the installed base unit.
+
+2. Remove only the known local diagnostic drop-in, reload systemd, and inspect
+   the effective unit again:
+
+   ```bash
+   rm -- ~/.config/systemd/user/shiori-mint-mount.timer.d/activation.conf
+   systemctl --user daemon-reload
+   systemctl --user cat shiori-mint-mount.timer
+   ```
+
+   In this second output, confirm the `activation.conf` drop-in file/section
+   is gone and the base unit still has `OnActiveSec=10s` with no
+   `OnBootSec`. Do not remove the drop-in directory or any runtime directory.
+
+3. Restart the installed timer and confirm it has a next trigger:
+
+   ```bash
+   systemctl --user restart shiori-mint-mount.timer
+   systemctl --user list-timers 'shiori-*' --no-pager
+   ```
+
+   Confirm `shiori-mint-mount.timer` shows a `NEXT` time.
+
+4. Record the current runtime generation and app container ID after
+   installation, keep Docker Desktop running, then run
+   `wsl --terminate Ubuntu` from Windows:
+
+   ```bash
+   stat /run/user/1000/mcp-token
+   docker compose ps app
+   ```
+
+   Reopen the distro shell and wait three minutes. Do not manually repair the
+   mount, restart the app, or remove/replace runtime directories during this
+   automatic observation.
+
+5. Verify the runtime generation changed, inspect the reconciler journal, and
+   run a connect-only check from the app container:
+
+   ```bash
+   stat /run/user/1000/mcp-token
+   journalctl --user -u shiori-mint-mount --since "5 minutes ago"
+   docker compose exec app python3 -c "
+   import socket
+   s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+   s.settimeout(2.0)
+   s.connect('/run/shiori/mint.sock')
+   s.close()
+   print('CONNECT_OK')
+   "
+   ```
+
+   Compare the source generation with its recorded pre-termination values and
+   confirm the reconciler ran and the container was recreated. Do not call
+   `recv()` or print socket data: connecting triggers minting, while reading
+   would expose the token.
+
+Real-host acceptance remains **PENDING / UNVERIFIED** until this procedure is
+completed against the installed unit without the temporary override. Issue
+#461 remains open until the operator confirms the result.
+
+#### Emergency rollback and manual recovery
+
+If automatic reconciliation must be paused, disable and stop the timer, then
+allow any in-flight reconciliation service to finish. Do not stop or kill the
+service while it is reconciling. The unit has no explicit overall systemd
+startup deadline; individual script subprocesses have their own timeouts, but
+those do not bound the whole service. Observe the service for up to five
+minutes to let it finish naturally. If it remains activating or active after
+that human observation bound, do not stop or kill it and do not assume systemd
+will terminate it. Abort manual recovery and capture its status and journal for
+diagnosis. Resume manual recovery only after the in-flight service has finished.
 
 ```bash
-# 1. Capture host runtime mount & directory stat
-findmnt /run/user/1000
-stat /run/user/1000/mcp-token
-
-# 2. Capture app container ID and mounts
-docker compose ps app
-docker inspect $(docker compose ps -q app) --format 'ID: {{.Id}} StartedAt: {{.State.StartedAt}} Mounts: {{json .Mounts}}'
-
-# 3. Capture initial reconciler state
-systemctl --user status shiori-mint-mount.timer
-cat ${XDG_STATE_HOME:-$HOME/.local/state}/shiori/mint-mount.json
+systemctl --user disable --now shiori-mint-mount.timer
+systemctl --user status shiori-mint-mount.service
+journalctl --user -u shiori-mint-mount.service --since "10 minutes ago"
 ```
 
-#### Step 2: Controlled WSL Restart
-
-*   Keep Docker Desktop running in Windows.
-*   Do **NOT** casually `rm -rf /run/user/1000` or kill the user manager.
-*   From a separate Windows PowerShell terminal, terminate the WSL distro:
-    ```powershell
-    wsl --terminate <DistroName>
-    ```
-    *(Avoid `wsl --shutdown` if Docker Desktop VM shares the WSL backend and would be killed prematurely).*
-
-#### Step 3: Post-Restart Verification
-
-Open a new WSL shell and verify:
+After reconciliation has finished, manual recovery may recreate only the app
+container:
 
 ```bash
-# 1. Verify app container survived in Docker Desktop
-docker compose ps app
-
-# 2. Verify mcp-token socket is created on the new runtime tmpfs
-systemctl --user status mcp-token.socket
-stat /run/user/1000/mcp-token
-# Verify st_dev or st_ino changed compared to Step 1
-
-# 3. Observe reconciler timer and service execution
-systemctl --user list-timers 'shiori-*'
-journalctl --user -u shiori-mint-mount -f
-# Wait <= 5 minutes for the timer tick to fire and recreate the app container
+docker compose up -d --force-recreate --no-deps app
 ```
 
-#### Step 4: Verification of Live Socket Connect
-
-After the reconciler logs successful recreation:
-
-```bash
-# 1. Verify container ID was updated
-docker compose ps app
-cat ${XDG_STATE_HOME:-$HOME/.local/state}/shiori/mint-mount.json
-
-# 2. Verify connect(2) from inside the container without minting or printing tokens:
-docker compose exec app python3 -c "
-import socket
-s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-s.settimeout(2.0)
-s.connect('/run/shiori/mint.sock')
-s.close()
-print('CONNECT_OK')
-"
-```
-
-> [!WARNING]
-> Under no circumstances execute `recv()` or print the output of the socket!
-> Connecting and closing verifies reachability (`connect(2)` itself triggers minting on socket activation);
-> reading consumes and prints tokens, which leaks credentials into logs.
-
----
-
-### Optional Independent Comparison Procedure: Manual `docker compose restart app` vs Re-creation (HUMAN OPERATOR ONLY)
-
-An open question is whether a simple in-place `docker compose restart app` is sufficient to heal stale bind mounts on Docker Desktop / WSL without a full `--force-recreate`, preserving the container ID and layer state while updating `StartedAt`.
-
-To evaluate this without racing the automatic reconciler or invalidating acceptance, execute this comparison **BEFORE the first runtime-generation replacement**:
-
-#### Step C1: Disable Timer & Boundedly Wait Before Distro Termination
-
-1.  **Disable Timer**:
-    Run `systemctl --user disable --now shiori-mint-mount.timer` BEFORE distro termination so that it remains disabled after user-manager restart.
-    ```bash
-    systemctl --user disable --now shiori-mint-mount.timer
-    ```
-2.  **Wait Boundedly for In-Flight Service (Do NOT Kill It)**:
-    Do **NOT** stop `shiori-mint-mount.service` with `systemctl stop`: that kills an in-flight Docker command.
-    Instead, wait boundedly using host human commands until the service is inactive or failed:
-    ```bash
-    # Check boundedly (e.g. repeat every few seconds for up to 30-60s):
-    systemctl --user is-active shiori-mint-mount.service
-    ```
-    *   **Abort on Stalled Service**: If the service stays `activating` or `active` after the bounded wait, **abort the comparison** and capture diagnostic status rather than kill it:
-        ```bash
-        systemctl --user status shiori-mint-mount.service
-        journalctl --user -u shiori-mint-mount -n 50
-        ```
-    *   **Timer State Restoration on Abort**: Restore prior timer settings:
-        - For the normal expected enabled state:
-          ```bash
-          systemctl --user enable --now shiori-mint-mount.timer
-          ```
-        - If the timer was originally disabled, preserve the disabled state (do not enable).
-        Do not proceed with the comparison if aborted.
-3.  **Record Pre-Restart Baseline (Old ID + Generation)**:
-    ```bash
-    docker compose ps app
-    docker inspect $(docker compose ps -q app) --format 'ID: {{.Id}} StartedAt: {{.State.StartedAt}}'
-    stat /run/user/1000/mcp-token
-    ```
-
-#### Step C2: Controlled Generation Recreation
-
-Perform human-only controlled generation recreation with the same WSL caveats:
-*   Keep Docker Desktop running in Windows.
-*   Do **NOT** casually `rm -rf /run/user/1000` or kill the user manager.
-*   From Windows PowerShell, terminate the WSL distro:
-    ```powershell
-    wsl --terminate <DistroName>
-    ```
-
-#### Step C3: Stale Precondition & Connect Baseline Verification
-
-Open a new WSL shell:
-1.  **Verify New Generation & Survived Container**:
-    ```bash
-    # 1. Verify generation differs from Step C1 (st_dev or st_ino changed):
-    stat /run/user/1000/mcp-token
-
-    # 2. Verify timer remains disabled (reconciler did not run):
-    systemctl --user is-active shiori-mint-mount.timer
-
-    # 3. Verify same app ID survived and reconciler did not mutate it:
-    docker inspect $(docker compose ps -q app) --format 'ID: {{.Id}} StartedAt: {{.State.StartedAt}}'
-    ```
-    The container ID and `StartedAt` must exactly match the baseline recorded in Step C1.
-2.  **Connect Baseline in Stale State (MUST FAIL)**:
-    Run the connect-only test from inside the container:
-    ```bash
-    docker compose exec app python3 -c "
-    import socket
-    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    s.settimeout(2.0)
-    s.connect('/run/shiori/mint.sock')
-    s.close()
-    print('CONNECT_OK')
-    "
-    ```
-    *   `connect(2)` closes immediately, no `recv()`, triggers mint on socket activation, no tokens logged.
-    *   **The connect baseline MUST fail** in this stale state (e.g. `ConnectionRefusedError`, `FileNotFoundError`, or timeout). This failure proves that the stale mount actually broke connectivity, making the subsequent restart test meaningful.
-    *   **Inconclusive State**: If the connect baseline unexpectedly **succeeds**, the test state is inconclusive (the mount was not stale or the environment behaved differently); **do NOT propose a mechanism switch on that evidence**.
-
-#### Step C4: Manual `docker compose restart app` & Evaluation
-
-1.  **Perform Manual Restart**:
-    Only AFTER verifying the connect baseline failure, execute:
-    ```bash
-    docker compose restart app
-    ```
-2.  **Record Container State**:
-    ```bash
-    docker inspect $(docker compose ps -q app) --format 'ID: {{.Id}} StartedAt: {{.State.StartedAt}}'
-    ```
-    Verify the container ID remains identical while `StartedAt` has changed.
-3.  **Execute Connect-Only Test**:
-    ```bash
-    docker compose exec app python3 -c "
-    import socket
-    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    s.settimeout(2.0)
-    s.connect('/run/shiori/mint.sock')
-    s.close()
-    print('CONNECT_OK')
-    "
-    ```
-4.  **Reporting & PR Procedure**:
-    *   If restart succeeds (prints `CONNECT_OK`): The human operator reports the result to the orchestrator.
-    *   The orchestrator will propose switching from `--force-recreate` to `restart` on PR #465 and await the user's explicit decision.
-    *   The actual codebase implementation in `scripts/reconcile_mint_mount.py` **remains unchanged** (`--force-recreate`) until user approval is received.
-
-#### Step C5: Transition to Independent Automatic Recovery Acceptance
-
-To test automatic recovery independently without "compare-result laundering":
-1.  **Recreate Generation AGAIN**:
-    With the timer still disabled, perform another controlled generation recreation (e.g. `wsl --terminate <DistroName>`).
-2.  **Prove Stale Precondition & No Unrelated Restart**:
-    In the new WSL shell, verify:
-    - `stat /run/user/1000/mcp-token` shows a newly changed generation.
-    - Container ID and `StartedAt` survived without mutation.
-    - Connect baseline fails (confirming stale mount).
-3.  **Enable and Start Reconciler Timer**:
-    ```bash
-    systemctl --user enable --now shiori-mint-mount.timer
-    ```
-4.  **Observe Automatic Recovery**:
-    Monitor journalctl without performing any manual `docker compose restart` or `docker compose up`:
-    ```bash
-    journalctl --user -u shiori-mint-mount -f
-    ```
-    Verify automatic reconciliation recreates the app container and completes live socket connect (Step 4).
-
-#### Step 5: Untested Branches & Safety Rollback
-
-*   **User manager stays live while runtime directory is replaced:**
-    This specific OS edge case remains **UNVERIFIED** unless separately
-    reproduced on host. Do not claim it as tested.
-*   **Emergency Rollback / Manual Recovery:**
-    If the reconciler encounters issues:
-    ```bash
-    systemctl --user disable --now shiori-mint-mount.timer
-    docker compose up -d --force-recreate --no-deps app
-    ```
-    No database operations or data mutations occur.
-
----
+Manual recovery invalidates automatic acceptance. Repeat the independent WSL
+reproduction and final installed-unit validation later. Never remove, recreate,
+or recursively change permissions on runtime directories. The case where a
+live user manager remains running while only its runtime directory is replaced
+is **UNVERIFIED** and outside this timer's claimed scope.
 
 ## Migration Plan
 

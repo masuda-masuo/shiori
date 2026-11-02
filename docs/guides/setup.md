@@ -228,15 +228,115 @@ This replaces the `@SHIORI_DIR@` placeholder in the unit template with your repo
 
 On WSL2 and Linux, `/run/user/<uid>` is backed by `tmpfs`. Depending on configuration and session lifecycle, when WSL or the user session restarts, the runtime directory may be recreated on a fresh `tmpfs` inode, leaving existing containers with a stale bind mount to the dead filesystem node.
 
-The `shiori-mint-mount.timer` periodically checks mount metadata every ~120s via `scripts/reconcile_mint_mount.py` (it checks filesystem generations only, and does not mint or refresh tokens):
+The `shiori-mint-mount.timer` invokes `scripts/reconcile_mint_mount.py` for
+metadata checks only; it does not mint tokens or refresh credentials.
+`OnActiveSec=10s` schedules the first check 10 seconds after timer activation
+(with `AccuracySec=10s`), then `OnUnitActiveSec=2m` schedules repeat checks
+two minutes after each service run. The timer has no calendar schedule and no
+`Persistent=true` calendar catch-up behavior.
+
 - Inspects the host source generation (`st_dev`, `st_ino`, path) and container ID against `${XDG_STATE_HOME:-$HOME/.local/state}/shiori/mint-mount.json`.
 - When filesystem generation changes (or on initial baseline), recreates the app container alone (`docker compose up -d --force-recreate --no-deps app`) without touching the database or ingest jobs; when generation is unchanged but container ID changed (e.g. external `docker compose up -d app`), adopts the new container ID without downtime.
 - Implements a 120-second retry cooldown keyed on filesystem generation and atomic flock to avoid restart loops.
-- Real WSL host acceptance is pending human verification.
+- Keeps the existing `--force-recreate` recovery command. A separate manual restart comparison also recovered, but preserving the container ID did not justify changing the proven recreation path.
+- Real WSL acceptance against the installed timer without a local override is pending human verification; #461 remains open.
+
+**WSL timer reactivation observations:** C1 deliberately disabled the
+mint-mount timer for the comparison. In C3, after `wsl --terminate Ubuntu`,
+the runtime generation changed from dev 136 to 63 while the timer was disabled;
+the same container ID remained and its socket connect failed (111). C3 was not
+a timer malfunction. In C4, a manual app restart restored the connection and
+printed `CONNECT_OK` with that same container ID. C5 was a separate run at
+generation 116 after the timer had been re-enabled: only in C5 was the original
+`OnBootSec` timer observed active with no `NEXT` trigger and no initial run.
+After a temporary `OnActiveSec=10s` drop-in was added, the 03:22 timer run
+automatically force-recreated the app and the socket check printed
+`CONNECT_OK`. This describes the observed WSL path and does not claim that
+systemd always ignores overdue `OnBootSec` timers. A local diagnostic drop-in
+may exist at
+`~/.config/systemd/user/shiori-mint-mount.timer.d/activation.conf`.
+
+#### Final WSL acceptance (after merge and deploy)
+
+Run this procedure in the main deployment checkout after the PR is merged.
+The commands below are instructions for the human operator; this documentation
+change does not perform host operations.
+
+1. Pull the merged change and install the copied user units:
+
+   ```bash
+   git pull --ff-only
+   ./scripts/install-systemd.sh
+   systemctl --user cat shiori-mint-mount.timer
+   ```
+
+   The installer copies unit files into `~/.config/systemd/user`, reloads the
+   user manager, and enables/starts Shiori services and timers. It may trigger
+   the app baseline, so take the pre-termination generation measurement only
+   after installation and the checks below. In the first `cat` output, inspect
+   the installed **base unit file** and confirm its `[Timer]` section contains
+   `OnActiveSec=10s` and no `OnBootSec`. Seeing `OnActiveSec=10s` only in a
+   temporary drop-in is insufficient.
+
+2. Remove only the known local diagnostic drop-in, reload, and inspect the
+   effective unit again:
+
+   ```bash
+   rm -- ~/.config/systemd/user/shiori-mint-mount.timer.d/activation.conf
+   systemctl --user daemon-reload
+   systemctl --user cat shiori-mint-mount.timer
+   ```
+
+   Confirm the second output no longer lists the `activation.conf` drop-in
+   file or section, while the base unit still has `OnActiveSec=10s` and no
+   `OnBootSec`. Do not remove the drop-in directory or any runtime directory.
+
+3. Restart the installed timer and confirm `shiori-mint-mount.timer` has a
+   `NEXT` time:
+
+   ```bash
+   systemctl --user restart shiori-mint-mount.timer
+   systemctl --user list-timers 'shiori-*' --no-pager
+   ```
+
+4. Record the current runtime generation and app container ID after
+   installation, keep Docker Desktop running, then run
+   `wsl --terminate Ubuntu` from Windows:
+
+   ```bash
+   stat /run/user/1000/mcp-token
+   docker compose ps app
+   ```
+
+   Reopen the WSL shell and wait three minutes. Do not manually repair the
+   mount or restart the app during this observation. Do not remove or replace
+   runtime directories.
+
+5. Confirm the generation changed, inspect the reconciler journal, and run a
+   connect-only request from the app container:
+
+   ```bash
+   stat /run/user/1000/mcp-token
+   journalctl --user -u shiori-mint-mount --since "5 minutes ago"
+   docker compose exec app python3 -c "
+   import socket
+   s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+   s.settimeout(2.0)
+   s.connect('/run/shiori/mint.sock')
+   s.close()
+   print('CONNECT_OK')
+   "
+   ```
+
+   Compare the source generation with the recorded pre-termination values and
+   confirm the reconciler ran and the container was recreated. Connecting
+   triggers minting; do not call `recv()` or print socket data. Acceptance
+   remains **UNVERIFIED** until this procedure succeeds against the installed
+   timer without the override.
 
 Useful monitoring commands:
 ```bash
-systemctl --user list-timers 'shiori-*'
+systemctl --user list-timers 'shiori-*' --no-pager
 systemctl --user status shiori-mint-mount.timer
 journalctl --user -u shiori-mint-mount -f
 ```
