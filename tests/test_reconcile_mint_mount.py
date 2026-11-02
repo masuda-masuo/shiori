@@ -857,9 +857,21 @@ def test_systemd_unit_and_timer_wiring() -> None:
     assert "\nRequires=" not in service_txt
     assert "\nWants=" not in service_txt
 
-    assert "Persistent=true" in timer_txt
+    timer_directives: set[str] = set()
+    in_timer_section = False
+    for line in timer_txt.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            in_timer_section = stripped == "[Timer]"
+        elif in_timer_section and stripped and not stripped.startswith("#") and "=" in stripped:
+            timer_directives.add(stripped)
+
+    assert {"OnActiveSec=10s", "OnUnitActiveSec=2m", "AccuracySec=10s"} <= timer_directives
+    assert not any(
+        directive.startswith(("OnBootSec=", "Persistent="))
+        for directive in timer_directives
+    )
     assert "WantedBy=timers.target" in timer_txt
-    assert "OnUnitActiveSec=" in timer_txt or "OnCalendar=" in timer_txt
 
     assert "shiori-mint-mount.service" in install_txt
     assert "shiori-mint-mount.timer" in install_txt

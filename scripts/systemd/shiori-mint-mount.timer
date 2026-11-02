@@ -4,10 +4,9 @@ Documentation=https://github.com/masuda-masuo/shiori
 # Periodic metadata check (~120s); does not mint tokens or refresh credentials.
 
 [Timer]
-OnBootSec=1m
+OnActiveSec=10s
 OnUnitActiveSec=2m
 AccuracySec=10s
-Persistent=true
 
 [Install]
 WantedBy=timers.target
