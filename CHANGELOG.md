@@ -6,6 +6,15 @@ pull requests.
 
 ## [Unreleased]
 
+### Operations / Infrastructure
+
+- Automatic mint socket mount reconciliation for WSL2 / Linux (#461):
+  - Add host stdlib reconciliation CLI `scripts/reconcile_mint_mount.py` invoked periodically (~120s) via systemd user timer `shiori-mint-mount.timer` (`shiori-mint-mount.service`). Checks filesystem metadata only; does not mint tokens.
+  - Resolves WSL tmpfs runtime directory replacement (`st_dev` / `st_ino` change) by force-recreating the app container alone (`docker compose up -d --force-recreate --no-deps app`), while adopting external container ID changes without container mutation or downtime when filesystem generation is unchanged.
+  - Implements atomic state tracking (`${XDG_STATE_HOME:-$HOME/.local/state}/shiori/mint-mount.json`), generation-keyed 120s retry cooldown, non-blocking flock serialization, postcheck verification, and fail-closed handling for unverified opaque VM paths.
+  - Integrate units into `scripts/install-systemd.sh` with host `/usr/bin/python3` prerequisite.
+  - Document mount footguns, root-owned source poisoning, systemd unit-state boundaries, and the pending WSL human acceptance test procedure in `docs/design/15_token_supply_path.md` and `docs/guides/setup.md`.
+
 ### Core / MCP Tools
 
 - **BREAKING CHANGE**: Require unambiguous omitted repository resolution across tools (#459):
