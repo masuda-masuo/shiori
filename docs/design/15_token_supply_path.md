@@ -233,13 +233,10 @@ reconciler:
       the effective user UID (`os.geteuid()`).
     - Validates host socket: must exist, be a Unix socket (`S_ISSOCK`), owned
       by effective UID, and contained inside the mount source.
-    - **Generation comparison:**
-      - If generation `(source_path, dev, ino)` and `container_id` match `success`:
-        **NOOP** (even if the socket inode alone changed).
-      - If missing/corrupt state: recreates once to establish a known clean bind baseline
-        (brief downtime ~1-2s).
-      - If generation or container ID changed: recreates app container alone via
-        `docker compose up -d --force-recreate --no-deps app`.
+    - **Generation comparison (Explicit 3 Cases):**
+      - **Case 1 (Same generation + same container ID)**: **NOOP** (even if the socket inode alone changed).
+      - **Case 2 (Same generation + new container ID)**: **ADOPT** current container ID. Atomically updates `success.container_id` to the running container ID and exits without invoking `docker compose up`, `restart`, or any other container mutation. This avoids unnecessary second downtime when external workflows (e.g., `scripts/update.sh` running `docker compose up -d app`) have already recreated the container with the current runtime directory mounted. In `--dry-run`, reports would-adopt without mutating state. Clears any stale `last_attempt` record.
+      - **Case 3 (Changed generation OR missing/corrupt baseline)**: **RECREATE** app container alone via `docker compose up -d --force-recreate --no-deps app` with pre-mutation re-verification, generation-keyed retry cooldown (~120s), and postcheck verification before atomically committing new `success` state.
 4.  **Failure Handling & Cooldown:**
     - If recreation fails, prior `success` state is preserved.
     - `last_attempt` generation (`source_path`, `dev`, `ino`) and timestamp are persisted.
@@ -285,6 +282,20 @@ reconciler:
 
 Execute all runtime reproduction steps manually on the host. Do NOT run
 reproduction scripts inside automated sandboxes.
+
+#### Path Selection: Automatic Recovery vs. Optional Restart Comparison
+
+Before triggering the first runtime-generation replacement, decide which path to execute:
+*   **Standard Path (Automatic Recovery Acceptance)**: Follow **Step 1** through **Step 4** in linear sequence. The reconciler timer remains enabled and automatically force-recreates the app container upon detecting the new runtime generation.
+*   **Optional Path (Independent Restart Comparison)**: Follow the **Optional Independent Comparison Procedure** below **BEFORE** terminating the distro.
+
+> [!WARNING]
+> **Order Dependency**: The optional comparison procedure MUST be chosen and prepared **BEFORE** the first runtime-generation replacement.
+> In the standard path, Step 3 waits for automatic recreation to fire. Stopping the timer after Step 3 has already recreated the container is too late.
+
+---
+
+### Standard Path: Automatic Recovery Verification (Default)
 
 #### Step 1: Pre-Restart Baseline Capture
 
@@ -355,8 +366,139 @@ print('CONNECT_OK')
 
 > [!WARNING]
 > Under no circumstances execute `recv()` or print the output of the socket!
-> Connecting and closing verifies reachability; reading consumes and prints
-> tokens, which leaks credentials into logs.
+> Connecting and closing verifies reachability (`connect(2)` itself triggers minting on socket activation);
+> reading consumes and prints tokens, which leaks credentials into logs.
+
+---
+
+### Optional Independent Comparison Procedure: Manual `docker compose restart app` vs Re-creation (HUMAN OPERATOR ONLY)
+
+An open question is whether a simple in-place `docker compose restart app` is sufficient to heal stale bind mounts on Docker Desktop / WSL without a full `--force-recreate`, preserving the container ID and layer state while updating `StartedAt`.
+
+To evaluate this without racing the automatic reconciler or invalidating acceptance, execute this comparison **BEFORE the first runtime-generation replacement**:
+
+#### Step C1: Disable Timer & Boundedly Wait Before Distro Termination
+
+1.  **Disable Timer**:
+    Run `systemctl --user disable --now shiori-mint-mount.timer` BEFORE distro termination so that it remains disabled after user-manager restart.
+    ```bash
+    systemctl --user disable --now shiori-mint-mount.timer
+    ```
+2.  **Wait Boundedly for In-Flight Service (Do NOT Kill It)**:
+    Do **NOT** stop `shiori-mint-mount.service` with `systemctl stop`: that kills an in-flight Docker command.
+    Instead, wait boundedly using host human commands until the service is inactive or failed:
+    ```bash
+    # Check boundedly (e.g. repeat every few seconds for up to 30-60s):
+    systemctl --user is-active shiori-mint-mount.service
+    ```
+    *   **Abort on Stalled Service**: If the service stays `activating` or `active` after the bounded wait, **abort the comparison** and capture diagnostic status rather than kill it:
+        ```bash
+        systemctl --user status shiori-mint-mount.service
+        journalctl --user -u shiori-mint-mount -n 50
+        ```
+    *   **Timer State Restoration on Abort**: Restore prior timer settings:
+        - For the normal expected enabled state:
+          ```bash
+          systemctl --user enable --now shiori-mint-mount.timer
+          ```
+        - If the timer was originally disabled, preserve the disabled state (do not enable).
+        Do not proceed with the comparison if aborted.
+3.  **Record Pre-Restart Baseline (Old ID + Generation)**:
+    ```bash
+    docker compose ps app
+    docker inspect $(docker compose ps -q app) --format 'ID: {{.Id}} StartedAt: {{.State.StartedAt}}'
+    stat /run/user/1000/mcp-token
+    ```
+
+#### Step C2: Controlled Generation Recreation
+
+Perform human-only controlled generation recreation with the same WSL caveats:
+*   Keep Docker Desktop running in Windows.
+*   Do **NOT** casually `rm -rf /run/user/1000` or kill the user manager.
+*   From Windows PowerShell, terminate the WSL distro:
+    ```powershell
+    wsl --terminate <DistroName>
+    ```
+
+#### Step C3: Stale Precondition & Connect Baseline Verification
+
+Open a new WSL shell:
+1.  **Verify New Generation & Survived Container**:
+    ```bash
+    # 1. Verify generation differs from Step C1 (st_dev or st_ino changed):
+    stat /run/user/1000/mcp-token
+
+    # 2. Verify timer remains disabled (reconciler did not run):
+    systemctl --user is-active shiori-mint-mount.timer
+
+    # 3. Verify same app ID survived and reconciler did not mutate it:
+    docker inspect $(docker compose ps -q app) --format 'ID: {{.Id}} StartedAt: {{.State.StartedAt}}'
+    ```
+    The container ID and `StartedAt` must exactly match the baseline recorded in Step C1.
+2.  **Connect Baseline in Stale State (MUST FAIL)**:
+    Run the connect-only test from inside the container:
+    ```bash
+    docker compose exec app python3 -c "
+    import socket
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(2.0)
+    s.connect('/run/shiori/mint.sock')
+    s.close()
+    print('CONNECT_OK')
+    "
+    ```
+    *   `connect(2)` closes immediately, no `recv()`, triggers mint on socket activation, no tokens logged.
+    *   **The connect baseline MUST fail** in this stale state (e.g. `ConnectionRefusedError`, `FileNotFoundError`, or timeout). This failure proves that the stale mount actually broke connectivity, making the subsequent restart test meaningful.
+    *   **Inconclusive State**: If the connect baseline unexpectedly **succeeds**, the test state is inconclusive (the mount was not stale or the environment behaved differently); **do NOT propose a mechanism switch on that evidence**.
+
+#### Step C4: Manual `docker compose restart app` & Evaluation
+
+1.  **Perform Manual Restart**:
+    Only AFTER verifying the connect baseline failure, execute:
+    ```bash
+    docker compose restart app
+    ```
+2.  **Record Container State**:
+    ```bash
+    docker inspect $(docker compose ps -q app) --format 'ID: {{.Id}} StartedAt: {{.State.StartedAt}}'
+    ```
+    Verify the container ID remains identical while `StartedAt` has changed.
+3.  **Execute Connect-Only Test**:
+    ```bash
+    docker compose exec app python3 -c "
+    import socket
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(2.0)
+    s.connect('/run/shiori/mint.sock')
+    s.close()
+    print('CONNECT_OK')
+    "
+    ```
+4.  **Reporting & PR Procedure**:
+    *   If restart succeeds (prints `CONNECT_OK`): The human operator reports the result to the orchestrator.
+    *   The orchestrator will propose switching from `--force-recreate` to `restart` on PR #465 and await the user's explicit decision.
+    *   The actual codebase implementation in `scripts/reconcile_mint_mount.py` **remains unchanged** (`--force-recreate`) until user approval is received.
+
+#### Step C5: Transition to Independent Automatic Recovery Acceptance
+
+To test automatic recovery independently without "compare-result laundering":
+1.  **Recreate Generation AGAIN**:
+    With the timer still disabled, perform another controlled generation recreation (e.g. `wsl --terminate <DistroName>`).
+2.  **Prove Stale Precondition & No Unrelated Restart**:
+    In the new WSL shell, verify:
+    - `stat /run/user/1000/mcp-token` shows a newly changed generation.
+    - Container ID and `StartedAt` survived without mutation.
+    - Connect baseline fails (confirming stale mount).
+3.  **Enable and Start Reconciler Timer**:
+    ```bash
+    systemctl --user enable --now shiori-mint-mount.timer
+    ```
+4.  **Observe Automatic Recovery**:
+    Monitor journalctl without performing any manual `docker compose restart` or `docker compose up`:
+    ```bash
+    journalctl --user -u shiori-mint-mount -f
+    ```
+    Verify automatic reconciliation recreates the app container and completes live socket connect (Step 4).
 
 #### Step 5: Untested Branches & Safety Rollback
 

@@ -12,14 +12,16 @@ not recreate; (4) incomplete preconditions never recreate; (5) a failed
 recreate does not advance success and suppresses immediate retry; (6)
 ``--dry-run`` mutates neither Docker nor successful state; (7) generation
 changed mid-command aborts commit; (8) failed postcheck does not advance
-success; (9) external container ID change triggers recreation; (10) traversal
+success; (9) external container ID change adopts without recreation; (10) traversal
 rejected; (11) Docker Desktop opaque VM path fails closed; (12) unrelated /
 ambiguous Desktop path rejected; (13) cooldown keyed on filesystem generation
 independent of container ID; (14) cooldown expiry enables eventual retry;
 (15) wrong owner mount source rejected; (16) root-owned missing source poisoning
 rejected without destructive mutation; (17) wrong owner socket rejected;
 (18) terse logging without secret payloads; (19) custom nested socket paths;
-(20) lock contention exits cleanly; (21) 0600/0700 permissions; (22) unit and timer wiring.
+(20) lock contention exits cleanly; (21) 0600/0700 permissions; (22) unit and timer wiring;
+(23) dry-run adoption mutates neither Docker nor successful state; (24) adoption
+not blocked by prior cooldown.
 """
 
 from __future__ import annotations
@@ -448,23 +450,103 @@ def test_failed_postcheck_container_not_running_does_not_commit_success(tmp_path
     assert state.get("success", {}).get("ino") == preserved.stat().st_ino
 
 
-def test_container_id_change_triggers_recreate(tmp_path: Path) -> None:
+def test_container_id_change_adopts_without_recreate(tmp_path: Path) -> None:
+    scene = Scene(tmp_path)
+    first = scene.run()
+    assert first.returncode == 0, first.stderr
+    assert len(scene.recreate_calls) == 1
+    assert len(scene.mutating_calls) == 1
+
+    first_state = json.loads(scene.state_path.read_text(encoding="utf-8"))
+    first_success = first_state.get("success", {})
+    assert first_success.get("container_id") == "c2"
+
+    # Container ID externally changed (e.g. update.sh docker compose up -d app)
+    scene.update(container_ids=["c_external"])
+    second = scene.run()
+    assert second.returncode == 0, second.stderr
+    assert "Adopted existing running container c_external" in second.stderr
+    assert "(previous container: c2)" in second.stderr
+    # Must NOT have made additional mutating Docker calls
+    assert len(scene.recreate_calls) == 1
+    assert len(scene.mutating_calls) == 1
+
+    # success.container_id updated to new ID, generation fields unchanged
+    second_state = json.loads(scene.state_path.read_text(encoding="utf-8"))
+    second_success = second_state.get("success", {})
+    assert second_success.get("container_id") == "c_external"
+    assert second_success.get("source_path") == first_success.get("source_path")
+    assert second_success.get("dev") == first_success.get("dev")
+    assert second_success.get("ino") == first_success.get("ino")
+
+    # Next tick is a complete NOOP
+    third = scene.run()
+    assert third.returncode == 0, third.stderr
+    assert len(scene.recreate_calls) == 1
+    assert len(scene.mutating_calls) == 1
+
+
+def test_dry_run_adoption_does_not_mutate_state_or_docker(tmp_path: Path) -> None:
+    scene = Scene(tmp_path)
+    first = scene.run()
+    assert first.returncode == 0, first.stderr
+    assert len(scene.recreate_calls) == 1
+    assert len(scene.mutating_calls) == 1
+
+    state_before = scene.state_path.read_text(encoding="utf-8")
+    parsed_before = json.loads(state_before)
+    assert parsed_before.get("success", {}).get("container_id") == "c2"
+
+    # Container ID externally changed
+    scene.update(container_ids=["c_external"])
+
+    # Dry run should report would-adopt and not mutate Docker or state file
+    dry = scene.run("--dry-run")
+    assert dry.returncode == 0, dry.stderr
+    assert "would adopt" in dry.stderr.lower()
+    assert "(previous container: c2)" in dry.stderr
+    assert len(scene.recreate_calls) == 1
+    assert len(scene.mutating_calls) == 1
+
+    state_after = scene.state_path.read_text(encoding="utf-8")
+    assert state_after == state_before
+
+    # Subsequent real run adopts successfully
+    real = scene.run()
+    assert real.returncode == 0, real.stderr
+    assert "(previous container: c2)" in real.stderr
+    assert len(scene.recreate_calls) == 1
+    assert len(scene.mutating_calls) == 1
+    state_final = json.loads(scene.state_path.read_text(encoding="utf-8"))
+    assert state_final.get("success", {}).get("container_id") == "c_external"
+
+
+def test_adoption_not_blocked_by_prior_cooldown(tmp_path: Path) -> None:
+    """Cooldown from previous attempts does not prevent adopting known successful generation."""
     scene = Scene(tmp_path)
     first = scene.run()
     assert first.returncode == 0, first.stderr
     assert len(scene.recreate_calls) == 1
 
-    # Container ID externally changed (e.g. manual restart)
-    scene.update(container_ids=["c_external"])
+    state = json.loads(scene.state_path.read_text(encoding="utf-8"))
+    state["last_attempt"] = {
+        "source_path": state["success"]["source_path"],
+        "dev": state["success"]["dev"],
+        "ino": state["success"]["ino"],
+        "container_id": "c1",
+        "timestamp": 2000000000.0,
+    }
+    scene.state_path.write_text(json.dumps(state), encoding="utf-8")
+
+    scene.update(container_ids=["c_adopted"])
     second = scene.run()
     assert second.returncode == 0, second.stderr
-    assert len(scene.recreate_calls) == 2
-    scene.assert_recreate_contract(scene.recreate_calls[1])
+    assert len(scene.recreate_calls) == 1
+    assert len(scene.mutating_calls) == 1
 
-    # Unchanged now
-    third = scene.run()
-    assert third.returncode == 0, third.stderr
-    assert len(scene.recreate_calls) == 2
+    new_state = json.loads(scene.state_path.read_text(encoding="utf-8"))
+    assert new_state.get("success", {}).get("container_id") == "c_adopted"
+    assert "last_attempt" not in new_state
 
 
 def test_socket_path_traversal_rejected(tmp_path: Path) -> None:

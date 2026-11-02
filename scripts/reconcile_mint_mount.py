@@ -3,9 +3,13 @@
 
 Inspects the host mount source directory for GITHUB_TOKEN_SOCKET, compares its
 filesystem generation (path, device, inode) and the running app container ID with
-the persisted success state, and re-creates the app container via
-`docker compose up -d --force-recreate --no-deps app` when the runtime directory
-or container has been recreated (e.g. after WSL restart).
+the persisted success state:
+1. Same generation and same container ID: NOOP.
+2. Same generation and new container ID: adopts current container ID into success
+   state without recreation or downtime (e.g. after update.sh compose up -d app).
+3. Changed generation or missing/corrupt state: re-creates the app container via
+   `docker compose up -d --force-recreate --no-deps app` with postcheck verification
+   and generation-keyed retry cooldown.
 
 Only acts when shiori.service is active and all preconditions are satisfied.
 """
@@ -363,17 +367,36 @@ def _run_reconciliation(state_path: Path, *, dry_run: bool) -> int:
     }
 
     success = state.get("success")
-    if isinstance(success, dict):
-        if (
-            success.get("source_path") == current_gen["source_path"]
-            and success.get("dev") == current_gen["dev"]
-            and success.get("ino") == current_gen["ino"]
-            and success.get("container_id") == container_id
-        ):
-            # Unchanged: NOOP even if socket inode alone changed
+    if (
+        isinstance(success, dict)
+        and success.get("source_path") == current_gen["source_path"]
+        and success.get("dev") == current_gen["dev"]
+        and success.get("ino") == current_gen["ino"]
+    ):
+        if success.get("container_id") == container_id:
+            # Case 1: same generation + same container ID -> NOOP (even if socket inode changed)
             return 0
 
-    # Generation or container ID changed or state missing/unknown
+        # Case 2: same generation + new container ID -> adopt running container
+        # (e.g. after update.sh runs docker compose up -d app without host runtime changes)
+        prev_container_id = success.get("container_id")
+        if dry_run:
+            log(
+                f"Dry-run: would adopt new container ID {container_id} for generation {current_gen} "
+                f"(previous container: {prev_container_id})."
+            )
+            return 0
+
+        state["success"]["container_id"] = container_id
+        state.pop("last_attempt", None)
+        save_state(state_path, state)
+        log(
+            f"Adopted existing running container {container_id} for unchanged mount generation "
+            f"(previous container: {prev_container_id})."
+        )
+        return 0
+
+    # Case 3: Changed generation or state missing/unknown/corrupt -> recreate
     # Check cooldown from last_attempt keyed on filesystem generation independent of container ID
     last_attempt = state.get("last_attempt")
     if isinstance(last_attempt, dict):

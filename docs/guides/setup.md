@@ -230,7 +230,7 @@ On WSL2 and Linux, `/run/user/<uid>` is backed by `tmpfs`. Depending on configur
 
 The `shiori-mint-mount.timer` periodically checks mount metadata every ~120s via `scripts/reconcile_mint_mount.py` (it checks filesystem generations only, and does not mint or refresh tokens):
 - Inspects the host source generation (`st_dev`, `st_ino`, path) and container ID against `${XDG_STATE_HOME:-$HOME/.local/state}/shiori/mint-mount.json`.
-- When changed, recreates the app container alone (`docker compose up -d --force-recreate --no-deps app`) without touching the database or ingest jobs.
+- When filesystem generation changes (or on initial baseline), recreates the app container alone (`docker compose up -d --force-recreate --no-deps app`) without touching the database or ingest jobs; when generation is unchanged but container ID changed (e.g. external `docker compose up -d app`), adopts the new container ID without downtime.
 - Implements a 120-second retry cooldown keyed on filesystem generation and atomic flock to avoid restart loops.
 - Real WSL host acceptance is pending human verification.
 
