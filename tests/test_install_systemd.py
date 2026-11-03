@@ -7,7 +7,8 @@ timers.  For #467 it must refuse *before* copying any unit, running
 * the old host-only
   ``${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/shiori.service.d/wait-docker.conf``
   exists (the installer must never delete or rewrite that unmanaged drop-in),
-* the Python interpreter used by ``ExecStartPre`` is unavailable, or
+* the Python interpreter used by the main ``ExecStart`` is unavailable,
+* the checkout startup wrapper ``scripts/start_shiori.py`` is missing, or
 * the checkout helper ``scripts/wait_for_docker.py`` is missing.
 
 The tests run the real installer in a temporary HOME/XDG tree.  ``systemctl``
@@ -21,7 +22,8 @@ Expected public seam for the implementer
 ``SHIORI_PYTHON3`` overrides the interpreter path checked by the installer
 (default ``/usr/bin/python3``).  The unit template keeps the approved literal
 ``/usr/bin/python3``; the variable exists so the unavailable case can be tested
-without touching the host.  The helper is looked for at
+without touching the host.  The startup wrapper and helper are looked for at
+``$SHIORI_DIR/scripts/start_shiori.py`` and
 ``$SHIORI_DIR/scripts/wait_for_docker.py``.
 """
 
@@ -146,6 +148,13 @@ def _checkout_without_helper(root: Path) -> Path:
     return checkout
 
 
+def _checkout_without_wrapper(root: Path) -> Path:
+    checkout = root / "checkout"
+    shutil.copytree(REPO_ROOT / "scripts", checkout / "scripts")
+    (checkout / "scripts" / "start_shiori.py").unlink(missing_ok=True)
+    return checkout
+
+
 def _assert_refused_without_mutation(
     scene: InstallerScene, result: subprocess.CompletedProcess[str], hint: str
 ) -> None:
@@ -239,7 +248,7 @@ def test_old_wait_docker_dangling_symlink_refuses_before_any_mutation(
 def test_unavailable_python_refuses_before_any_mutation(
     tmp_path: Path, kind: str
 ) -> None:
-    """The ExecStartPre interpreter must be available before units are copied."""
+    """The main ExecStart interpreter must be available before units are copied."""
     scene = InstallerScene(tmp_path)
     python = tmp_path / "python3"
     if kind == "missing":
@@ -253,6 +262,18 @@ def test_unavailable_python_refuses_before_any_mutation(
     result = scene.run()
 
     _assert_refused_without_mutation(scene, result, r"(python3|python|interpreter)")
+
+
+def test_missing_checkout_wrapper_refuses_before_any_mutation(
+    tmp_path: Path,
+) -> None:
+    """A checkout without scripts/start_shiori.py must not install anything."""
+    scene = InstallerScene(tmp_path)
+    scene.use_checkout(_checkout_without_wrapper(tmp_path))
+
+    result = scene.run()
+
+    _assert_refused_without_mutation(scene, result, r"start_shiori")
 
 
 def test_missing_checkout_helper_refuses_before_any_mutation(
@@ -298,12 +319,14 @@ def test_normal_install_keeps_behaviour_and_deploys_new_unit(
     service_text = (scene.unit_dir / "shiori.service").read_text(encoding="utf-8")
     assert "@SHIORI_DIR@" not in service_text
     assert (
-        f"ExecStartPre=/usr/bin/python3 {REPO_ROOT}/scripts/wait_for_docker.py"
+        f"ExecStart=/usr/bin/python3 {REPO_ROOT}/scripts/start_shiori.py"
         in service_text
     )
     assert "Type=oneshot" in service_text
     assert "RemainAfterExit=yes" in service_text
-    assert "ExecStart=/usr/bin/docker compose up -d app" in service_text
+    assert "ExecStartPre=" not in service_text
+    assert "ExecStart=/usr/bin/docker compose up -d app" not in service_text
+    assert "RestartPreventExitStatus=2" in service_text
     assert "ExecStop=/usr/bin/docker compose stop app" in service_text
     assert "ExecReload=/usr/bin/docker compose restart app" in service_text
     assert "Restart=on-failure" in service_text

@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 """Wait until the Docker *server* answers (shiori #467).
 
-This host-side helper is run by ``shiori.service`` as::
-
-    ExecStartPre=/usr/bin/python3 @SHIORI_DIR@/scripts/wait_for_docker.py
+This host-side helper is imported and called by the main
+``ExecStart=/usr/bin/python3 @SHIORI_DIR@/scripts/start_shiori.py`` wrapper.
+It exits 1 when the Docker wait budget is exhausted, which systemd retries
+through the wrapper, and exits 2 for invalid configuration, which systemd
+does not retry through ``RestartPreventExitStatus=2``. That directive applies
+only to the main process, not to ``ExecStartPre``, so this helper must remain
+behind the main-process wrapper for exit 2 to stop automatic retries.
 
 The socket existing is not enough: the daemon may still be starting up.  The
 helper probes the server with ``docker version --format '{{.Server.Version}}'``
@@ -34,8 +38,11 @@ Test seams (all optional; the defaults above apply when unset):
 * ``SHIORI_WAIT_DOCKER_QUERY_TIMEOUT_SECONDS``
 * ``SHIORI_WAIT_DOCKER_RETRY_INTERVAL_SECONDS``
 
-Numeric overrides must be finite positive numbers; invalid configuration is
-reported concisely instead of retrying forever.
+Numeric overrides must be finite positive numbers; invalid configuration
+returns exit 2 concisely. Exit 1 means the Docker wait was exhausted and the
+main wrapper returns 1 so systemd retries. Exit 2 means bad configuration and
+the wrapper returns 2 so the unit's ``RestartPreventExitStatus=2`` prevents a
+retry. The directive only applies to the main process, not ``ExecStartPre``.
 """
 
 from __future__ import annotations

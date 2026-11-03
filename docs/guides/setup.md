@@ -214,55 +214,65 @@ This replaces the `@SHIORI_DIR@` placeholder in the unit template with your repo
 
 | Unit File | Target Unit | Description |
 | --- | --- | --- |
-| `scripts/shiori.service` | `shiori.service` | Waits for the Docker server, then starts the app container (`docker compose up -d app`); retries on failure (#467). |
+| `scripts/shiori.service` | `shiori.service` | Runs the startup wrapper, which waits for the Docker server and starts the app container; retries retryable failures (#467). |
 | `scripts/systemd/shiori-ingest-dev.{service,timer}` | `shiori-ingest-dev.{service,timer}` | Periodic steady sync for dev repositories (~15 min). |
 | `scripts/systemd/shiori-ingest-ref.{service,timer}` | `shiori-ingest-ref.{service,timer}` | Periodic steady sync for reference repositories (daily). |
 | `scripts/systemd/shiori-mint-mount.{service,timer}` | `shiori-mint-mount.{service,timer}` | Reconciles `/run/shiori` mint socket bind mount metadata (~120s) across WSL tmpfs runtime recreations (#461). Checks metadata only; does not mint tokens. |
 
 ### Prerequisites & Dependencies
 
-- **Python 3 on Host**: `shiori.service`'s Docker readiness wait and `shiori-mint-mount.service` both require `/usr/bin/python3` on the host.
+- **Python 3 on Host**: `shiori.service`'s startup wrapper (including its Docker readiness wait) and `shiori-mint-mount.service` require `/usr/bin/python3` on the host.
 - **Mint Socket Unit**: Shiori does **not** ship a mint-socket unit. Install it separately via mcp-launcher's `scripts/install-mint-socket.sh` (see [design doc 15](../design/15_token_supply_path.md)).
 
 ### Docker readiness wait and restart policy (#467)
 
-`shiori.service` waits for the Docker *server* before starting compose. The wait
-is part of the repository-managed unit itself, not a host-only drop-in:
+The repository-managed unit runs one startup wrapper as its main process:
 
-- `ExecStartPre=/usr/bin/python3 @SHIORI_DIR@/scripts/wait_for_docker.py`
-  probes `docker version --format '{{.Server.Version}}'` using the service's
-  inherited Docker context/environment. The socket existing is not enough; the
-  probe must exit 0 with a non-empty server version.
-- One start attempt waits up to **120 seconds** in total. Each query is capped
-  at **5 seconds**, and failed probes are retried every **2 seconds** (both
-  clamped to the remaining budget). Missing CLI, missing socket, API errors and
-  query timeouts are retryable; exhaustion exits non-zero and a hung query is
-  killed and reaped.
-- `Restart=on-failure` with `RestartSec=30s` retries the whole unit after a
-  failed start, including a failed `ExecStartPre` or a failed compose start.
-- `StartLimitIntervalSec=0` (option A) disables the start-rate limit so retries
-  continue indefinitely; there is intentionally no `StartLimitBurst`
-  directive.
-- `RemainAfterExit=yes` keeps a successful run `active(exited)`; it does not
-  restart on success. An explicit `systemctl --user stop` is not undone by
-  `Restart=on-failure`, and the mint-mount reconciler continues to skip a
-  non-active service.
-- `TimeoutStartSec=5min` bounds the **entire startup**, including the Docker
-  wait, `docker compose up`, and container startup. Initial image pulls or
-  builds can exceed this limit on a slow or cold host; run
-  `docker compose pull` / `docker compose build app` before starting the
-  service in that case.
+```ini
+ExecStart=/usr/bin/python3 @SHIORI_DIR@/scripts/start_shiori.py
+Restart=on-failure
+RestartPreventExitStatus=2
+RestartSec=30s
+TimeoutStartSec=5min
+StartLimitIntervalSec=0
+```
 
-The helper is stdlib-only and logs only start, success and exhaustion lines
-plus a concise failure category. It never copies Docker's stdout/stderr or the
-inherited environment into the journal. If optional `SHIORI_WAIT_DOCKER_*`
-environment variables contain invalid numeric values, each helper attempt fails
-concisely without leaking raw environment values or secrets into the journal.
-Under option A, systemd continues to restart the unit every 30 seconds
-(`RestartSec=30s`, `StartLimitIntervalSec=0`) until the configuration is
-corrected. There is intentionally no stopping, special
-`RestartPreventExitStatus`, or rate limit: continued retries were explicitly
-chosen even for fundamentally bad configuration.
+The stdlib-only wrapper calls `wait_for_docker.py` first. The helper probes
+`docker version --format '{{.Server.Version}}'` using the service's inherited
+Docker context/environment. A socket alone is not enough; the probe must exit
+0 with a non-empty server version. The helper's exit 1 means its Docker wait
+budget was exhausted, so the wrapper exits 1 and systemd retries after
+`RestartSec=30s`. Exit 2 means invalid configuration; the wrapper preserves 2,
+and `RestartPreventExitStatus=2` tells systemd not to retry it. Compose errors
+are normalized to wrapper exit 1, including a compose exit 2, so transient
+startup failures remain retryable.
+
+The wrapper is the main `ExecStart` process because systemd 255's
+`RestartPreventExitStatus=` applies only to the main process, not to
+`ExecStartPre` commands. Keeping the helper as `ExecStartPre` would therefore
+make its exit 2 retry. See the
+[systemd 255 service documentation](https://www.freedesktop.org/software/systemd/man/255/systemd.service.html#RestartPreventExitStatus=).
+
+Each helper attempt waits up to **120 seconds** in total. Each Docker query is
+capped at **5 seconds**, with failed probes retried every **2 seconds**; query
+and sleep lengths are clamped to the remaining budget. Missing CLI, missing
+socket, API errors and query timeouts are retryable within the budget, and a
+hung query is killed and reaped. The helper logs start, success and exhaustion
+lines plus a concise failure category; it does not copy Docker output or the
+inherited environment into the journal. Invalid numeric
+`SHIORI_WAIT_DOCKER_*` values are reported without exposing raw values or
+secrets.
+
+`StartLimitIntervalSec=0` (option A) disables the start-rate limit, with no
+`StartLimitBurst`, so retryable failures continue indefinitely.
+`RemainAfterExit=yes` keeps a successful run `active(exited)`; it does not
+restart on success. An explicit `systemctl --user stop` is not undone by
+`Restart=on-failure`, and the mint-mount reconciler continues to skip a
+non-active service. `TimeoutStartSec=5min` bounds the entire startup wrapper,
+Docker wait, compose command, and container startup. Initial image pulls or
+builds can exceed this limit on a slow or cold host; run
+`docker compose pull` / `docker compose build app` before starting the
+service in that case.
 
 ### Migrating from the host-only `wait-docker.conf` (#467)
 
@@ -312,20 +322,23 @@ Run the migration in a safe maintenance window when Docker is known to work:
    ./scripts/install-systemd.sh
    ```
 
-6. Inspect the effective unit. There must be exactly **one** Docker-wait
-   `ExecStartPre`, pointing at the checkout helper, plus the retry settings:
+6. Inspect the effective unit. Check that the main `ExecStart` runs the
+   checkout wrapper and that the unit has no duplicate Docker readiness wait
+   wired as `ExecStartPre`. Existing unrelated custom `ExecStartPre` commands
+   may remain; do not remove them.
 
    ```bash
    systemctl --user daemon-reload
    systemctl --user cat shiori.service
-   systemctl --user show shiori.service -p ExecStartPre
+   systemctl --user show shiori.service -p ExecStart -p RestartPreventExitStatus
    ```
 
    Expected (paths replaced with your checkout):
 
    ```ini
-   ExecStartPre=/usr/bin/python3 /path/to/shiori/scripts/wait_for_docker.py
+   ExecStart=/usr/bin/python3 /path/to/shiori/scripts/start_shiori.py
    Restart=on-failure
+   RestartPreventExitStatus=2
    RestartSec=30s
    TimeoutStartSec=5min
    StartLimitIntervalSec=0
@@ -341,7 +354,7 @@ Run the migration in a safe maintenance window when Docker is known to work:
 
 Never blank-reset `ExecStartPre` to erase user customisations. An empty
 `ExecStartPre=` clears every `ExecStartPre` for the unit, including unrelated
-user settings; remove only the known old file instead.
+user settings; remove only the known old Docker-wait drop-in instead.
 
 ### Real-machine validation (USER-run, pending: 検証待ち)
 
@@ -355,7 +368,7 @@ observed result. Do not use `wsl --terminate` for these checks.
 
 1. **Before** stopping Docker Desktop, stop the service while Docker still
    works and confirm it is inactive. Starting an already `active(exited)` unit
-   does not re-run `ExecStartPre` and would not test anything:
+   does not re-run the main `ExecStart` wrapper and would not test anything:
 
    ```bash
    systemctl --user stop shiori.service
@@ -379,12 +392,15 @@ observed result. Do not use `wsl --terminate` for these checks.
      -p ActiveState -p SubState -p Result -p NRestarts
    ```
 
-5. Confirm the Docker wait fails after about 120 seconds and that the unit is
-   retried after `RestartSec=30s`. With restart enabled the unit may not remain
+5. Confirm the wrapper logs the helper's Docker wait exhaustion after about
+   120 seconds and exits 1, then confirm the unit is retried after
+   `RestartSec=30s`. With restart enabled the unit may not remain
    in a stable `failed` state; it can move straight to
    `activating (auto-restart)`. **Do not judge by a momentary `is-failed`
    result**; use the journal's failure/restart entries and the increase in
-   `NRestarts`.
+   `NRestarts`. Invalid helper configuration exits 2 and is not retried
+   because of `RestartPreventExitStatus=2`; compose failures (including
+   compose exit 2) are normalized to retryable exit 1.
 
 6. After at least one retry has been observed, start Docker Desktop on the
    Windows side and wait until the Ubuntu integration is back and the Docker
@@ -392,8 +408,8 @@ observed result. Do not use `wsl --terminate` for these checks.
 
 7. Without any manual `systemctl start/restart` or `docker compose up/restart`,
    confirm that `shiori.service` becomes `active(exited)` with
-   `Result=success` and the app works. In the journal, follow the successful
-   wait into the successful compose start.
+   `Result=success` and the app works. In the journal, follow the wrapper's
+   successful helper wait into the successful compose start.
 
 8. If Docker Desktop asks for an integration dialog or a manual recovery click,
    record that fact and its timestamp separately. Distinguish restoring the

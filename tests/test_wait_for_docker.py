@@ -1,8 +1,7 @@
 """Acceptance tests for scripts/wait_for_docker.py (shiori #467, option A).
 
-The helper is a new stdlib-only host script run by ``shiori.service`` as::
-
-    ExecStartPre=/usr/bin/python3 @SHIORI_DIR@/scripts/wait_for_docker.py
+The helper is a new stdlib-only host script imported and called by
+``scripts/start_shiori.py``, the main-process entrypoint for ``shiori.service``.
 
 It must wait until the Docker *server* answers, not merely until the socket
 appears.  The probe is ``docker version --format '{{.Server.Version}}'``;
@@ -837,10 +836,11 @@ def test_unit_config_uses_option_a_and_the_helper() -> None:
     assert service.get("Type") == ["oneshot"], service
     assert service.get("RemainAfterExit") == ["yes"], service
     assert service.get("WorkingDirectory") == ["@SHIORI_DIR@"], service
-    assert service.get("ExecStartPre") == [
-        "/usr/bin/python3 @SHIORI_DIR@/scripts/wait_for_docker.py"
+    assert service.get("ExecStartPre") is None, service
+    assert service.get("ExecStart") == [
+        "/usr/bin/python3 @SHIORI_DIR@/scripts/start_shiori.py"
     ], service
-    assert service.get("ExecStart") == ["/usr/bin/docker compose up -d app"], service
+    assert service.get("RestartPreventExitStatus") == ["2"], service
     assert service.get("ExecStop") == ["/usr/bin/docker compose stop app"], service
     assert service.get("ExecReload") == ["/usr/bin/docker compose restart app"], service
     assert service.get("Restart") == ["on-failure"], service
@@ -848,7 +848,10 @@ def test_unit_config_uses_option_a_and_the_helper() -> None:
     assert service.get("TimeoutStartSec") == ["5min"], service
 
     assert SCRIPT.is_file(), (
-        "scripts/wait_for_docker.py is missing; the unit references it"
+        "scripts/wait_for_docker.py is missing; the startup wrapper imports it"
+    )
+    assert (REPO_ROOT / "scripts" / "start_shiori.py").is_file(), (
+        "scripts/start_shiori.py is missing; the unit runs it as its main process"
     )
 
 

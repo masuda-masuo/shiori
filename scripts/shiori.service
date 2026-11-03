@@ -10,11 +10,11 @@ StartLimitIntervalSec=0
 Type=oneshot
 RemainAfterExit=yes
 WorkingDirectory=@SHIORI_DIR@
-ExecStartPre=/usr/bin/python3 @SHIORI_DIR@/scripts/wait_for_docker.py
-ExecStart=/usr/bin/docker compose up -d app
+ExecStart=/usr/bin/python3 @SHIORI_DIR@/scripts/start_shiori.py
 ExecStop=/usr/bin/docker compose stop app
 ExecReload=/usr/bin/docker compose restart app
 Restart=on-failure
+RestartPreventExitStatus=2
 RestartSec=30s
 TimeoutStartSec=5min
 

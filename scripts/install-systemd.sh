@@ -13,6 +13,7 @@ USER_UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 # rewritten by this installer.
 
 OLD_WAIT_DOCKER_DROPIN="$USER_UNIT_DIR/shiori.service.d/wait-docker.conf"
+START_SHIORI_WRAPPER="$SCRIPT_DIR/start_shiori.py"
 WAIT_DOCKER_HELPER="$SCRIPT_DIR/wait_for_docker.py"
 
 if [ -e "$OLD_WAIT_DOCKER_DROPIN" ] || [ -L "$OLD_WAIT_DOCKER_DROPIN" ]; then
@@ -51,8 +52,8 @@ require_python() {
 }
 
 # The unit always runs the literal /usr/bin/python3, so that path must work.
-if ! require_python "/usr/bin/python3" "ExecStartPre (/usr/bin/python3)"; then
-  echo "       The installed unit uses /usr/bin/python3 for wait_for_docker.py." >&2
+if ! require_python "/usr/bin/python3" "ExecStart (/usr/bin/python3)"; then
+  echo "       The installed unit uses /usr/bin/python3 for start_shiori.py." >&2
   exit 1
 fi
 
@@ -64,9 +65,15 @@ if [ -n "${SHIORI_PYTHON3:-}" ]; then
   fi
 fi
 
+if [ ! -f "$START_SHIORI_WRAPPER" ]; then
+  echo "ERROR: checkout startup wrapper not found: $START_SHIORI_WRAPPER" >&2
+  echo "       shiori.service ExecStart requires scripts/start_shiori.py." >&2
+  exit 1
+fi
+
 if [ ! -f "$WAIT_DOCKER_HELPER" ]; then
   echo "ERROR: checkout helper not found: $WAIT_DOCKER_HELPER" >&2
-  echo "       shiori.service ExecStartPre requires scripts/wait_for_docker.py." >&2
+  echo "       scripts/start_shiori.py requires scripts/wait_for_docker.py." >&2
   exit 1
 fi
 
@@ -105,7 +112,7 @@ echo "    journalctl --user -u shiori-ingest-dev -f"
 echo "    journalctl --user -u shiori-mint-mount -f"
 echo ""
 echo "PREREQUISITE: /usr/bin/python3 must be available on the host for"
-echo "              shiori.service's Docker readiness wait and for"
+echo "              shiori.service's startup wrapper and Docker readiness wait, and for"
 echo "              shiori-mint-mount.service."
 echo ""
 echo "NOTE: this only installs shiori.service and companion timers.  Shiori does"
