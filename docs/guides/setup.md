@@ -362,13 +362,14 @@ Never blank-reset `ExecStartPre` to erase user customisations. An empty
 `ExecStartPre=` clears every `ExecStartPre` for the unit, including unrelated
 user settings; remove only the known old Docker-wait drop-in instead.
 
-### Real-machine validation (USER-run, pending: 検証待ち)
+### Real-machine validation (T1-T3 passed)
 
-These procedures are run by the human operator on the real WSL2/systemd host
-after installing the reviewed checkout during a maintenance window. They have
-**not** been executed for this change; results remain **検証待ち (pending)**. Record the actual `systemctl --version`
-(the reference environment is systemd 255.4), the final unit text, and each
-observed result. Do not use `wsl --terminate` for these checks.
+T1-T3 passed on 2026-11-03 on WSL with systemd 255.4-1ubuntu8.18 and Docker
+Desktop server 29.5.2. The checks were run with human authorization. See the
+[verified results and timeline](https://github.com/masuda-masuo/shiori/issues/467#issuecomment-6599161473)
+for the detailed observations. The procedures below remain available for
+repeat runs. The observed retry and recovery do not establish indefinite retry
+behavior. These checks did not use `wsl --terminate`.
 
 #### T1: startup failure -> retry -> automatic active after Docker returns
 
@@ -449,16 +450,26 @@ periodic metadata checks in a different unit; do not confuse those with a
 `shiori.service` restart. When the app is available, also record its
 `StartedAt` as supporting evidence that it was not restarted without reason.
 
-#### T4: historical comment correction (deferred)
+#### Scope not verified on a real machine
 
-The old host drop-in comment says "oneshot cannot be combined with
-`Restart=on-failure`". The systemd 255 documentation says the values forbidden
-for `Type=oneshot` are `Restart=always` and `Restart=on-success`, so that
-comment is not authoritative. However, rewriting it and claiming real-machine
-verification is **deferred until T1-T3 evidence exists**; its status is
-**検証待ち**. Do not rewrite the historical comment, do not claim real-machine
-verification, and do not treat the documentation reading as a substitute for
-the T1-T3 results.
+The following cases remain outside the T1-T3 results:
+
+- Suppression of restart for configuration exit code 2: unit and wrapper
+  automated tests exist, but exit code 2 was not injected on the real host.
+- Exceeding the total `TimeoutStartSec=5min` deadline.
+- Explicit stop while an automatic-restart wait is pending. The normal
+  active-to-stop case passed; it does not cover this timing case.
+- Restarting WSL itself. The test stopped and restarted Docker Desktop only;
+  WSL was not terminated or restarted.
+
+#### T4: historical comment correction (completed)
+
+T1-T3 confirm that `Type=oneshot` supports `Restart=on-failure`, a successful
+service remains `active (exited)` with `RemainAfterExit=yes`, and an explicit
+stop does not restart the service. The historical host quote, "oneshot cannot
+be combined with `Restart=on-failure`", was incorrect and is preserved only as
+an audit record. The old drop-in was removed by the migration and is not
+recreated. See the [verified results and timeline](https://github.com/masuda-masuo/shiori/issues/467#issuecomment-6599161473).
 
 ### Mint Socket Mount Reconciliation (WSL2 / Linux)
 
