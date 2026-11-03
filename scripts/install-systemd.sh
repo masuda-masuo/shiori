@@ -7,6 +7,69 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SHIORI_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 USER_UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 
+# Preflight (shiori #467) ---------------------------------------------------
+# Refuse before copying any unit, running daemon-reload, or enabling/starting
+# anything.  These checks only read; unmanaged drop-ins are never deleted or
+# rewritten by this installer.
+
+OLD_WAIT_DOCKER_DROPIN="$USER_UNIT_DIR/shiori.service.d/wait-docker.conf"
+WAIT_DOCKER_HELPER="$SCRIPT_DIR/wait_for_docker.py"
+
+if [ -e "$OLD_WAIT_DOCKER_DROPIN" ] || [ -L "$OLD_WAIT_DOCKER_DROPIN" ]; then
+  cat >&2 <<EOF
+ERROR: old host-only Docker-wait drop-in found:
+       $OLD_WAIT_DOCKER_DROPIN
+
+shiori.service now owns the Docker readiness wait, so leaving this drop-in in
+place would run two Docker waits.  Nothing has been installed or started.
+
+Migrate manually:
+  1. Back up the current unit and this drop-in.
+  2. Make sure no shiori startup is in progress, then stop the service:
+         systemctl --user stop shiori.service
+  3. Remove ONLY the old wait-docker.conf file above.  Do not delete other
+     drop-ins or the shiori.service.d directory.
+  4. Run this installer again from the updated checkout.
+
+This installer never removes or rewrites unmanaged drop-ins for you.
+EOF
+  exit 1
+fi
+
+require_python() {
+  local python_path="$1"
+  local description="$2"
+  if [ ! -e "$python_path" ]; then
+    echo "ERROR: $description interpreter not found: $python_path" >&2
+    return 1
+  fi
+  if [ ! -f "$python_path" ] || [ ! -x "$python_path" ]; then
+    echo "ERROR: $description interpreter is not an executable file: $python_path" >&2
+    return 1
+  fi
+  return 0
+}
+
+# The unit always runs the literal /usr/bin/python3, so that path must work.
+if ! require_python "/usr/bin/python3" "ExecStartPre (/usr/bin/python3)"; then
+  echo "       The installed unit uses /usr/bin/python3 for wait_for_docker.py." >&2
+  exit 1
+fi
+
+# SHIORI_PYTHON3 is an additional test/override check only; it does not change
+# the interpreter path baked into the unit.
+if [ -n "${SHIORI_PYTHON3:-}" ]; then
+  if ! require_python "$SHIORI_PYTHON3" "SHIORI_PYTHON3"; then
+    exit 1
+  fi
+fi
+
+if [ ! -f "$WAIT_DOCKER_HELPER" ]; then
+  echo "ERROR: checkout helper not found: $WAIT_DOCKER_HELPER" >&2
+  echo "       shiori.service ExecStartPre requires scripts/wait_for_docker.py." >&2
+  exit 1
+fi
+
 echo "==> Installing shiori systemd user units"
 echo "    shiori dir : $SHIORI_DIR"
 echo "    unit dir   : $USER_UNIT_DIR"
@@ -42,6 +105,7 @@ echo "    journalctl --user -u shiori-ingest-dev -f"
 echo "    journalctl --user -u shiori-mint-mount -f"
 echo ""
 echo "PREREQUISITE: /usr/bin/python3 must be available on the host for"
+echo "              shiori.service's Docker readiness wait and for"
 echo "              shiori-mint-mount.service."
 echo ""
 echo "NOTE: this only installs shiori.service and companion timers.  Shiori does"
