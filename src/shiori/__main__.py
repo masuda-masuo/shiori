@@ -137,6 +137,7 @@ def main() -> None:
     p_forget = sub.add_parser(
         "forget",
         help="drop a repo from the index (rows + clone), without touching other repos",
+        description="Forget removes this repo from v2 search snapshots for log IDs > 585. The query and filters remain. WAL, backups, and exported sheets are not erased; IDs <= 585 are excluded.",
     )
     p_forget.add_argument(
         "--repo",
@@ -236,7 +237,8 @@ def main() -> None:
 
         result = run_forget(repos=args.repo, keep_clone=args.keep_clone)
         for repo, deleted in result.items():
-            print(f"{repo}: {sum(deleted.values())} rows deleted")
+            table_rows = sum(n for key, n in deleted.items() if key != "search_log_results")
+            print(f"{repo}: {table_rows} table rows deleted; {deleted.get('search_log_results', 0)} search log results purged")
             for table, n in deleted.items():
                 print(f"  {table}: {n}")
     elif args.command == "serve":

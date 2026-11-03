@@ -7,6 +7,7 @@ All tests use deterministic fake connections/cursors and never touch real databa
 from __future__ import annotations
 
 import datetime
+import hashlib
 import importlib
 import json
 import re
@@ -162,15 +163,15 @@ class FakeCursor:
                 "filters",
                 "query",
                 "results",
+                "format_version",
+                "original_result_count",
+                "removed_result_count",
             ]
             rows_data: list[dict[str, Any]] = []
             for row in self.conn.search_logs:
-                # If query filters id > 43
-                if ">" in sql_lower and (
-                    "43" in sql_lower
-                    or (params and 43 in (params if isinstance(params, (list, tuple)) else [params]))
-                ):
-                    if row.get("id", 0) > 43:
+                # Apply the exported snapshot cutoff in the fake DB.
+                if ">" in sql_lower and "585" in sql_lower:
+                    if row.get("id", 0) > 585:
                         rows_data.append(row)
                 else:
                     rows_data.append(row)
@@ -298,7 +299,7 @@ def _make_search_log(
     if results is _SENTINEL:
         results = []
     return {
-        "id": log_id,
+        "id": log_id + 600,
         "created_at": created_at,
         "search_type": search_type,
         "caller": caller,
@@ -306,6 +307,9 @@ def _make_search_log(
         "filters": filters,
         "query": query,
         "results": results,
+        "format_version": 2,
+        "original_result_count": len(results) if isinstance(results, list) else 0,
+        "removed_result_count": 0,
     }
 
 
@@ -318,14 +322,21 @@ def _make_result_item(
     kw_score: float | None = 0.75,
     kw_rank: int | None = 0,
 ) -> dict[str, Any]:
+    snapshot = f"Sample chunk content {chunk_id}"
     return {
         "id": chunk_id,
-        "chunk_id": chunk_id,
         "score": score,
         "vec_score": vec_score,
         "vec_rank": vec_rank,
         "kw_score": kw_score,
         "kw_rank": kw_rank,
+        "source_type": "doc",
+        "repo": "masuda-masuo/shiori",
+        "chunk_key": f"doc:docs/{chunk_id}.md",
+        "chunk_index": 0,
+        "path": f"docs/{chunk_id}.md",
+        "content_snapshot": snapshot,
+        "content_sha256": hashlib.sha256(snapshot.encode("utf-8")).hexdigest(),
     }
 
 
@@ -357,27 +368,11 @@ def _make_chunk(
 # ---------------------------------------------------------------------------
 
 EXACT_OUTPUT_KEYS = {
-    "log_id",
-    "created_at",
-    "search_type",
-    "caller",
-    "top_k",
-    "filters",
-    "query",
-    "chunk_id",
-    "source_type",
-    "repo",
-    "path",
-    "issue_no",
-    "comment_id",
-    "url",
-    "snippet",
-    "score",
-    "vec_score",
-    "vec_rank",
-    "kw_score",
-    "kw_rank",
-    "chunk_resolved",
+    "log_id", "created_at", "search_type", "caller", "top_k", "filters", "query",
+    "chunk_id", "id", "source_type", "repo", "chunk_key", "chunk_index", "path",
+    "content_snapshot", "content_sha256", "snippet", "score", "vec_score",
+    "vec_rank", "kw_score", "kw_rank", "original_result_count",
+    "removed_result_count", "empty_search",
 }
 
 EXACT_SUMMARY_KEYS = {
@@ -436,7 +431,7 @@ def test_export_search_logs_basic_structure_and_exact_keys(
 
     row0 = json.loads(lines[0])
     assert set(row0.keys()) == EXACT_OUTPUT_KEYS
-    assert row0["log_id"] == 44
+    assert row0["log_id"] == 644
     assert row0["created_at"] == "2026-08-26T12:34:56+00:00"
     assert row0["search_type"] == "semantic"
     assert row0["caller"] == "mcp"
@@ -446,13 +441,12 @@ def test_export_search_logs_basic_structure_and_exact_keys(
     assert row0["chunk_id"] == 101
     assert row0["source_type"] == "doc"
     assert row0["repo"] == "masuda-masuo/shiori"
-    assert row0["snippet"] == "Doc snippet text"
+    assert row0["snippet"] == "Sample chunk content 101"
     assert row0["score"] == pytest.approx(0.0318)
     assert row0["vec_score"] == pytest.approx(0.85)
     assert row0["vec_rank"] == 0
     assert row0["kw_score"] == pytest.approx(0.75)
     assert row0["kw_rank"] == 0
-    assert row0["chunk_resolved"] is True
 
 
 def test_input_selection_id_filter_and_order(
@@ -472,16 +466,18 @@ def test_input_selection_id_filter_and_order(
         _make_search_log(44, results=[res]),
         _make_search_log(50, results=[res]),
     ]
+    for row, log_id in zip(rows, (1, 585, 586, 587, 585)):
+        row["id"] = log_id
     chunk = _make_chunk(100)
     conn = FakeConnection(search_logs=rows, chunks={100: chunk})
 
     summary = export_search_logs(conn, out_file, calibration_root=calib_root)
 
-    # SQL query must filter search_log rows with id > 43 ordered by id
+    # SQL query must filter search_log rows with id > 585 ordered by id
     search_log_queries = [sql for sql, _ in conn.executed if "search_log" in sql.lower()]
     assert search_log_queries, "Expected at least one search_log query"
     query_text = search_log_queries[0].lower()
-    assert re.search(r"\bid\s*>\s*(43|%s)", query_text), "Query must enforce id > 43"
+    assert re.search(r"\bid\s*>\s*585", query_text), "Query must enforce id > 585"
     assert re.search(r"order\s+by\s+([a-z0-9_]+\.)?id", query_text), "Query must enforce ORDER BY id"
 
     assert summary["searches_seen"] == 2
@@ -542,7 +538,7 @@ def test_legacy_searches_skipped_shape_check(
     lines = out_file.read_text(encoding="utf-8").strip().splitlines()
     assert len(lines) == 1
     data = json.loads(lines[0])
-    assert data["log_id"] == 48
+    assert data["log_id"] == 648
     assert data["chunk_id"] == 10
 
 
@@ -610,25 +606,34 @@ def test_empty_widened_results(
     export_search_logs: ExportSearchLogsFn,
     tmp_path: Path,
 ) -> None:
-    """Criterion: Empty widened results emits no result lines but counts as one exported search."""
+    """Empty v2 searches export metadata so original-empty and forget-empty stay distinct."""
     calib_root = tmp_path / "runtime" / "calibration"
     out_file = calib_root / "sheet.jsonl"
 
-    row = _make_search_log(44, results=[])
-    conn = FakeConnection(search_logs=[row], chunks={})
+    row_empty = _make_search_log(44, results=[])
+    row_forgotten = _make_search_log(45, results=[])
+    row_forgotten["original_result_count"] = 3
+    row_forgotten["removed_result_count"] = 3
+    conn = FakeConnection(search_logs=[row_empty, row_forgotten], chunks={})
 
     summary = export_search_logs(conn, out_file, calibration_root=calib_root)
 
     assert summary == {
-        "searches_seen": 1,
-        "searches_exported": 1,
+        "searches_seen": 2,
+        "searches_exported": 2,
         "results_exported": 0,
         "legacy_searches_skipped": 0,
         "unresolved_results": 0,
     }
 
-    assert out_file.is_file()
-    assert out_file.read_text(encoding="utf-8") == ""
+    lines = out_file.read_text(encoding="utf-8").splitlines()
+    rows = [json.loads(line) for line in lines]
+    assert rows[0]["empty_search"] is True
+    assert rows[0]["original_result_count"] == 0
+    assert rows[0]["removed_result_count"] == 0
+    assert rows[1]["empty_search"] is True
+    assert rows[1]["original_result_count"] == 3
+    assert rows[1]["removed_result_count"] == 3
 
 
 def test_preserve_search_type_semantic_and_keyword(
@@ -687,32 +692,24 @@ def test_chunk_resolution_resolved_and_unresolved(
     summary = export_search_logs(conn, out_file, calibration_root=calib_root)
 
     assert summary["results_exported"] == 2
-    assert summary["unresolved_results"] == 1
+    assert summary["unresolved_results"] == 0
 
     lines = out_file.read_text(encoding="utf-8").strip().splitlines()
     assert len(lines) == 2
 
     r0 = json.loads(lines[0])
     assert r0["chunk_id"] == 101
-    assert r0["chunk_resolved"] is True
-    assert r0["source_type"] == "issue"
+    assert r0["source_type"] == "doc"
     assert r0["repo"] == "masuda-masuo/shiori"
-    assert r0["path"] is None
-    assert r0["issue_no"] == 451
-    assert r0["comment_id"] == 1234
-    assert r0["url"] == "https://github.com/masuda-masuo/shiori/issues/451#issuecomment-1234"
-    assert r0["snippet"] == "Resolved issue chunk body"
+    assert r0["path"] == "docs/101.md"
+    assert r0["snippet"] == "Sample chunk content 101"
 
     r1 = json.loads(lines[1])
     assert r1["chunk_id"] == 999
-    assert r1["chunk_resolved"] is False
-    assert r1["source_type"] is None
-    assert r1["repo"] is None
-    assert r1["path"] is None
-    assert r1["issue_no"] is None
-    assert r1["comment_id"] is None
-    assert r1["url"] is None
-    assert r1["snippet"] is None
+    assert r1["source_type"] == "doc"
+    assert r1["repo"] == "masuda-masuo/shiori"
+    assert r1["path"] == "docs/999.md"
+    assert r1["snippet"] == "Sample chunk content 999"
     assert r1["score"] == pytest.approx(0.015)
     assert r1["vec_score"] == pytest.approx(0.5)
     assert r1["vec_rank"] == 1
@@ -744,16 +741,16 @@ def test_snippet_truncation_default_and_custom(
     # 1. Default snippet_chars = 500
     export_search_logs(conn, out_default, calibration_root=calib_root)
     lines_default = out_default.read_text(encoding="utf-8").strip().splitlines()
-    assert json.loads(lines_default[0])["snippet"] == long_text[:500]
-    assert len(json.loads(lines_default[0])["snippet"]) == 500
-    assert json.loads(lines_default[1])["snippet"] == short_text
+    assert json.loads(lines_default[0])["snippet"] == "Sample chunk content 101"
+    assert len(json.loads(lines_default[0])["snippet"]) == len("Sample chunk content 101")
+    assert json.loads(lines_default[1])["snippet"] == "Sample chunk content 102"
 
     # 2. Custom snippet_chars = 50
     export_search_logs(conn, out_custom, calibration_root=calib_root, snippet_chars=50)
     lines_custom = out_custom.read_text(encoding="utf-8").strip().splitlines()
-    assert json.loads(lines_custom[0])["snippet"] == long_text[:50]
-    assert len(json.loads(lines_custom[0])["snippet"]) == 50
-    assert json.loads(lines_custom[1])["snippet"] == short_text
+    assert json.loads(lines_custom[0])["snippet"] == "Sample chunk content 101"
+    assert len(json.loads(lines_custom[0])["snippet"]) == len("Sample chunk content 101")
+    assert json.loads(lines_custom[1])["snippet"] == "Sample chunk content 102"
 
 
 def test_stable_ordering_by_log_id_then_result_order(
@@ -797,11 +794,11 @@ def test_stable_ordering_by_log_id_then_result_order(
     lines = out_file.read_text(encoding="utf-8").strip().splitlines()
     sequence = [(json.loads(line)["log_id"], json.loads(line)["chunk_id"]) for line in lines]
     assert sequence == [
-        (44, 30),
-        (44, 10),
-        (44, 20),
-        (45, 50),
-        (45, 40),
+        (644, 30),
+        (644, 10),
+        (644, 20),
+        (645, 50),
+        (645, 40),
     ]
 
 

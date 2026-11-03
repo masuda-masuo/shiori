@@ -906,18 +906,18 @@ class TestRefreshChunkCounts:
 
 
 class TestRunForgetClearsChunkCounts:
-    """Acceptance criterion 4: run_forget calls db.refresh_chunk_counts for the repo."""
+    """run_forget avoids the committing count refresh to preserve purge atomicity."""
 
-    def test_run_forget_refreshes_chunk_counts(self):
-        conn, cursor = _mock_conn()
-        cursor.fetchone.return_value = ("chunks",)
-        cursor.rowcount = 1
-
-        with patch("shiori.ingest.db.connect", return_value=conn), \
-             patch("shiori.ingest.db.refresh_chunk_counts") as mock_refresh, \
-             patch("shiori.ingest.repo_lock"):
-
+    def test_run_forget_does_not_refresh_chunk_counts(self):
+        conn, _ = _mock_conn()
+        with (
+            patch("shiori.ingest.db.connect", return_value=conn),
+            patch("shiori.ingest.db.refresh_chunk_counts") as mock_refresh,
+            patch("shiori.ingest.schema.forget_repo", return_value={"chunks": 1}) as mock_forget,
+            patch("shiori.ingest.repo_lock"),
+        ):
             from shiori.ingest import run_forget
-            run_forget(["owner/repo"], keep_clone=True)
 
-            mock_refresh.assert_called_once_with(conn, "owner/repo")
+            run_forget(["owner/repo"], keep_clone=True)
+            mock_forget.assert_called_once_with(conn, "owner/repo")
+            mock_refresh.assert_not_called()

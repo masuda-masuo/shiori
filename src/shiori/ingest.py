@@ -191,15 +191,14 @@ def run_forget(
                         f"sync is running for {repo} in another process; try again later"
                     )
                 deleted = schema.forget_repo(conn, repo)
-                db.refresh_chunk_counts(conn, repo)
-                with conn.cursor() as cur:
-                    cur.execute("DELETE FROM repo_chunk_counts WHERE repo = %s", (repo,))
+                # Counts were deleted by forget_repo. Avoid its committing
+                # refresh helper so index and snapshot purge stay atomic.
                 conn.commit()
                 result[repo] = deleted
                 log.info(
                     "forget %s: %d rows deleted (%s)",
                     repo,
-                    sum(deleted.values()),
+                    sum(n for table, n in deleted.items() if table != "search_log_results"),
                     ", ".join(f"{t}={n}" for t, n in deleted.items() if n),
                 )
 

@@ -1,12 +1,8 @@
-"""Widened search-log exporter (shiori #451).
-
-Exports search_log rows with id > 43 that contain widened multi-retriever
-scoring data to private JSONL under runtime/calibration/.
-"""
-
+"""Export validated v2 search snapshots to private JSONL."""
 from __future__ import annotations
 
 import datetime
+import hashlib
 import json
 import os
 import uuid
@@ -15,51 +11,73 @@ from typing import Any
 
 
 def _row_to_dict(cur: Any, row: Any) -> dict[str, Any]:
-    """Convert a database row to a standard dictionary."""
     if isinstance(row, dict):
         return row
     if hasattr(row, "keys") and callable(row.keys):
         return {k: row[k] for k in row.keys()}
-    if hasattr(cur, "description") and cur.description:
-        col_names = [
+    if getattr(cur, "description", None):
+        names = [
             col[0] if isinstance(col, (list, tuple)) else getattr(col, "name", str(col))
             for col in cur.description
         ]
-        return dict(zip(col_names, row))
+        return dict(zip(names, row))
     return dict(row)
 
 
 def _validate_output_path(output_path: Path | str, calibration_root: Path | str) -> Path:
-    """Validate that output_path resolves strictly below calibration_root."""
-    resolved_root = Path(calibration_root).resolve()
-    resolved_out = Path(output_path).resolve()
-
+    """Require output_path to resolve strictly below calibration_root."""
+    root = Path(calibration_root).resolve()
+    out = Path(output_path).resolve()
     try:
-        is_sub = resolved_out.is_relative_to(resolved_root)
+        inside = out.is_relative_to(root)
     except AttributeError:
         try:
-            resolved_out.relative_to(resolved_root)
-            is_sub = True
+            out.relative_to(root)
+            inside = True
         except ValueError:
-            is_sub = False
-
-    if not is_sub or resolved_out == resolved_root:
+            inside = False
+    if not inside or out == root:
         raise ValueError(
             f"output_path '{output_path}' must resolve strictly below "
             f"calibration_root '{calibration_root}'"
         )
-    return resolved_out
+    return out
 
 
-def _is_widened_results(results: Any) -> bool:
-    """Check if results list has the widened multi-retriever shape."""
-    if not isinstance(results, list):
+_REQUIRED_ITEM = {
+    "id", "score", "vec_score", "vec_rank", "kw_score", "kw_rank",
+    "source_type", "repo", "chunk_key", "chunk_index",
+    "content_snapshot", "content_sha256",
+}
+
+
+def _valid_snapshot(row: dict[str, Any], results: Any) -> bool:
+    if row.get("format_version") != 2 or not isinstance(results, list):
         return False
-    required_keys = {"vec_score", "vec_rank", "kw_score", "kw_rank"}
+    original = row.get("original_result_count")
+    removed = row.get("removed_result_count")
+    if (not isinstance(original, int) or isinstance(original, bool) or original < 0
+            or not isinstance(removed, int) or isinstance(removed, bool) or removed < 0
+            or original != len(results) + removed):
+        return False
     for item in results:
-        if not isinstance(item, dict):
+        if not isinstance(item, dict) or not _REQUIRED_ITEM.issubset(item):
             return False
-        if not required_keys.issubset(item.keys()):
+        if not isinstance(item.get("id"), int) or isinstance(item.get("id"), bool):
+            return False
+        if not isinstance(item.get("source_type"), str) or not item["source_type"]:
+            return False
+        if not isinstance(item.get("repo"), str) or not item["repo"]:
+            return False
+        if not isinstance(item.get("chunk_key"), str) or not item["chunk_key"]:
+            return False
+        if (not isinstance(item.get("chunk_index"), int)
+                or isinstance(item.get("chunk_index"), bool) or item["chunk_index"] < 0):
+            return False
+        if not isinstance(item.get("content_snapshot"), str):
+            return False
+        digest = hashlib.sha256(item["content_snapshot"].encode("utf-8")).hexdigest()
+        if item.get("content_sha256") != digest:
             return False
     return True
 
@@ -71,185 +89,82 @@ def export_search_logs(
     calibration_root: Path | str = Path("runtime/calibration"),
     snippet_chars: int = 500,
 ) -> dict[str, int]:
-    """Export widened search_log rows to private JSONL."""
-    resolved_out = _validate_output_path(output_path, calibration_root)
-    resolved_out.parent.mkdir(parents=True, exist_ok=True)
-
-    searches_seen = 0
-    searches_exported = 0
-    results_exported = 0
-    legacy_searches_skipped = 0
-    unresolved_results = 0
-
-    temp_path = resolved_out.parent / f"{resolved_out.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
-
+    """Export only complete, hash-valid version 2 snapshots; never join chunks."""
+    del snippet_chars  # Inline snapshots are exported intact.
+    out = _validate_output_path(output_path, calibration_root)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    counts = {
+        "searches_seen": 0, "searches_exported": 0, "results_exported": 0,
+        "legacy_searches_skipped": 0, "unresolved_results": 0,
+    }
+    tmp = out.parent / f"{out.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
     try:
         try:
             from psycopg.rows import dict_row
-
             cursor_cm = connection.cursor(row_factory=dict_row)
         except (TypeError, ImportError, AttributeError):
             cursor_cm = connection.cursor()
-
         with cursor_cm as cur:
             cur.execute(
-                "SELECT id, created_at, search_type, caller, top_k, filters, query, results "
-                "FROM search_log "
-                "WHERE id > 43 "
-                "ORDER BY id ASC"
+                "SELECT id, created_at, search_type, caller, top_k, filters, query, results, "
+                "format_version, original_result_count, removed_result_count "
+                "FROM search_log WHERE id > 585 ORDER BY id ASC"
             )
-            raw_log_rows = cur.fetchall()
-
-            widened_searches: list[dict[str, Any]] = []
-            chunk_ids_to_fetch: set[int] = set()
-
-            for raw_row in raw_log_rows:
-                row_dict = _row_to_dict(cur, raw_row)
-                searches_seen += 1
-
-                results = row_dict.get("results")
+            rows = []
+            for raw in cur.fetchall():
+                row = _row_to_dict(cur, raw)
+                counts["searches_seen"] += 1
+                results = row.get("results")
                 if isinstance(results, str):
                     try:
                         results = json.loads(results)
                     except (json.JSONDecodeError, TypeError, ValueError):
                         results = None
-
-                if not _is_widened_results(results):
-                    legacy_searches_skipped += 1
+                if not _valid_snapshot(row, results):
+                    counts["legacy_searches_skipped"] += 1
                     continue
+                row["results"] = results
+                rows.append(row)
+                counts["searches_exported"] += 1
 
-                searches_exported += 1
-                row_dict["results"] = results
-                widened_searches.append(row_dict)
-
-                assert isinstance(results, list)
-                for item in results:
-                    cid = item.get("chunk_id", item.get("id"))
-                    if cid is not None:
-                        try:
-                            chunk_ids_to_fetch.add(int(cid))
-                        except (ValueError, TypeError):
-                            pass
-
-            chunk_map: dict[int, dict[str, Any]] = {}
-            if chunk_ids_to_fetch:
-                chunk_list = list(chunk_ids_to_fetch)
-                batch_size = 2000
-                for i in range(0, len(chunk_list), batch_size):
-                    batch = chunk_list[i : i + batch_size]
-                    cur.execute(
-                        "SELECT id, source_type, repo, path, issue_no, comment_id, url, content "
-                        "FROM chunks "
-                        "WHERE id = ANY(%s)",
-                        (batch,),
-                    )
-                    for raw_chunk in cur.fetchall():
-                        c_dict = _row_to_dict(cur, raw_chunk)
-                        chunk_map[c_dict["id"]] = c_dict
-
-        with open(temp_path, "w", encoding="utf-8") as f:
-            for search_row in widened_searches:
-                log_id = search_row["id"]
-                created_at = search_row.get("created_at")
-                if isinstance(created_at, datetime.datetime):
-                    created_at_str = created_at.isoformat()
-                else:
-                    created_at_str = str(created_at) if created_at is not None else ""
-
-                search_type = search_row.get("search_type")
-                caller = search_row.get("caller")
-                top_k = search_row.get("top_k")
-                filters = search_row.get("filters")
+        with open(tmp, "w", encoding="utf-8") as stream:
+            for row in rows:
+                created = row.get("created_at")
+                created_str = created.isoformat() if isinstance(created, datetime.datetime) else (
+                    str(created) if created is not None else ""
+                )
+                filters = row.get("filters")
                 if isinstance(filters, str):
                     try:
                         filters = json.loads(filters)
                     except (json.JSONDecodeError, TypeError, ValueError):
                         pass
-
-                query = search_row.get("query")
-                results = search_row.get("results") or []
-
-                for item in results:
-                    cid = item.get("chunk_id", item.get("id"))
-                    if cid is not None:
-                        try:
-                            cid_int = int(cid)
-                        except (ValueError, TypeError):
-                            cid_int = cid
-                    else:
-                        cid_int = None
-
-                    chunk_data = chunk_map.get(cid_int) if cid_int is not None else None
-                    chunk_resolved = chunk_data is not None
-
-                    if chunk_resolved and chunk_data is not None:
-                        source_type = chunk_data.get("source_type")
-                        repo = chunk_data.get("repo")
-                        path = chunk_data.get("path")
-                        issue_no = chunk_data.get("issue_no")
-                        comment_id = chunk_data.get("comment_id")
-                        url = chunk_data.get("url")
-                        raw_content = chunk_data.get("content")
-                        if raw_content is not None:
-                            limit_chars = max(0, snippet_chars) if snippet_chars >= 0 else 0
-                            snippet = str(raw_content)[:limit_chars]
-                        else:
-                            snippet = ""
-                    else:
-                        unresolved_results += 1
-                        source_type = None
-                        repo = None
-                        path = None
-                        issue_no = None
-                        comment_id = None
-                        url = None
-                        snippet = None
-
-                    score = item.get("score")
-                    vec_score = item.get("vec_score")
-                    vec_rank = item.get("vec_rank")
-                    kw_score = item.get("kw_score")
-                    kw_rank = item.get("kw_rank")
-
-                    out_line = {
-                        "log_id": log_id,
-                        "created_at": created_at_str,
-                        "search_type": search_type,
-                        "caller": caller,
-                        "top_k": top_k,
-                        "filters": filters,
-                        "query": query,
-                        "chunk_id": cid_int,
-                        "source_type": source_type,
-                        "repo": repo,
-                        "path": path,
-                        "issue_no": issue_no,
-                        "comment_id": comment_id,
-                        "url": url,
-                        "snippet": snippet,
-                        "score": score,
-                        "vec_score": vec_score,
-                        "vec_rank": vec_rank,
-                        "kw_score": kw_score,
-                        "kw_rank": kw_rank,
-                        "chunk_resolved": chunk_resolved,
+                common = {
+                    "log_id": row["id"], "created_at": created_str,
+                    "search_type": row.get("search_type"), "caller": row.get("caller"),
+                    "top_k": row.get("top_k"), "filters": filters, "query": row.get("query"),
+                    "original_result_count": row["original_result_count"],
+                    "removed_result_count": row["removed_result_count"],
+                }
+                if not row["results"]:
+                    stream.write(json.dumps(
+                        {**common, "empty_search": True, "results": []},
+                        ensure_ascii=False,
+                    ) + "\n")
+                for item in row["results"]:
+                    record = {
+                        **common, "chunk_id": item["id"], **item,
+                        "empty_search": False,
                     }
-                    f.write(json.dumps(out_line, ensure_ascii=False) + "\n")
-                    results_exported += 1
-
-        temp_path.replace(resolved_out)
+                    record["snippet"] = item.get("display_snippet", item["content_snapshot"])
+                    stream.write(json.dumps(record, ensure_ascii=False) + "\n")
+                    counts["results_exported"] += 1
+        tmp.replace(out)
     except BaseException:
-        if temp_path.exists():
+        if tmp.exists():
             try:
-                temp_path.unlink()
+                tmp.unlink()
             except OSError:
                 pass
         raise
-
-    return {
-        "searches_seen": searches_seen,
-        "searches_exported": searches_exported,
-        "results_exported": results_exported,
-        "legacy_searches_skipped": legacy_searches_skipped,
-        "unresolved_results": unresolved_results,
-    }
+    return counts

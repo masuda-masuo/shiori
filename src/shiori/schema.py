@@ -82,8 +82,77 @@ def forget_repo(conn: psycopg.Connection, repo: str) -> dict[str, int]:
     A table that does not exist yet (fresh DB) counts as 0 rows rather than
     raising -- there is simply nothing indexed to forget.
     """
+    if getattr(conn, "autocommit", False) is True:
+        raise RuntimeError("forget requires an explicit transaction (autocommit=False)")
+    with conn.cursor() as lock_cur:
+        lock_cur.execute("SELECT current_setting('transaction_isolation')")
+        isolation_row = lock_cur.fetchone()
+        if isolation_row is None:
+            raise RuntimeError("could not read transaction isolation")
+        isolation = isolation_row[0]
+        if isolation.lower() != "read committed":
+            raise RuntimeError("forget requires READ COMMITTED isolation")
+        lock_cur.execute("SELECT pg_advisory_xact_lock(%s, %s)", (0x53484C47, 471))
     deleted: dict[str, int] = {}
+    log_removed = 0
     with conn.cursor() as cur:
+        cur.execute("SELECT to_regclass(%s)", ("search_log",))
+        search_log_row = cur.fetchone()
+        if search_log_row is None:
+            raise RuntimeError("search log table lookup returned no row")
+        if search_log_row[0] is not None:
+            cur.execute(
+                """
+                SELECT attname
+                  FROM pg_attribute
+                 WHERE attrelid = to_regclass(%s)
+                   AND attname IN (
+                       'format_version',
+                       'original_result_count',
+                       'removed_result_count'
+                   )
+                   AND attnum > 0
+                   AND NOT attisdropped
+                """,
+                ("search_log",),
+            )
+            snapshot_columns = {row[0] for row in cur.fetchall()}
+            # Older search_log schemas have no snapshot metadata columns;
+            # their rows are not eligible for v2 purge. Partial metadata is
+            # ambiguous, so fail before deleting any repo index rows.
+            snapshot_metadata_columns = {
+                "format_version",
+                "original_result_count",
+                "removed_result_count",
+            }
+            if snapshot_columns and snapshot_columns != snapshot_metadata_columns:
+                raise RuntimeError(
+                    "partial search_log snapshot metadata; refusing to forget repo"
+                )
+            if snapshot_columns == snapshot_metadata_columns:
+                cur.execute("""
+                    WITH candidates AS (
+                        SELECT sl.id,
+                               count(*) FILTER (WHERE item->>'repo' = %s)::integer AS removed,
+                               COALESCE(jsonb_agg(item ORDER BY ord)
+                                 FILTER (WHERE item->>'repo' IS DISTINCT FROM %s), '[]'::jsonb) AS kept
+                          FROM search_log sl
+                          CROSS JOIN LATERAL jsonb_array_elements(sl.results) WITH ORDINALITY AS e(item, ord)
+                         WHERE sl.id > 585 AND sl.format_version = 2
+                         GROUP BY sl.id
+                    ), changed AS (
+                        UPDATE search_log sl
+                           SET results = c.kept, removed_result_count =
+                               COALESCE(sl.removed_result_count, 0) + c.removed
+                          FROM candidates c
+                         WHERE sl.id = c.id AND c.removed > 0
+                        RETURNING c.removed
+                    ) SELECT COALESCE(sum(removed), 0) FROM changed
+                """, (repo, repo))
+                removed_row = cur.fetchone()
+                if removed_row is None:
+                    raise RuntimeError("search log purge returned no count")
+                log_removed = removed_row[0]
         for table in REPO_SCOPED_TABLES:
             cur.execute("SELECT to_regclass(%s)", (table,))
             row = cur.fetchone()
@@ -96,6 +165,7 @@ def forget_repo(conn: psycopg.Connection, repo: str) -> dict[str, int]:
                 (repo,),
             )
             deleted[table] = cur.rowcount
+    deleted["search_log_results"] = int(log_removed or 0)
     return deleted
 
 
@@ -232,6 +302,9 @@ CREATE TABLE IF NOT EXISTS search_log (
     top_k INTEGER NOT NULL,
     filters JSONB,
     results JSONB NOT NULL,
+    format_version INTEGER,
+    original_result_count INTEGER,
+    removed_result_count INTEGER,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS search_log_created_at_idx ON search_log (created_at);
@@ -556,6 +629,21 @@ def _run_alter_statements(conn: psycopg.Connection) -> None:
         log.info("schema up to date (no DDL executed)")
 
 
+def _migrate_search_log_snapshot_columns(conn: psycopg.Connection) -> None:
+    """Add nullable v2 metadata while leaving existing rows unmarked."""
+    existing = _existing_columns(conn, "search_log")
+    with conn.cursor() as cur:
+        for name in (
+            "format_version", "original_result_count", "removed_result_count",
+        ):
+            if name not in existing:
+                cur.execute(
+                    sql.SQL("ALTER TABLE search_log ADD COLUMN {} {}").format(
+                        sql.Identifier(name), sql.SQL("INTEGER")
+                    )
+                )
+
+
 def migrate_light(conn: psycopg.Connection, settings: Settings) -> None:
     """Create tables, constraints, and btree indexes only. Skip HNSW/pgroonga (issue #72).
 
@@ -580,6 +668,8 @@ def migrate_light(conn: psycopg.Connection, settings: Settings) -> None:
     conn.commit()
 
     _run_alter_statements(conn)
+    _migrate_search_log_snapshot_columns(conn)
+    conn.commit()
 
     with conn.cursor() as cur:
         cur.execute("RESET lock_timeout")

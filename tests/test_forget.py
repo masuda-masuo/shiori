@@ -26,6 +26,20 @@ def _mock_conn(rowcount: int = 0, table_exists: bool = True):
     # to_regclass の戻り。存在しないテーブルは None
     cursor.fetchone.return_value = ("chunks",) if table_exists else (None,)
     conn.cursor.return_value.__enter__.return_value = cursor
+    last_sql = {"value": ""}
+    def remember_sql(*args, **kwargs):
+        last_sql["value"] = str(args[0])
+    cursor.execute.side_effect = remember_sql
+    def fetchone():
+        query = last_sql["value"].lower()
+        if "transaction_isolation" in query:
+            return ("read committed",)
+        if "with candidates" in query:
+            return (0,)
+        if "to_regclass" in query:
+            return (("chunks",) if table_exists else (None,))
+        return (None,)
+    cursor.fetchone.side_effect = fetchone
     return conn, cursor
 
 
@@ -81,7 +95,7 @@ class TestForgetRepo:
         assert len(deletes) == len(REPO_SCOPED_TABLES)
         for table in REPO_SCOPED_TABLES:
             assert f'DELETE FROM "{table}" WHERE repo = %s' in deletes  # noqa: S608 - assertion on SQL construction; table name comes from the REPO_SCOPED_TABLES constant
-        assert deleted == {t: 3 for t in REPO_SCOPED_TABLES}
+        assert deleted == {**{t: 3 for t in REPO_SCOPED_TABLES}, "search_log_results": 0}
 
     def test_scopes_the_delete_to_the_given_repo(self):
         """他の repo を巻き添えにしない（rebuild と違う点そのもの）。"""
@@ -99,7 +113,7 @@ class TestForgetRepo:
 
         deleted = forget_repo(conn, "owner/gone")
 
-        assert deleted == {t: 0 for t in REPO_SCOPED_TABLES}
+        assert deleted == {**{t: 0 for t in REPO_SCOPED_TABLES}, "search_log_results": 0}
         assert not [c for c in cursor.execute.call_args_list if "DELETE" in _sql_of(c)]
 
 

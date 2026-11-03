@@ -8,6 +8,7 @@ with DB fixtures (issue_items bodies + chunks rows) served by a fake cursor.
 from __future__ import annotations
 
 import re
+from contextlib import nullcontext
 from datetime import datetime
 from typing import cast
 
@@ -176,6 +177,11 @@ class _FakeDecisionCursor:
         self._last = sql
         self._params = params
 
+    def fetchone(self):
+        if "transaction_isolation" in self._last.lower():
+            return ("read committed",)
+        return None
+
     def fetchall(self):
         if "unnest" in self._last and "issue_items" in self._last:
             if self._params is None:
@@ -201,6 +207,9 @@ class _FakeDecisionConn:
 
     def cursor(self):
         return self._cursor
+
+    def transaction(self):
+        return nullcontext()
 
 
 class _FakeEmbedder:
