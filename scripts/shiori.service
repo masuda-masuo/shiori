@@ -2,14 +2,21 @@
 Description=Shiori MCP Server (docker compose)
 After=network-online.target docker.service
 Wants=network-online.target
+# Option A (shiori #467): keep retrying on failure without a start-rate cap.
+# There is deliberately no StartLimitBurst directive here.
+StartLimitIntervalSec=0
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
 WorkingDirectory=@SHIORI_DIR@
-ExecStart=/usr/bin/docker compose up -d app
+ExecStart=/usr/bin/python3 @SHIORI_DIR@/scripts/start_shiori.py
 ExecStop=/usr/bin/docker compose stop app
 ExecReload=/usr/bin/docker compose restart app
+Restart=on-failure
+RestartPreventExitStatus=2
+RestartSec=30s
+TimeoutStartSec=5min
 
 [Install]
 WantedBy=default.target

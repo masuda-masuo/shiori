@@ -214,15 +214,251 @@ This replaces the `@SHIORI_DIR@` placeholder in the unit template with your repo
 
 | Unit File | Target Unit | Description |
 | --- | --- | --- |
-| `scripts/shiori.service` | `shiori.service` | Starts the app container (`docker compose up -d app`). |
+| `scripts/shiori.service` | `shiori.service` | Runs the startup wrapper, which waits for the Docker server and starts the app container; retries retryable failures (#467). |
 | `scripts/systemd/shiori-ingest-dev.{service,timer}` | `shiori-ingest-dev.{service,timer}` | Periodic steady sync for dev repositories (~15 min). |
 | `scripts/systemd/shiori-ingest-ref.{service,timer}` | `shiori-ingest-ref.{service,timer}` | Periodic steady sync for reference repositories (daily). |
 | `scripts/systemd/shiori-mint-mount.{service,timer}` | `shiori-mint-mount.{service,timer}` | Reconciles `/run/shiori` mint socket bind mount metadata (~120s) across WSL tmpfs runtime recreations (#461). Checks metadata only; does not mint tokens. |
 
 ### Prerequisites & Dependencies
 
-- **Python 3 on Host**: `shiori-mint-mount.service` requires `/usr/bin/python3` on the host.
+- **Python 3 on Host**: `shiori.service`'s startup wrapper (including its Docker readiness wait) and `shiori-mint-mount.service` require `/usr/bin/python3` on the host.
 - **Mint Socket Unit**: Shiori does **not** ship a mint-socket unit. Install it separately via mcp-launcher's `scripts/install-mint-socket.sh` (see [design doc 15](../design/15_token_supply_path.md)).
+
+### Docker readiness wait and restart policy (#467)
+
+The repository-managed unit runs one startup wrapper as its main process:
+
+```ini
+ExecStart=/usr/bin/python3 @SHIORI_DIR@/scripts/start_shiori.py
+Restart=on-failure
+RestartPreventExitStatus=2
+RestartSec=30s
+TimeoutStartSec=5min
+StartLimitIntervalSec=0
+```
+
+The stdlib-only wrapper calls `wait_for_docker.py` first. The helper probes
+`docker version --format '{{.Server.Version}}'` using the service's inherited
+Docker context/environment. A socket alone is not enough; the probe must exit
+0 with a non-empty server version. The helper's exit 1 means its Docker wait
+budget was exhausted, so the wrapper exits 1 and systemd retries after
+`RestartSec=30s`. Exit 2 means invalid configuration; the wrapper preserves 2,
+and `RestartPreventExitStatus=2` tells systemd not to retry it. Compose errors
+are normalized to wrapper exit 1, including a compose exit 2, so transient
+startup failures remain retryable.
+
+The wrapper is the main `ExecStart` process because systemd 255's
+`RestartPreventExitStatus=` applies only to the main process, not to
+`ExecStartPre` commands. Keeping the helper as `ExecStartPre` would therefore
+make its exit 2 retry. See the
+[systemd 255 service documentation](https://www.freedesktop.org/software/systemd/man/255/systemd.service.html#RestartPreventExitStatus=).
+
+Each helper attempt waits up to **120 seconds** in total. Each Docker query is
+capped at **5 seconds**, with failed probes retried every **2 seconds**; query
+and sleep lengths are clamped to the remaining budget. Missing CLI, missing
+socket, API errors and query timeouts are retryable within the budget, and a
+hung query is killed and reaped. The helper logs start, success and exhaustion
+lines plus a concise failure category; it does not copy Docker output or the
+inherited environment into the journal. Invalid numeric
+`SHIORI_WAIT_DOCKER_*` values are reported without exposing raw values or
+secrets.
+
+`StartLimitIntervalSec=0` (option A) disables the start-rate limit, with no
+`StartLimitBurst`, so retryable failures continue indefinitely.
+`RemainAfterExit=yes` keeps a successful run `active(exited)`; it does not
+restart on success. An explicit `systemctl --user stop` is not undone by
+`Restart=on-failure`, and the mint-mount reconciler continues to skip a
+non-active service. `TimeoutStartSec=5min` bounds the entire startup wrapper,
+Docker wait, compose command, and container startup. Initial image pulls or
+builds can exceed this limit on a slow or cold host; run
+`docker compose pull` / `docker compose build app` before starting the
+service in that case.
+
+### Migrating from the host-only `wait-docker.conf` (#467)
+
+Older WSL2 setups used an unmanaged host-only drop-in at
+`${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/shiori.service.d/wait-docker.conf`.
+If it remains, the old shell wait and the new unit wait both run. The installer
+refuses to install anything while that file exists; it never deletes or
+rewrites unmanaged drop-ins.
+
+Run the migration in a safe maintenance window when Docker is known to work:
+
+1. Back up the current unit and the old drop-in:
+
+   ```bash
+   systemctl --user cat shiori.service > ~/shiori.service.before-467
+   cp "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/shiori.service.d/wait-docker.conf" \
+      ~/wait-docker.conf.before-467
+   ```
+
+2. Confirm no startup is in progress:
+
+   ```bash
+   systemctl --user show shiori.service -p ActiveState -p SubState
+   ```
+
+   Do not continue while the unit is `activating`.
+
+3. Stop the service. The mint-mount reconciler skips non-active services, so
+   this manual stop is preserved for the duration of the maintenance window:
+
+   ```bash
+   systemctl --user stop shiori.service
+   ```
+
+4. Remove **only** the old `wait-docker.conf` file. Do not remove other
+   drop-ins or the `shiori.service.d` directory:
+
+   ```bash
+   rm -- "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/shiori.service.d/wait-docker.conf"
+   ```
+
+5. Pull the updated checkout and run the installer. Its normal `enable --now`
+   behaviour starts the service again; the maintenance stop is temporary:
+
+   ```bash
+   git pull --ff-only
+   ./scripts/install-systemd.sh
+   ```
+
+   To validate before merge, run `gh pr checkout <PR番号>` instead of
+   `git pull --ff-only`, then run `./scripts/install-systemd.sh` from that
+   PR checkout. After the PR is merged, switch back to main with
+   `git switch main`, run `git pull --ff-only`, and rerun
+   `./scripts/install-systemd.sh` to update the installation from main.
+
+6. Inspect the effective unit. Check that the main `ExecStart` runs the
+   checkout wrapper and that the unit has no duplicate Docker readiness wait
+   wired as `ExecStartPre`. Existing unrelated custom `ExecStartPre` commands
+   may remain; do not remove them.
+
+   ```bash
+   systemctl --user daemon-reload
+   systemctl --user cat shiori.service
+   systemctl --user show shiori.service -p ExecStart -p RestartPreventExitStatus
+   ```
+
+   Expected (paths replaced with your checkout):
+
+   ```ini
+   ExecStart=/usr/bin/python3 /path/to/shiori/scripts/start_shiori.py
+   Restart=on-failure
+   RestartPreventExitStatus=2
+   RestartSec=30s
+   TimeoutStartSec=5min
+   StartLimitIntervalSec=0
+   ```
+
+7. Run the installer a second time and confirm it does not recreate the old
+   drop-in or introduce a second Docker wait:
+
+   ```bash
+   ./scripts/install-systemd.sh
+   systemctl --user cat shiori.service
+   ```
+
+Never blank-reset `ExecStartPre` to erase user customisations. An empty
+`ExecStartPre=` clears every `ExecStartPre` for the unit, including unrelated
+user settings; remove only the known old Docker-wait drop-in instead.
+
+### Real-machine validation (USER-run, pending: 検証待ち)
+
+These procedures are run by the human operator on the real WSL2/systemd host
+after installing the reviewed checkout during a maintenance window. They have
+**not** been executed for this change; results remain **検証待ち (pending)**. Record the actual `systemctl --version`
+(the reference environment is systemd 255.4), the final unit text, and each
+observed result. Do not use `wsl --terminate` for these checks.
+
+#### T1: startup failure -> retry -> automatic active after Docker returns
+
+1. **Before** stopping Docker Desktop, stop the service while Docker still
+   works and confirm it is inactive. Starting an already `active(exited)` unit
+   does not re-run the main `ExecStart` wrapper and would not test anything:
+
+   ```bash
+   systemctl --user stop shiori.service
+   systemctl --user is-active shiori.service   # inactive
+   ```
+
+2. Stop Docker Desktop on the Windows side. Do not stop the WSL distro and do
+   not use `wsl --terminate`. Record the test start time.
+
+3. Request a start without blocking:
+
+   ```bash
+   systemctl --user start --no-block shiori.service
+   ```
+
+4. Observe the journal and the retry counters:
+
+   ```bash
+   journalctl --user -u shiori.service --since "<test start>" --no-pager
+   systemctl --user show shiori.service \
+     -p ActiveState -p SubState -p Result -p NRestarts
+   ```
+
+5. Confirm the wrapper logs the helper's Docker wait exhaustion after about
+   120 seconds and exits 1, then confirm the unit is retried after
+   `RestartSec=30s`. With restart enabled the unit may not remain
+   in a stable `failed` state; it can move straight to
+   `activating (auto-restart)`. **Do not judge by a momentary `is-failed`
+   result**; use the journal's failure/restart entries and the increase in
+   `NRestarts`. Invalid helper configuration exits 2 and is not retried
+   because of `RestartPreventExitStatus=2`; compose failures (including
+   compose exit 2) are normalized to retryable exit 1.
+
+6. After at least one retry has been observed, start Docker Desktop on the
+   Windows side and wait until the Ubuntu integration is back and the Docker
+   API answers.
+
+7. Without any manual `systemctl start/restart` or `docker compose up/restart`,
+   confirm that `shiori.service` becomes `active(exited)` with
+   `Result=success` and the app works. In the journal, follow the wrapper's
+   successful helper wait into the successful compose start.
+
+8. If Docker Desktop asks for an integration dialog or a manual recovery click,
+   record that fact and its timestamp separately. Distinguish restoring the
+   Docker connection itself from whether Shiori recovered afterwards without a
+   manual start.
+
+#### T2: explicit stop stays stopped
+
+With Docker available and the service normally active, run:
+
+```bash
+systemctl --user stop shiori.service
+systemctl --user is-active shiori.service   # inactive
+```
+
+Wait at least **90 seconds** (three times `RestartSec`), then check
+`NRestarts` and the journal: there must be no automatic restart and the unit
+must remain inactive. Confirm that a mint-mount timer run also skips the
+non-active service and does not start the app. If possible, separately stop the
+service while it is `activating (auto-restart)` and record that the retry
+stops. Any `systemctl --user start` used to return to normal operation after
+the test is a manual post-test action, not part of the test.
+
+#### T3: a successful start does not loop
+
+With Docker available, start the service once and confirm `active(exited)` and
+`Result=success`. Observe for at least **3 minutes** and confirm that
+`ActiveEnterTimestamp` does not change, `NRestarts` does not increase, and
+`ExecStart` is not repeated in the journal. The mint-mount timer performs
+periodic metadata checks in a different unit; do not confuse those with a
+`shiori.service` restart. When the app is available, also record its
+`StartedAt` as supporting evidence that it was not restarted without reason.
+
+#### T4: historical comment correction (deferred)
+
+The old host drop-in comment says "oneshot cannot be combined with
+`Restart=on-failure`". The systemd 255 documentation says the values forbidden
+for `Type=oneshot` are `Restart=always` and `Restart=on-success`, so that
+comment is not authoritative. However, rewriting it and claiming real-machine
+verification is **deferred until T1-T3 evidence exists**; its status is
+**検証待ち**. Do not rewrite the historical comment, do not claim real-machine
+verification, and do not treat the documentation reading as a substitute for
+the T1-T3 results.
 
 ### Mint Socket Mount Reconciliation (WSL2 / Linux)
 
