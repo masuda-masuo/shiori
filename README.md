@@ -151,7 +151,7 @@ Search execution events are stored in the `search_log` PostgreSQL table for offl
 *   `format_version`, `original_result_count`, `removed_result_count`: nullable snapshot metadata. Legacy rows stay NULL; new searches explicitly write version 2, including empty searches.
 *   `created_at` (`TIMESTAMPTZ`): Execution timestamp.
 
-Table growth is bounded by `SHIORI_SEARCH_LOG_RETENTION_DAYS` (default: 30 days) via periodic maintenance (`prune_search_log(conn, retention_days)`), indexed by `search_log_created_at_idx` to prevent full table scans. Searches retain immutable snapshots from ranked chunk rows. Updates, reindex, and rebuild leave snapshots in place; forget deliberately removes matching result objects from v2 logs with IDs above 585. Estimated logical addition is 86 KB/day (31 MB/year) at 8 searches/day, 7.15 results/search, and 1,503 bytes/result including estimated metadata; differing display snippets add extra bytes. This excludes PostgreSQL tuple, TOAST, WAL, index, and backup overhead, which vary with data and compression. A synthetic 991-byte content snapshot measured 1,489 bytes for the JSONB result and 1,608 bytes for the whole `search_log` row using `pg_column_size` on PostgreSQL 16. This single-row measurement does not predict TOAST/WAL/index/backup growth.
+Table growth is bounded by `SHIORI_SEARCH_LOG_RETENTION_DAYS` (default: 30 days) via periodic maintenance (`prune_search_log(conn, retention_days)`), indexed by `search_log_created_at_idx` to prevent full table scans. Searches retain immutable snapshots from ranked chunk rows. Updates, reindex, and rebuild leave snapshots in place; forget removes matching result objects from version 2 logs, regardless of ID; legacy unversioned logs remain untouched. Estimated logical addition is 86 KB/day (31 MB/year) at 8 searches/day, 7.15 results/search, and 1,503 bytes/result including estimated metadata; differing display snippets add extra bytes. This excludes PostgreSQL tuple, TOAST, WAL, index, and backup overhead, which vary with data and compression. A synthetic 991-byte content snapshot measured 1,489 bytes for the JSONB result and 1,608 bytes for the whole `search_log` row using `pg_column_size` on PostgreSQL 16. This single-row measurement does not predict TOAST/WAL/index/backup growth.
 
 The [design doc](docs/design/01_data_ingestion_and_sync.md) covers the architecture: three cursor streams, per-repo PG advisory locks for parallel containers, dev-first ordering, and the ingest strategy.
 
@@ -161,7 +161,7 @@ Removing a repository from `SHIORI_REPOS` does not delete its existing rows or d
 ```bash
 docker compose run --rm app python -m shiori forget --repo owner/name
 ```
-This removes database entries, purges matching result objects from eligible v2 search snapshots, counts deleted rows, and deletes local disk clones. The query and filters remain. Existing logs with IDs <= 585 are excluded. WAL, backups, and exported sheets are not erased.
+This removes database entries, purges matching result objects from version 2 search snapshots, counts deleted rows, and deletes local disk clones. Legacy unversioned logs remain untouched. The query and filters remain. Forget holds an exclusive lock, so searches wait while it runs; large repositories can hold it longer. WAL, backups, and exported sheets are not erased.
 
 ---
 

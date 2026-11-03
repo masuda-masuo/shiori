@@ -167,14 +167,7 @@ class FakeCursor:
                 "original_result_count",
                 "removed_result_count",
             ]
-            rows_data: list[dict[str, Any]] = []
-            for row in self.conn.search_logs:
-                # Apply the exported snapshot cutoff in the fake DB.
-                if ">" in sql_lower and "585" in sql_lower:
-                    if row.get("id", 0) > 585:
-                        rows_data.append(row)
-                else:
-                    rows_data.append(row)
+            rows_data = list(self.conn.search_logs)
             if "order by" in sql_lower and "id" in sql_lower:
                 rows_data.sort(key=lambda r: r.get("id", 0))
 
@@ -449,40 +442,43 @@ def test_export_search_logs_basic_structure_and_exact_keys(
     assert row0["kw_rank"] == 0
 
 
-def test_input_selection_id_filter_and_order(
+def test_input_selection_version_eligibility_and_order(
     export_search_logs: ExportSearchLogsFn,
     tmp_path: Path,
 ) -> None:
-    """Criterion: Query search_log rows with id > 43, ordered by id."""
+    """Version 2 eligibility is independent of log ID; rows stay ordered."""
     calib_root = tmp_path / "runtime" / "calibration"
     out_file = calib_root / "sheet.jsonl"
 
     res = _make_result_item(100)
-    # Rows with id <= 43 must be excluded at the query boundary
+    # Valid v2 snapshots export regardless of ID; NULL-version rows do not.
     rows = [
         _make_search_log(1, results=[res]),
-        _make_search_log(42, results=[res]),
         _make_search_log(43, results=[res]),
-        _make_search_log(44, results=[res]),
-        _make_search_log(50, results=[res]),
+        _make_search_log(585, results=[res]),
+        _make_search_log(586, results=[res]),
+        _make_search_log(700, results=[res]),
     ]
-    for row, log_id in zip(rows, (1, 585, 586, 587, 585)):
-        row["id"] = log_id
+    for index in (1, 3):
+        rows[index]["format_version"] = None
+        rows[index]["original_result_count"] = None
+        rows[index]["removed_result_count"] = None
     chunk = _make_chunk(100)
     conn = FakeConnection(search_logs=rows, chunks={100: chunk})
 
     summary = export_search_logs(conn, out_file, calibration_root=calib_root)
 
-    # SQL query must filter search_log rows with id > 585 ordered by id
     search_log_queries = [sql for sql, _ in conn.executed if "search_log" in sql.lower()]
     assert search_log_queries, "Expected at least one search_log query"
     query_text = search_log_queries[0].lower()
-    assert re.search(r"\bid\s*>\s*585", query_text), "Query must enforce id > 585"
-    assert re.search(r"order\s+by\s+([a-z0-9_]+\.)?id", query_text), "Query must enforce ORDER BY id"
+    assert "format_version" in query_text
+    assert not re.search(r"\bwhere\s+(?:[a-z0-9_]+\.)?id\s*>", query_text)
+    assert re.search(r"order\s+by\s+([a-z0-9_]+\.)?id", query_text)
 
-    assert summary["searches_seen"] == 2
-    assert summary["searches_exported"] == 2
-    assert summary["results_exported"] == 2
+    assert summary["searches_seen"] == 5
+    assert summary["searches_exported"] == 3
+    assert summary["legacy_searches_skipped"] == 2
+    assert summary["results_exported"] == 3
 
 
 def test_legacy_searches_skipped_shape_check(
@@ -491,12 +487,12 @@ def test_legacy_searches_skipped_shape_check(
 ) -> None:
     """Criterion: A row is widened only when results is a list and every result has all 4 retriever keys.
 
-    Failing rows increment legacy_searches_skipped and emit no output, even if id > 43.
+    Failing rows increment legacy_searches_skipped and emit no output, at any ID.
     """
     calib_root = tmp_path / "runtime" / "calibration"
     out_file = calib_root / "sheet.jsonl"
 
-    # id > 43, but various non-widened shapes
+    # v2 IDs may be low; malformed or legacy shapes remain ineligible.
     row_none_results = _make_search_log(44, results=None)
     row_dict_results = _make_search_log(45, results={"id": 1})  # not a list
     # pre-#445 shape: contains id and score, but missing vec_score/vec_rank/kw_score/kw_rank

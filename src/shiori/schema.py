@@ -138,7 +138,7 @@ def forget_repo(conn: psycopg.Connection, repo: str) -> dict[str, int]:
                                  FILTER (WHERE item->>'repo' IS DISTINCT FROM %s), '[]'::jsonb) AS kept
                           FROM search_log sl
                           CROSS JOIN LATERAL jsonb_array_elements(sl.results) WITH ORDINALITY AS e(item, ord)
-                         WHERE sl.id > 585 AND sl.format_version = 2
+                         WHERE sl.format_version = 2
                          GROUP BY sl.id
                     ), changed AS (
                         UPDATE search_log sl

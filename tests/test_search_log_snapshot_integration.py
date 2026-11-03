@@ -11,10 +11,38 @@ from pathlib import Path
 
 import psycopg
 import pytest
+from psycopg import sql
 from psycopg.types.json import Jsonb
 
 from shiori.config import Settings
 from shiori.schema import forget_repo, migrate_light
+
+# Dedicated test-only lock key; production search and forget locks use other keys.
+_EXTENSION_BOOTSTRAP_LOCK = (472, 1)
+
+
+def _bootstrap_extensions(dsn: str) -> None:
+    """Install test prerequisites in public once, outside disposable schemas."""
+    with psycopg.connect(dsn) as admin:
+        admin.execute("SELECT pg_advisory_xact_lock(%s, %s)", _EXTENSION_BOOTSTRAP_LOCK)
+        for extension in ("vector", "pgroonga"):
+            admin.execute(
+                sql.SQL("CREATE EXTENSION IF NOT EXISTS {} WITH SCHEMA public").format(
+                    sql.Identifier(extension)
+                )
+            )
+
+
+def _assert_extensions_persist(dsn: str) -> None:
+    with psycopg.connect(dsn) as admin:
+        rows = admin.execute(
+            """SELECT extname, nspname
+               FROM pg_extension JOIN pg_namespace ON extnamespace = pg_namespace.oid
+               WHERE extname IN (%s, %s) ORDER BY extname""",
+            ("pgroonga", "vector"),
+        ).fetchall()
+        assert rows == [("pgroonga", "public"), ("vector", "public")]
+        assert admin.execute("SELECT to_regtype(%s)", ("public.vector",)).fetchone()[0]
 
 
 @pytest.fixture(scope="module")
@@ -23,9 +51,10 @@ def snapshot_db():
         "SHIORI_TEST_DATABASE_URL",
         "postgresql://shiori_test:shiori_test@127.0.0.1:55432/shiori_test",
     )
+    _bootstrap_extensions(dsn)
     schema_name = "shiori_471_" + uuid.uuid4().hex
     with psycopg.connect(dsn, autocommit=True) as admin:
-        admin.execute(f'CREATE SCHEMA "{schema_name}"')
+        admin.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema_name)))
     options = f"-c search_path={schema_name},public"
     try:
         with psycopg.connect(dsn, options=options) as conn:
@@ -33,7 +62,10 @@ def snapshot_db():
         yield dsn, options, schema_name
     finally:
         with psycopg.connect(dsn, autocommit=True) as admin:
-            admin.execute(f'DROP SCHEMA IF EXISTS "{schema_name}" CASCADE')
+            admin.execute(
+                sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(sql.Identifier(schema_name))
+            )
+        _assert_extensions_persist(dsn)
 
 
 @pytest.fixture
@@ -175,35 +207,47 @@ def test_partial_snapshot_columns(db, present_columns) -> None:
     ).fetchone() == ([item], 2, 1, 0)
 
 
-def test_forget_removes_only_new_v2_repo_hits_and_counts_new_removals(db) -> None:
-    """Whole-item purge preserves cutoff and legacy rows; repeat forget is idempotent."""
+def test_forget_purges_low_id_v2_and_preserves_legacy_rows(db) -> None:
+    """Purge every v2 ID, leave low/high legacy logs intact, and count only new removals."""
     target_id = _chunk(db, "gone/repo", "guide.md", "target text")
     keep_id = _chunk(db, "keep/repo", "guide.md", "keep text")
-    old_v2 = _snapshot(target_id, "gone/repo", "old cutoff")
-    legacy = _snapshot(target_id, "gone/repo", "legacy stays")
+    low = _snapshot(target_id, "gone/repo", "low v2")
+    low_with_prior_removal = _snapshot(target_id, "gone/repo", "low v2 with prior removal")
+    at_old_cutoff = _snapshot(target_id, "gone/repo", "v2 at old cutoff")
+    legacy_low = _snapshot(target_id, "gone/repo", "low legacy stays")
+    legacy_high = _snapshot(target_id, "gone/repo", "high legacy stays")
     current = _snapshot(target_id, "gone/repo", "target text")
     mixed = [current, _snapshot(keep_id, "keep/repo", "keep text")]
     emptied = _snapshot(target_id, "gone/repo", "target only")
-    _log(db, 585, [old_v2], format_version=2, original_count=1, removed_count=0)
-    _log(db, 586, [legacy], format_version=None, original_count=None, removed_count=None)
+
+    _log(db, 1, [low], format_version=2, original_count=1, removed_count=0)
+    _log(db, 2, [legacy_low], format_version=None, original_count=None, removed_count=None)
+    _log(db, 43, [low_with_prior_removal], format_version=2, original_count=3, removed_count=2)
+    _log(db, 585, [at_old_cutoff], format_version=2, original_count=1, removed_count=0)
+    _log(db, 586, [legacy_high], format_version=None, original_count=None, removed_count=None)
     _log(db, 600, mixed, format_version=2, original_count=2, removed_count=0)
     _log(db, 601, [emptied], format_version=2, original_count=1, removed_count=0)
+    _log(db, 700, [legacy_high], format_version=None, original_count=None, removed_count=None)
     db.commit()
 
     deleted = forget_repo(db, "gone/repo")
     db.commit()
 
-    assert deleted["search_log_results"] == 2
+    assert deleted["search_log_results"] == 5
     rows = db.execute(
         """SELECT id, results, original_result_count, removed_result_count
-           FROM search_log WHERE id IN (585, 586, 600) ORDER BY id"""
+           FROM search_log ORDER BY id"""
     ).fetchall()
-    assert rows[0] == (585, [old_v2], 1, 0)
-    assert rows[1] == (586, [legacy], None, None)
-    assert rows[2] == (600, [mixed[1]], 2, 1)
-    assert db.execute(
-        "SELECT results, original_result_count, removed_result_count FROM search_log WHERE id = 601"
-    ).fetchone() == ([], 1, 1)
+    assert rows == [
+        (1, [], 1, 1),
+        (2, [legacy_low], None, None),
+        (43, [], 3, 3),
+        (585, [], 1, 1),
+        (586, [legacy_high], None, None),
+        (600, [mixed[1]], 2, 1),
+        (601, [], 1, 1),
+        (700, [legacy_high], None, None),
+    ]
     assert db.execute("SELECT count(*) FROM chunks WHERE repo = 'gone/repo'").fetchone()[0] == 0
     assert db.execute("SELECT count(*) FROM chunks WHERE repo = 'keep/repo'").fetchone()[0] == 1
 
@@ -211,8 +255,8 @@ def test_forget_removes_only_new_v2_repo_hits_and_counts_new_removals(db) -> Non
     db.commit()
     assert deleted_again["search_log_results"] == 0
     assert db.execute(
-        "SELECT results, original_result_count, removed_result_count FROM search_log WHERE id = 601"
-    ).fetchone() == ([], 1, 1)
+        "SELECT results, original_result_count, removed_result_count FROM search_log WHERE id = 43"
+    ).fetchone() == ([], 3, 3)
     assert db.execute(
         "SELECT results, original_result_count, removed_result_count FROM search_log WHERE id = 600"
     ).fetchone() == ([mixed[1]], 2, 1)
@@ -339,7 +383,7 @@ def race_db(snapshot_db):
     dsn, _, _ = snapshot_db
     schema_name = "shiori_471_race_" + uuid.uuid4().hex
     with psycopg.connect(dsn, autocommit=True) as admin:
-        admin.execute(f'CREATE SCHEMA "{schema_name}"')
+        admin.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema_name)))
     options = f"-c search_path={schema_name},public"
     try:
         with psycopg.connect(dsn, options=options) as conn:
@@ -357,7 +401,9 @@ def race_db(snapshot_db):
         yield dsn, options
     finally:
         with psycopg.connect(dsn, autocommit=True) as admin:
-            admin.execute(f'DROP SCHEMA IF EXISTS "{schema_name}" CASCADE')
+            admin.execute(
+                sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(sql.Identifier(schema_name))
+            )
 
 
 def _race_connection(race_db):
@@ -474,7 +520,7 @@ def test_search_first_forget_waits_for_repo_unspecified_search_snapshot(race_db,
             """
             SELECT count(*)
               FROM search_log log, jsonb_array_elements(log.results) item
-             WHERE log.id > 585 AND log.format_version = 2
+             WHERE log.format_version = 2
                AND item->>'repo' = 'race/target'
             """
         ).fetchone()[0] == 0
@@ -554,7 +600,7 @@ def test_forget_first_search_waits_and_does_not_log_deleted_content(race_db, mon
             """
             SELECT count(*)
               FROM search_log log, jsonb_array_elements(log.results) item
-             WHERE log.id > 585 AND log.format_version = 2
+             WHERE log.format_version = 2
                AND item->>'repo' = 'race/target'
             """
         ).fetchone()[0] == 0

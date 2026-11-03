@@ -108,7 +108,7 @@ def export_search_logs(
             cur.execute(
                 "SELECT id, created_at, search_type, caller, top_k, filters, query, results, "
                 "format_version, original_result_count, removed_result_count "
-                "FROM search_log WHERE id > 585 ORDER BY id ASC"
+                "FROM search_log ORDER BY id ASC"
             )
             rows = []
             for raw in cur.fetchall():

@@ -137,7 +137,7 @@ def main() -> None:
     p_forget = sub.add_parser(
         "forget",
         help="drop a repo from the index (rows + clone), without touching other repos",
-        description="Forget removes this repo from v2 search snapshots for log IDs > 585. The query and filters remain. WAL, backups, and exported sheets are not erased; IDs <= 585 are excluded.",
+        description="Forget removes this repo's result objects from version 2 search snapshots at any log ID; legacy unversioned logs are untouched. The query and filters remain. Forget holds an exclusive lock, so searches wait while it runs; large repositories can hold it longer. WAL, backups, and exported sheets are not erased.",
     )
     p_forget.add_argument(
         "--repo",

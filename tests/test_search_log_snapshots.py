@@ -22,5 +22,9 @@ def test_forget_help_discloses_snapshot_and_external_copy_limits() -> None:
     assert "wal" in normalized
     assert "backup" in normalized
     assert "exported" in normalized and ("sheet" in normalized or "spreadsheet" in normalized)
-    assert "585" in normalized
+    assert "version 2" in normalized
+    assert "legacy" in normalized and "unversioned" in normalized
     assert "id" in normalized
+    assert "exclusive lock" in normalized
+    assert "searches wait" in normalized
+    assert "large repositories can hold it longer" in normalized
