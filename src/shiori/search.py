@@ -5,6 +5,7 @@ Two modes: simple (1 table, single kNN) / complex (2 tables, kNN per combo → a
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from dataclasses import asdict, dataclass
 from typing import Any
@@ -21,7 +22,8 @@ RRF_K = 60
 
 _RESULT_COLS = (
     "id, source_type, repo, path, issue_no, comment_id, kind, language, "
-    "heading_path, content, state, author, line, created_at, updated_at, url"
+    "heading_path, content, state, author, line, created_at, updated_at, url, "
+    "chunk_key, chunk_index, end_line, commit_sha, prog_lang"
 )
 
 # _RESULT_COLS column positions (row tuple indices)
@@ -112,7 +114,9 @@ def _row_to_hit(
     (
         _id, source_type, repo, path, issue_no, _comment_id, kind, language,
         heading_path, content, state, author, line, created_at, updated_at, url,
-    ) = row
+    ) = row[:16]
+    extra = (*row[16:21], None, None, None, None, None)[:5]
+    chunk_key, chunk_index, end_line, commit_sha, prog_lang = extra
     snippet = (
         content if len(content) <= snippet_chars else content[:snippet_chars] + "…"
     )
@@ -315,19 +319,21 @@ def _log_search(
                 with conn.cursor() as cur:
                     cur.execute(
                         """
-                        INSERT INTO search_log (query, search_type, caller, top_k, filters, results)
-                        VALUES (%s, %s, %s, %s, %s, %s)
+                        INSERT INTO search_log (query, search_type, caller, top_k, filters, results,
+                                                format_version, original_result_count, removed_result_count)
+                        VALUES (%s, %s, %s, %s, %s::jsonb, %s::jsonb, 2, %s, 0)
                         """,
-                        (query, search_type, caller_val, top_k, filters_json, results_json),
+                        (query, search_type, caller_val, top_k, filters_json, results_json, len(results)),
                     )
         else:
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    INSERT INTO search_log (query, search_type, caller, top_k, filters, results)
-                    VALUES (%s, %s, %s, %s, %s, %s)
+                    INSERT INTO search_log (query, search_type, caller, top_k, filters, results,
+                                            format_version, original_result_count, removed_result_count)
+                    VALUES (%s, %s, %s, %s, %s::jsonb, %s::jsonb, 2, %s, 0)
                     """,
-                    (query, search_type, caller_val, top_k, filters_json, results_json),
+                    (query, search_type, caller_val, top_k, filters_json, results_json, len(results)),
                 )
     except Exception as exc:
         log.warning("Failed to write search log: %s", exc, exc_info=True)
@@ -355,6 +361,70 @@ def prune_search_log(conn: psycopg.Connection, retention_days: int) -> int:
     return deleted
 
 
+SEARCH_LOG_LOCK_CLASS = 0x53484C47  # distinct namespace from sync locks
+SEARCH_LOG_LOCK_OBJECT = 471
+
+
+def _validate_search_transaction(conn: psycopg.Connection) -> None:
+    """Reject transaction modes that cannot protect a search snapshot."""
+    if getattr(conn, "autocommit", False) is True:
+        raise RuntimeError(
+            "search snapshot protection requires an explicit transaction "
+            "(autocommit=False)"
+        )
+    with conn.cursor() as cur:
+        cur.execute("SHOW transaction_isolation")
+        row = cur.fetchone()
+        if row is None:
+            raise RuntimeError("could not read transaction isolation")
+        isolation = row[0]
+        if isolation.lower() != "read committed":
+            raise RuntimeError(
+                "search snapshot protection requires READ COMMITTED isolation"
+            )
+
+
+def _acquire_search_lock(conn: psycopg.Connection) -> None:
+    """Hold the shared xact lock before candidate reads through caller commit."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT pg_advisory_xact_lock_shared(%s, %s)",
+            (SEARCH_LOG_LOCK_CLASS, SEARCH_LOG_LOCK_OBJECT),
+        )
+
+
+def _protect_search_transaction(conn: psycopg.Connection) -> None:
+    _validate_search_transaction(conn)
+    _acquire_search_lock(conn)
+
+
+def _snapshot_result(row: tuple, metrics: dict[str, Any], display_snippet: str) -> dict:
+    """Join ranking metrics to immutable source data from the retrieved row."""
+    padded_row = (*row[:16], *row[16:21], None, None, None, None, None)
+    (rid, source_type, repo, path, issue_no, comment_id, kind, language,
+     heading_path, content, state, author, line, created_at, updated_at, url,
+     chunk_key, chunk_index, end_line, commit_sha, prog_lang) = padded_row[:21]
+    if not isinstance(content, str):
+        raise ValueError("retrieved chunk content must be text")
+    result = {
+        **metrics,
+        "source_type": source_type, "repo": repo, "chunk_key": chunk_key,
+        "chunk_index": chunk_index, "content_snapshot": content,
+        "content_sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+    }
+    for key, value in (
+        ("path", path), ("issue_no", issue_no), ("comment_id", comment_id),
+        ("kind", kind), ("url", url), ("heading_path", heading_path),
+        ("line", line), ("end_line", end_line), ("commit_sha", commit_sha),
+        ("prog_lang", prog_lang),
+    ):
+        if value is not None:
+            result[key] = value
+    if display_snippet != content:
+        result["display_snippet"] = display_snippet
+    return result
+
+
 def keyword_search(
     settings: Settings,
     conn: psycopg.Connection,
@@ -371,6 +441,7 @@ def keyword_search(
     Pass match_all=True for AND behavior (all tokens must match the same chunk — very narrow).
     sort_by/sort_order for backward compat; ranking always relevance-based (issue #69).
     Returns list of Hit objects."""
+    _protect_search_transaction(conn)
     k = top_k or settings.default_top_k
     pool = max(k * 4, 20)
     rows = _keyword_candidates(conn, query, filters, pool, match_all=match_all)
@@ -405,14 +476,10 @@ def keyword_search(
         d["_ranking"] = method
         hits.append(d)
         kr = kw_info[rid]
-        results_to_log.append({
-            "id": rid,
-            "score": round(score, 4),
-            "vec_score": None,
-            "vec_rank": None,
-            "kw_score": kr[1],
-            "kw_rank": kr[0],
-        })
+        results_to_log.append(_snapshot_result(
+            rows_by_id[rid], {"id": rid, "score": round(score, 4),
+            "vec_score": None, "vec_rank": None, "kw_score": kr[1],
+            "kw_rank": kr[0]}, h.snippet))
 
     _log_search(
         settings=settings,
@@ -440,14 +507,16 @@ def semantic_search(
 ) -> list[dict]:
     """Hybrid search. Fuses vector and keyword ranks via RRF.
     Same filtering as keyword_search."""
+    _validate_search_transaction(conn)
     k = top_k or settings.default_top_k
     pool = max(k * 4, 20)
     qvec = embedder.embed_query(query)
+    _acquire_search_lock(conn)
     vec_rows = _vector_candidates(conn, qvec, filters, pool)
     try:
-        kw_rows = _keyword_candidates(conn, query, filters, pool)
+        with conn.transaction():
+            kw_rows = _keyword_candidates(conn, query, filters, pool)
     except psycopg.Error:
-        conn.rollback()
         kw_rows = []  # Ignore pgroonga query syntax errors; return semantic-only results
 
     scores: dict[int, float] = {}
@@ -490,14 +559,12 @@ def semantic_search(
         hits.append(d)
         vr = vec_info.get(rid)
         kr = kw_info.get(rid)
-        results_to_log.append({
-            "id": rid,
-            "score": round(score, 4),
+        results_to_log.append(_snapshot_result(
+            rows_by_id[rid], {"id": rid, "score": round(score, 4),
             "vec_score": vr[1] if vr is not None else None,
             "vec_rank": vr[0] if vr is not None else None,
             "kw_score": kr[1] if kr is not None else None,
-            "kw_rank": kr[0] if kr is not None else None,
-        })
+            "kw_rank": kr[0] if kr is not None else None}, h.snippet))
 
     _log_search(
         settings=settings,

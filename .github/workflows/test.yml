@@ -39,14 +39,33 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      SHIORI_TEST_DATABASE_URL: postgresql://shiori_test:shiori_test@127.0.0.1:55432/shiori_test
     strategy:
       # 3.11の失敗で3.12を巻き添えキャンセルしない（レッグごとに独立して報告する）
       fail-fast: false
       matrix:
         python-version: ["3.11", "3.12"]
-    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+      - name: Start isolated PostgreSQL with required extensions
+        run: |
+          docker build -t shiori-test-db -f docker/db/Dockerfile docker/db
+          docker run -d --name shiori-test-db \
+            -p 127.0.0.1:55432:5432 \
+            -e POSTGRES_DB=shiori_test \
+            -e POSTGRES_USER=shiori_test \
+            -e POSTGRES_PASSWORD=shiori_test \
+            shiori-test-db
+          for attempt in $(seq 1 90); do
+            if docker exec shiori-test-db pg_isready -h 127.0.0.1 -p 5432 -U shiori_test -d shiori_test; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker logs shiori-test-db
+          exit 1
       - name: ネイティブ依存ツールのインストール (ripgrep, universal-ctags)
         run: |
           sudo apt-get update
@@ -64,3 +83,7 @@ jobs:
       - name: pytest の実行
         run: |
           pytest -v --tb=short
+      - name: Stop isolated PostgreSQL
+        if: always()
+        run: |
+          docker rm -f shiori-test-db || true

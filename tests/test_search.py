@@ -348,6 +348,11 @@ class _FakeSearchLogCursor:
         if "DELETE FROM search_log" in sql_str:
             self.rowcount = 5
 
+    def fetchone(self):
+        if self.executed and "transaction_isolation" in self.executed[-1][0]:
+            return ("read committed",)
+        return None
+
     def fetchall(self):
         if not self.executed:
             return list(self.chunk_rows)
@@ -364,9 +369,13 @@ class _FakeSearchLogCursor:
 class _FakeSearchLogConn:
     def __init__(self, cursor):
         self._cursor = cursor
+        self.tx_events: list[str] = []
 
     def cursor(self):
         return self._cursor
+
+    def transaction(self):
+        return _FakeTxCtx(self)
 
     def commit(self):
         pass
@@ -437,7 +446,7 @@ class TestSearchLogging:
 
         insert_calls = [p for s, p in cursor.executed if "INSERT INTO search_log" in s]
         assert len(insert_calls) == 1
-        query, search_type, caller, top_k, filters_json, results_json = insert_calls[0]
+        query, search_type, caller, top_k, filters_json, results_json, original_count = insert_calls[0]
         assert query == "vector query"
         assert search_type == "semantic"
         assert top_k == 5
@@ -452,6 +461,9 @@ class TestSearchLogging:
         assert res[0]["kw_rank"] == 0
         # Fused score is still the RRF value
         assert isinstance(res[0]["score"], float)
+        assert original_count == 1
+        assert res[0]["content_snapshot"] == "semantic content"
+        assert len(res[0]["content_sha256"]) == 64
 
     def test_semantic_search_vector_only_hit(self):
         """Chunk found by vector retriever only: kw_score/kw_rank are null."""
@@ -564,17 +576,19 @@ class TestSearchLogging:
 
         insert_calls = [p for s, p in cursor.executed if "INSERT INTO search_log" in s]
         assert len(insert_calls) == 1
-        query, search_type, caller, top_k, filters_json, results_json = insert_calls[0]
+        query, search_type, caller, top_k, filters_json, results_json, original_count = insert_calls[0]
         assert query == "exact phrase"
         assert search_type == "keyword"
         assert top_k == 3
         assert json.loads(filters_json) == {"repo": "owner/repo"}
         res = json.loads(results_json)
-        assert res == [{
-            "id": 101, "score": 0.88,
-            "vec_score": None, "vec_rank": None,
+        assert len(res) == 1
+        assert {key: res[0][key] for key in ("id", "score", "vec_score", "vec_rank", "kw_score", "kw_rank")} == {
+            "id": 101, "score": 0.88, "vec_score": None, "vec_rank": None,
             "kw_score": 0.88, "kw_rank": 0,
-        }]
+        }
+        assert res[0]["content_snapshot"] == "keyword content"
+        assert original_count == 1
 
     def test_log_write_failure_isolated_and_observable(self, caplog):
         """Criterion 3: Search returns full hits when log write fails, and failure is logged."""
