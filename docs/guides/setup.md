@@ -322,6 +322,12 @@ Run the migration in a safe maintenance window when Docker is known to work:
    ./scripts/install-systemd.sh
    ```
 
+   To validate before merge, run `gh pr checkout <PR番号>` instead of
+   `git pull --ff-only`, then run `./scripts/install-systemd.sh` from that
+   PR checkout. After the PR is merged, switch back to main with
+   `git switch main`, run `git pull --ff-only`, and rerun
+   `./scripts/install-systemd.sh` to update the installation from main.
+
 6. Inspect the effective unit. Check that the main `ExecStart` runs the
    checkout wrapper and that the unit has no duplicate Docker readiness wait
    wired as `ExecStartPre`. Existing unrelated custom `ExecStartPre` commands
@@ -486,16 +492,16 @@ systemd always ignores overdue `OnBootSec` timers. A local diagnostic drop-in
 may exist at
 `~/.config/systemd/user/shiori-mint-mount.timer.d/activation.conf`.
 
-#### Final WSL acceptance (reviewed checkout, maintenance window)
+#### Final WSL acceptance (after merge and deploy)
 
-After installing the reviewed PR checkout during a maintenance window, run this
-procedure from that checkout. Merge is not required before testing. The commands
-below are instructions for the human operator; this documentation change does
-not perform host operations.
+Run this procedure in the main deployment checkout after the PR is merged.
+The commands below are instructions for the human operator; this documentation
+change does not perform host operations.
 
-1. Install the copied user units from the reviewed checkout:
+1. Pull the merged change and install the copied user units:
 
    ```bash
+   git pull --ff-only
    ./scripts/install-systemd.sh
    systemctl --user cat shiori-mint-mount.timer
    ```
