@@ -42,7 +42,6 @@ import re
 import signal
 import subprocess
 import sys
-import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -167,23 +166,6 @@ class HelperScene:
     def configure(self, attempts: list[dict], env_keys: tuple[str, ...] = ()) -> None:
         self._write_config(attempts, env_keys)
         _write_executable(self.docker_bin, _fake_docker_source())
-
-    def create_fake_later(
-        self, attempts: list[dict], delay: float, env_keys: tuple[str, ...] = ()
-    ) -> threading.Thread:
-        """Create the fake binary only after *delay* seconds (CLI-missing test)."""
-        self._write_config(attempts, env_keys)
-        body = _fake_docker_source()
-
-        def worker() -> None:
-            time.sleep(delay)
-            tmp = self.docker_bin.with_name(self.docker_bin.name + ".tmp")
-            _write_executable(tmp, body)
-            os.replace(tmp, self.docker_bin)
-
-        thread = threading.Thread(target=worker, daemon=True)
-        thread.start()
-        return thread
 
     def env(self, **overrides: str) -> dict[str, str]:
         env = os.environ.copy()
@@ -533,25 +515,47 @@ def test_absent_socket_error_is_retried_and_recovers(tmp_path: Path) -> None:
 # ===================================================================
 
 
-def test_missing_cli_is_retried_and_recovers_when_it_appears(tmp_path: Path) -> None:
-    """An absent docker executable is retryable within the same budget."""
-    scene = HelperScene(tmp_path)
-    thread = scene.create_fake_later(
-        [{"stdout": "27.5.1\n", "exit": 0}], delay=0.2
-    )
-    env = scene.env(
-        SHIORI_WAIT_DOCKER_BUDGET_SECONDS="30",
-        SHIORI_WAIT_DOCKER_QUERY_TIMEOUT_SECONDS="1",
-        SHIORI_WAIT_DOCKER_RETRY_INTERVAL_SECONDS="0.1",
+def test_missing_cli_then_present_recovers_deterministically(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The missing CLI is observed, then the next scripted probe succeeds.
+
+    The probe is fully scripted on the fake clock: index 0 raises
+    ``FileNotFoundError`` and index 1 returns a non-empty Server.Version.
+    ``_run_controlled`` records each timeout before invoking the behavior, so
+    the missing probe is always observed -- there is no real-process timing
+    window (such as a fixed delay racing helper startup) that could skip it.
+    Any extra probe call fails the test.
+    """
+
+    def scripted_probe(
+        index: int, timeout: float, clock: "FakeClock"
+    ) -> tuple[int, str, float, str]:
+        if index == 0:
+            raise FileNotFoundError
+        if index == 1:
+            return 0, "27.5.1\n", 0.0, ""
+        raise AssertionError(f"unexpected extra probe call (index {index})")
+
+    result, clock, timeouts, output = _run_controlled(
+        monkeypatch,
+        capsys,
+        {
+            "SHIORI_WAIT_DOCKER_BUDGET_SECONDS": "30",
+            "SHIORI_WAIT_DOCKER_QUERY_TIMEOUT_SECONDS": "1",
+            "SHIORI_WAIT_DOCKER_RETRY_INTERVAL_SECONDS": "0.1",
+        },
+        scripted_probe,
     )
 
-    run = _run_helper(env)
-    thread.join(timeout=5)
-
-    assert not thread.is_alive()
-    assert run.proc.returncode == 0, run.output
-    assert len(scene.calls()) >= 1, scene.calls()
-    _assert_success_log(run)
+    assert result == 0, output
+    assert len(timeouts) == 2
+    assert timeouts == [1.0, 1.0]
+    assert clock.sleeps == pytest.approx([0.1])
+    assert "docker CLI missing" in output
+    assert "success:" in output
+    assert output.index("docker CLI missing") < output.index("success:")
+    assert "Traceback (most recent call last)" not in output
 
 
 def test_missing_cli_exhausts_budget_and_returns_nonzero(
