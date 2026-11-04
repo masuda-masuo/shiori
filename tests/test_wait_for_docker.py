@@ -553,9 +553,38 @@ def test_missing_cli_then_present_recovers_deterministically(
     assert timeouts == [1.0, 1.0]
     assert clock.sleeps == pytest.approx([0.1])
     assert "docker CLI missing" in output
-    assert "success:" in output
-    assert output.index("docker CLI missing") < output.index("success:")
+    success_phrase = "success: Docker server ready after 2 attempt(s)"
+    assert success_phrase in output
+    assert output.index("docker CLI missing") < output.index(success_phrase)
     assert "Traceback (most recent call last)" not in output
+
+
+def test_missing_cli_permanently_absent_real_process_exhausts(tmp_path: Path) -> None:
+    """A real helper subprocess hits the real ENOENT path with no appearance race.
+
+    ``SHIORI_WAIT_DOCKER_BIN`` names a path under ``tmp_path`` that is absent
+    before the helper starts and is never created, so every probe goes through
+    the actual ``subprocess.run`` ENOENT boundary for the whole run.  Unlike a
+    test that swaps in an executable after a fixed delay, nothing can race the
+    helper's startup and skip the missing-CLI observation.
+    """
+    scene = HelperScene(tmp_path)
+    missing_bin = tmp_path / "docker-does-not-exist"
+    env = scene.env(
+        SHIORI_WAIT_DOCKER_BIN=str(missing_bin),
+        SHIORI_WAIT_DOCKER_BUDGET_SECONDS="0.3",
+        SHIORI_WAIT_DOCKER_QUERY_TIMEOUT_SECONDS="0.1",
+        SHIORI_WAIT_DOCKER_RETRY_INTERVAL_SECONDS="0.05",
+    )
+
+    assert not missing_bin.exists()
+    run = _run_helper(env)
+
+    assert not missing_bin.exists()
+    assert run.proc.returncode == 1, run.output
+    assert "docker CLI missing" in run.output
+    assert "exhausted:" in run.output
+    _assert_no_traceback(run)
 
 
 def test_missing_cli_exhausts_budget_and_returns_nonzero(
